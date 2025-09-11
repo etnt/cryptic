@@ -3,6 +3,6 @@
     {vsn, "0.1.0"},
     {registered, []},
     {applications, [kernel, stdlib, asn1, public_key, ssl, crypto, ranch, cowlib, cowboy]},
-    {mod, {cryptic_server, []}},
+    {mod, {cryptic_app, []}},
     {env, []}
 ]}.
