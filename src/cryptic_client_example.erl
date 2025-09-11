@@ -10,25 +10,23 @@ start() ->
     % Start required applications
     application:start(inets),
     application:start(crypto),
-    % Load the cryptic_nif module (which has -on_load directive)
-    code:load_abs("_build/default/lib/cryptic/ebin/cryptic_nif"),
     io:format("Generating keypairs for alice and bob...~n"),
-    
+
     {BPub, BSec} = cryptic_lib:gen_keypair(),
     {_APub, _ASec} = cryptic_lib:gen_keypair(),
-    
+
     % Bob uploads his prekey
     upload_bob_prekey(BPub),
-    
+
     % Alice gets Bob's prekey
     BPubRecv = get_bob_prekey(),
-    
+
     % Alice encrypts and sends message
     send_encrypted_message(BPubRecv),
-    
+
     % Bob receives and decrypts message
     receive_and_decrypt_message(BSec),
-    
+
     ok.
 
 upload_bob_prekey(BPub) ->

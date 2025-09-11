@@ -270,6 +270,12 @@ erl -pa _build/default/lib/*/ebin
 erl -pa _build/default/lib/*/ebin -s cryptic_client_example test -s init stop -noshell
 ```
 
+### Run Tests
+```bash
+# Run comprehensive EUnit test suite
+rebar3 eunit
+```
+
 ### Expected Output
 ```
 Generating keypairs for alice and bob...
