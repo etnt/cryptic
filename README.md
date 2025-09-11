@@ -276,6 +276,293 @@ erl -pa _build/default/lib/*/ebin -s cryptic_client_example test -s init stop -n
 rebar3 eunit
 ```
 
+## Client Library Usage
+
+The `cryptic_client_lib` module provides a high-level API for building E2EE messaging applications. It abstracts away the cryptographic complexity and HTTP communication details.
+
+### Quick Start
+
+```erlang
+%% Initialize the client library
+cryptic_client_lib:init_client().
+
+%% Generate keypairs for users
+{AlicePub, AlicePriv} = cryptic_lib:gen_keypair(),
+{BobPub, BobPriv} = cryptic_lib:gen_keypair().
+
+%% Bob uploads his prekey to the server
+cryptic_client_lib:upload_prekey("http://localhost:8080", "bob", BobPub).
+
+%% Alice sends an encrypted message to Bob
+cryptic_client_lib:send_encrypted_message(
+    "http://localhost:8080", "alice", "bob", BobPub, <<"Hello Bob!">>).
+
+%% Bob receives and decrypts his messages
+{ok, Messages} = cryptic_client_lib:receive_and_decrypt_messages(
+    "http://localhost:8080", "bob", BobPriv).
+```
+
+### API Reference
+
+#### Client Initialization
+
+**`init_client/0`**
+```erlang
+cryptic_client_lib:init_client() -> ok.
+```
+Initializes the client by starting required applications (`inets`, `crypto`) and loading the cryptographic NIF.
+
+#### Prekey Management
+
+**`upload_prekey/3`**
+```erlang
+cryptic_client_lib:upload_prekey(ServerUrl, UserId, PublicKey) -> 
+    ok | {error, Reason}.
+```
+- **ServerUrl**: Base URL of the Cryptic server (e.g., `"http://localhost:8080"`)
+- **UserId**: User identifier (string or binary)
+- **PublicKey**: User's X25519 public key (32 bytes)
+
+**`get_prekey/2`**
+```erlang
+cryptic_client_lib:get_prekey(ServerUrl, UserId) -> 
+    {ok, PublicKey} | {error, Reason}.
+```
+Retrieves a user's public prekey from the server.
+
+#### Message Operations
+
+**`encrypt_message/2`**
+```erlang
+cryptic_client_lib:encrypt_message(Message, RecipientPubKey) -> 
+    {ok, {EphPub, Nonce, Cipher, SharedSecret}} | {error, Reason}.
+```
+- Generates ephemeral keypair automatically
+- Computes shared secret using X25519
+- Derives AEAD key using ephemeral-based HKDF
+- Encrypts message with XChaCha20-Poly1305
+
+**`send_message/6`**
+```erlang
+cryptic_client_lib:send_message(ServerUrl, FromUserId, ToUserId, 
+                                EphPub, Nonce, Cipher) -> 
+    ok | {error, Reason}.
+```
+Sends pre-encrypted message components to the server.
+
+**`receive_messages/2`**
+```erlang
+cryptic_client_lib:receive_messages(ServerUrl, UserId) -> 
+    {ok, [EncryptedBlob]} | {error, Reason}.
+```
+Fetches pending encrypted messages for a user. Returns list of message blobs with structure:
+```erlang
+#{
+    from => "sender_id",
+    ephemeral => "base64_ephemeral_pubkey",
+    nonce => "base64_nonce", 
+    cipher => "base64_ciphertext"
+}
+```
+
+**`decrypt_message/2`**
+```erlang
+cryptic_client_lib:decrypt_message(EncryptedBlob, RecipientPrivKey) -> 
+    {ok, PlainText} | {error, Reason}.
+```
+Decrypts a single message blob using the recipient's private key.
+
+#### High-Level E2E Functions
+
+**`send_encrypted_message/5`**
+```erlang
+cryptic_client_lib:send_encrypted_message(ServerUrl, FromUserId, ToUserId, 
+                                         RecipientPubKey, Message) -> 
+    ok | {error, Reason}.
+```
+Complete send flow: encrypts message and sends to server in one call.
+
+**`receive_and_decrypt_messages/3`**
+```erlang
+cryptic_client_lib:receive_and_decrypt_messages(ServerUrl, UserId, PrivateKey) -> 
+    {ok, [PlainTextMessage]} | {error, Reason}.
+```
+Complete receive flow: fetches all pending messages and decrypts them.
+
+### Usage Patterns
+
+#### Basic Chat Application
+
+```erlang
+-module(my_chat_client).
+-export([start/0]).
+
+start() ->
+    %% Initialize
+    cryptic_client_lib:init_client(),
+    
+    %% Generate user keypairs
+    {MyPub, MyPriv} = cryptic_lib:gen_keypair(),
+    {FriendPub, _} = cryptic_lib:gen_keypair(), % In reality, get from server
+    
+    %% Upload my prekey
+    ok = cryptic_client_lib:upload_prekey(
+        "http://localhost:8080", "me", MyPub),
+    
+    %% Send message to friend
+    ok = cryptic_client_lib:send_encrypted_message(
+        "http://localhost:8080", "me", "friend", FriendPub, 
+        <<"Hello from Erlang!">>),
+    
+    %% Check for messages
+    {ok, Messages} = cryptic_client_lib:receive_and_decrypt_messages(
+        "http://localhost:8080", "me", MyPriv),
+    
+    lists:foreach(fun(Msg) -> 
+        io:format("Received: ~s~n", [Msg]) 
+    end, Messages).
+```
+
+#### Message Loop
+
+```erlang
+message_loop(ServerUrl, UserId, PrivKey) ->
+    timer:sleep(1000), % Poll every second
+    case cryptic_client_lib:receive_and_decrypt_messages(ServerUrl, UserId, PrivKey) of
+        {ok, []} -> 
+            message_loop(ServerUrl, UserId, PrivKey);
+        {ok, Messages} ->
+            lists:foreach(fun(Msg) ->
+                io:format("~s: ~s~n", [UserId, Msg])
+            end, Messages),
+            message_loop(ServerUrl, UserId, PrivKey);
+        {error, Reason} ->
+            io:format("Error receiving messages: ~p~n", [Reason])
+    end.
+```
+
+#### Error Handling Best Practices
+
+```erlang
+send_with_retry(ServerUrl, From, To, RecipientPubKey, Message, Retries) ->
+    case cryptic_client_lib:send_encrypted_message(
+        ServerUrl, From, To, RecipientPubKey, Message) of
+        ok -> 
+            ok;
+        {error, _Reason} when Retries > 0 ->
+            timer:sleep(1000),
+            send_with_retry(ServerUrl, From, To, RecipientPubKey, Message, Retries - 1);
+        {error, Reason} ->
+            {error, {max_retries_exceeded, Reason}}
+    end.
+```
+
+### Security Considerations
+
+#### Key Management
+```erlang
+%% Store private keys securely - never log or expose them
+{PubKey, PrivKey} = cryptic_lib:gen_keypair(),
+
+%% Public keys can be safely shared and stored
+store_public_key(UserId, PubKey),
+
+%% Private keys should be encrypted at rest in production
+SecurePrivKey = encrypt_private_key(PrivKey, UserPassword).
+```
+
+#### Message Validation
+```erlang
+validate_and_decrypt(EncryptedBlob, PrivKey) ->
+    case cryptic_client_lib:decrypt_message(EncryptedBlob, PrivKey) of
+        {ok, PlainText} when byte_size(PlainText) =< 10000 -> % Size limit
+            case is_valid_utf8(PlainText) of
+                true -> {ok, PlainText};
+                false -> {error, invalid_encoding}
+            end;
+        {ok, _} -> {error, message_too_large};
+        {error, Reason} -> {error, Reason}
+    end.
+```
+
+### Integration Examples
+
+#### With OTP GenServer
+```erlang
+-module(chat_client_server).
+-behaviour(gen_server).
+
+-record(state, {
+    server_url,
+    user_id,
+    private_key,
+    contacts = #{} % user_id => public_key
+}).
+
+init([ServerUrl, UserId, PrivateKey]) ->
+    cryptic_client_lib:init_client(),
+    {ok, #state{
+        server_url = ServerUrl,
+        user_id = UserId, 
+        private_key = PrivateKey
+    }}.
+
+handle_call({send_message, ToUserId, Message}, _From, State) ->
+    case maps:get(ToUserId, State#state.contacts, undefined) of
+        undefined ->
+            {reply, {error, contact_not_found}, State};
+        ToPubKey ->
+            Result = cryptic_client_lib:send_encrypted_message(
+                State#state.server_url,
+                State#state.user_id,
+                ToUserId,
+                ToPubKey,
+                Message
+            ),
+            {reply, Result, State}
+    end.
+```
+
+#### Command Line Interface
+```erlang
+main([ServerUrl, UserId]) ->
+    cryptic_client_lib:init_client(),
+    {PubKey, PrivKey} = cryptic_lib:gen_keypair(),
+    
+    %% Upload prekey
+    cryptic_client_lib:upload_prekey(ServerUrl, UserId, PubKey),
+    
+    %% Interactive loop
+    cli_loop(ServerUrl, UserId, PrivKey).
+
+cli_loop(ServerUrl, UserId, PrivKey) ->
+    case io:get_line("Command (send/check/quit): ") of
+        "send\n" ->
+            ToUser = string:trim(io:get_line("To: ")),
+            Message = list_to_binary(string:trim(io:get_line("Message: "))),
+            case get_user_pubkey(ServerUrl, ToUser) of
+                {ok, ToPubKey} ->
+                    cryptic_client_lib:send_encrypted_message(
+                        ServerUrl, UserId, ToUser, ToPubKey, Message),
+                    io:format("Message sent!~n");
+                {error, Reason} ->
+                    io:format("Error: ~p~n", [Reason])
+            end,
+            cli_loop(ServerUrl, UserId, PrivKey);
+        "check\n" ->
+            {ok, Messages} = cryptic_client_lib:receive_and_decrypt_messages(
+                ServerUrl, UserId, PrivKey),
+            lists:foreach(fun(Msg) ->
+                io:format("Message: ~s~n", [Msg])
+            end, Messages),
+            cli_loop(ServerUrl, UserId, PrivKey);
+        "quit\n" ->
+            ok
+    end.
+```
+
+The client library provides a clean, type-safe API that handles all the cryptographic complexity while giving you full control over the messaging flow.
+
 ### Expected Output
 ```
 Generating keypairs for alice and bob...
