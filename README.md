@@ -82,6 +82,118 @@ Cryptic implements a secure messaging system using:
 - **Unique per exchange**: Different ephemeral keys → different AEAD keys
 - **No protocol overhead**: Salt derivation requires no additional data transmission
 
+## Cryptographic Analysis
+
+### Core Algorithms and Security Levels
+
+#### X25519 Key Agreement
+- **Algorithm**: Elliptic Curve Diffie-Hellman over Curve25519
+- **Key Size**: 32 bytes (256 bits)
+- **Security Level**: ~128-bit security
+- **Resistance**: 
+  - Quantum resistance: No (vulnerable to Shor's algorithm)
+  - Classical attacks: Secure against all known attacks
+  - Side-channel resistance: Designed to be constant-time
+- **Standards**: RFC 7748, widely adopted in modern protocols (Signal, WireGuard, TLS 1.3)
+
+#### XChaCha20-Poly1305 AEAD
+- **Encryption**: XChaCha20 stream cipher
+- **Authentication**: Poly1305 MAC
+- **Key Size**: 32 bytes (256 bits)
+- **Nonce Size**: 12 bytes (96 bits) - internally generated
+- **Security Level**: 256-bit security
+- **Properties**:
+  - Authenticated encryption with associated data (AEAD)
+  - Resistance to timing attacks
+  - No block cipher weaknesses (stream cipher)
+  - Large nonce space prevents reuse concerns
+- **Standards**: RFC 8439, ChaCha20-Poly1305 is used in TLS 1.3, SSH, WireGuard
+
+#### HKDF-SHA256 Key Derivation
+- **Hash Function**: SHA-256
+- **Output**: Configurable (we use 32 bytes for AEAD keys)
+- **Security Level**: 256-bit pre-image resistance, 128-bit collision resistance
+- **Properties**:
+  - Extract-and-expand paradigm
+  - Cryptographically strong key stretching
+  - Deterministic output for same inputs
+  - Info parameter provides domain separation
+- **Standards**: RFC 5869, used in TLS 1.3, Signal Protocol, WireGuard
+
+### Security Assessment
+
+#### Overall Security Level
+The system provides **128-bit security** (limited by X25519), which is:
+- ✅ **Sufficient** for current threat models (2024-2040+ timeframe)
+- ✅ **Recommended** by NIST, NSA, and other security agencies
+- ✅ **Future-resistant** against classical computers
+- ❌ **Quantum-vulnerable** (Grover's algorithm reduces to ~64-bit effective security)
+
+#### Algorithm Security Ratings
+
+| Algorithm | Security Level | Quantum Resistance | Standards Adoption | Status |
+|-----------|----------------|-------------------|-------------------|---------|
+| X25519 | 128-bit | ❌ No | ✅ High (RFC 7748) | Excellent |
+| XChaCha20-Poly1305 | 256-bit | 🟡 Partial* | ✅ High (RFC 8439) | Excellent |
+| HKDF-SHA256 | 256-bit | 🟡 Partial* | ✅ High (RFC 5869) | Excellent |
+
+*Symmetric algorithms have some quantum resistance (Grover's algorithm only provides quadratic speedup)
+
+#### Key Strengths
+1. **Battle-tested algorithms**: All algorithms are extensively analyzed and widely deployed
+2. **Conservative choices**: No experimental or bleeding-edge cryptography
+3. **Constant-time implementations**: Libsodium provides side-channel resistant implementations
+4. **Forward secrecy**: Ephemeral keys ensure past message security
+5. **Authenticated encryption**: Prevents tampering and provides confidentiality
+
+#### Known Limitations
+1. **Quantum vulnerability**: X25519 will be broken by sufficiently large quantum computers
+2. **Single prekey**: No key rotation mechanism (production systems should implement X3DH)
+3. **No post-quantum algorithms**: Not resistant to future quantum attacks
+4. **Replay protection**: Messages could theoretically be replayed (lack of ordering)
+
+### Post-Quantum Considerations
+
+For quantum-resistant messaging, consider upgrading to:
+- **Key Exchange**: Kyber768 or other NIST PQC winners
+- **Signatures**: Dilithium3 for authentication (not currently used)
+- **Hybrid approach**: Combine classical (X25519) with post-quantum algorithms
+
+### Comparison with Industry Standards
+
+#### Signal Protocol
+- ✅ **Key Agreement**: Both use X25519
+- ✅ **Encryption**: Both use ChaCha20-Poly1305 family
+- ❌ **Key Management**: Signal uses X3DH + Double Ratchet (more sophisticated)
+- ❌ **Authentication**: Signal includes identity verification
+
+#### TLS 1.3
+- ✅ **Key Agreement**: Both support X25519
+- ✅ **Encryption**: Both support ChaCha20-Poly1305
+- ✅ **Key Derivation**: Both use HKDF-SHA256
+- ✅ **Forward Secrecy**: Both use ephemeral keys
+
+#### WireGuard VPN
+- ✅ **Key Agreement**: Both use X25519
+- ✅ **Encryption**: Both use ChaCha20-Poly1305
+- ✅ **Key Derivation**: Both use HKDF
+- ❌ **Transport**: WireGuard is UDP-based, we use HTTP
+
+### Implementation Security Notes
+
+#### Libsodium Advantages
+- **Audited implementation**: Extensively reviewed cryptographic library
+- **Side-channel protection**: Constant-time implementations
+- **Memory safety**: Secure memory handling and clearing
+- **API safety**: Difficult to misuse interfaces
+
+#### NIF Security Considerations
+- **Memory management**: Proper cleanup of sensitive data
+- **Error handling**: Secure failure modes
+- **Resource limits**: Bounded input sizes to prevent DoS
+
+The cryptographic foundation of this system is **solid and production-ready** for current threat models, with the main limitation being eventual quantum computer threats.
+
 ## Project Structure
 
 ```
