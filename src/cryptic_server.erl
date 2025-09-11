@@ -17,14 +17,13 @@ stop(_State) ->
 start_http() ->
     Dispatch =
         cowboy_router:compile([{'_',
-                                [{"/upload_prekey", cryptic_handlers, upload_prekey},
-                                 {"/get_prekey/[...]", cryptic_handlers, get_prekey},
+                                [{"/upload_prekey/:user_id", cryptic_handlers, upload_prekey},
+                                 {"/get_prekey/:user_id", cryptic_handlers, get_prekey},
                                  {"/send_blob", cryptic_handlers, send_blob},
-                                 {"/recv_blobs/[...]", cryptic_handlers, recv_blobs}]}]),
+                                 {"/recv_blobs/:user_id", cryptic_handlers, recv_blobs}]}]),
     {ok, _} =
         cowboy:start_clear(http_listener,
-                           100,
-                           #{port => 8080},
+                           [{port, 8080}],
                            #{env => #{dispatch => Dispatch}}),
     io:format("Server running at http://localhost:8080~n"),
     ok.

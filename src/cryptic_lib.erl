@@ -1,28 +1,64 @@
 -module(cryptic_lib).
 
--export([gen_keypair/0, scalarmult/2, aead_encrypt/3, aead_decrypt/3, rand_bytes/1]).
+-export([
+    gen_keypair/0,
+    scalarmult/2,
+    aead_encrypt/3,
+    aead_decrypt/4,
+    rand_bytes/1,
+    hkdf_sha256/3,
+    hkdf_sha256/4,
+    derive_aead_key_random/1,
+    derive_aead_key_ephemeral/2,
+    derive_aead_key_simple/1
+]).
 
-%% Use salty NIF functions (wraps libsodium)
-%% gen_keypair returns {PubBin, PrivBin} for X25519 using crypto_box_keypair-style
+%% Use our custom NIF functions (wraps libsodium)
+%% gen_keypair returns {PubBin, PrivBin} for X25519
 
 gen_keypair() ->
-    %% salty:crypto_box_keypair returns {Public, Secret}
-    {Pub, Sec} = salty:crypto_box_keypair(),
-    {Pub, Sec}.
+    %% Our NIF returns {Public, Secret}
+    cryptic_nif:gen_keypair().
 
 scalarmult(Priv, Pub) ->
-    %% X25519 scalar multiplication: salty:crypto_scalarmult
-    %% salty uses binary buffers
-    salty:crypto_scalarmult(Priv, Pub).
+    %% X25519 scalar multiplication via our NIF
+    cryptic_nif:scalarmult(Priv, Pub).
 
 aead_encrypt(Plain, Key, AAD) ->
-    %% Use XChaCha20-Poly1305 IETF (24-byte nonce)
-    Nonce = rand_bytes(24),
-    Cipher = salty:crypto_aead_xchacha20poly1305_ietf_encrypt(Plain, AAD, Nonce, Key),
-    {Cipher, Nonce}.
+    %% Use ChaCha20-Poly1305 IETF via our NIF
+    %% NIF generates nonce internally and returns {Cipher, Nonce}
+    cryptic_nif:aead_encrypt(Plain, Key, AAD).
 
 aead_decrypt(Cipher, Key, Nonce, AAD) ->
-    salty:crypto_aead_xchacha20poly1305_ietf_decrypt(Cipher, AAD, Nonce, Key).
+    %% ChaCha20-Poly1305 IETF decryption via our NIF
+    cryptic_nif:aead_decrypt(Cipher, Key, Nonce, AAD).
 
 rand_bytes(N) ->
-    salty:randombytes_buf(N).
+    %% Generate cryptographically secure random bytes via our NIF
+    cryptic_nif:rand_bytes(N).
+
+%% HKDF-SHA256 key derivation
+hkdf_sha256(IKM, Info, L) ->
+    hkdf_sha256(IKM, <<>>, Info, L).
+
+%% HKDF-SHA256 with explicit salt parameter  
+hkdf_sha256(IKM, Salt, Info, L) ->
+    PRK = crypto:mac(hmac, sha256, Salt, IKM),
+    T1 = crypto:mac(hmac, sha256, PRK, <<Info/binary, 1:8>>),
+    %% For 32-byte output, single iteration is sufficient
+    binary:part(T1, 0, L).
+
+%% Derive AEAD key with random salt (most secure)
+derive_aead_key_random(SharedSecret) ->
+    Salt = rand_bytes(32),
+    AeadKey = hkdf_sha256(SharedSecret, Salt, <<"encryption">>, 32),
+    {AeadKey, Salt}.
+
+%% Derive AEAD key with ephemeral-based salt (good compromise)
+derive_aead_key_ephemeral(SharedSecret, EphemeralPubKey) ->
+    Salt = crypto:hash(sha256, EphemeralPubKey),
+    hkdf_sha256(SharedSecret, Salt, <<"encryption">>, 32).
+
+%% Derive AEAD key with empty salt (current approach - least secure)
+derive_aead_key_simple(SharedSecret) ->
+    hkdf_sha256(SharedSecret, <<"encryption">>, 32).
