@@ -53,6 +53,7 @@
     %% Prekey management
     upload_prekey/3,
     get_prekey/2,
+    list_users/1,
     
     %% Message operations
     encrypt_message/2,
@@ -67,6 +68,7 @@
     format_send_blob_request/5,
     parse_recv_blobs_response/1,
     parse_get_prekey_response/1,
+    parse_users_list_response/1,
     
     %% E2E flow helpers
     send_encrypted_message/5,
@@ -120,8 +122,6 @@
 init_client() ->
     application:ensure_all_started(inets),
     application:ensure_all_started(crypto),
-    %% Load the cryptic_nif module
-    code:load_abs("_build/default/lib/cryptic/ebin/cryptic_nif"),
     ok.
 
 %%%===================================================================
@@ -189,6 +189,35 @@ get_prekey(ServerUrl, UserId) ->
                     {ok, base64:decode(PubKeyB64)};
                 nomatch ->
                     {error, invalid_response}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @doc List all users who have uploaded prekeys to the server.
+%%
+%% Retrieves a list of all usernames that have registered prekeys on the server.
+%% This is useful for discovering available users for messaging.
+%%
+%% == Example ==
+%% ```
+%% {ok, Users} = cryptic_client_lib:list_users("http://localhost:8080"),
+%% %% Users = ["alice", "bob", "charlie"]
+%% '''
+%%
+%% @param ServerUrl The URL of the cryptic server
+%% @returns `{ok, [string()]}' with list of usernames, or `{error, term()}' on failure
+-spec list_users(server_url()) -> {ok, [string()]} | {error, term()}.
+list_users(ServerUrl) ->
+    Url = lists:flatten(io_lib:format("~s/list_users", [ServerUrl])),
+    
+    case httpc:request(get, {Url, []}, [], []) of
+        {ok, {_, _, RespData}} ->
+            case parse_users_list_response(RespData) of
+                {ok, Users} ->
+                    {ok, Users};
+                {error, Reason} ->
+                    {error, Reason}
             end;
         {error, Reason} ->
             {error, Reason}
@@ -754,6 +783,41 @@ parse_get_prekey_response(RespStr) ->
                 {ok, PubKey};
             nomatch ->
                 {error, invalid_response}
+        end
+    catch
+        _:_ ->
+            {error, parse_error}
+    end.
+
+%% @doc Parse the JSON response from the `/list_users' endpoint.
+%%
+%% Parses a JSON array of usernames from the server's list_users endpoint.
+%% The expected format is: `["alice", "bob", "charlie"]'
+%%
+%% == Example ==
+%% ```
+%% {ok, Users} = cryptic_client_lib:parse_users_list_response("[\"alice\",\"bob\"]"),
+%% %% Users = ["alice", "bob"]
+%% '''
+%%
+%% @param RespStr The JSON response string from the server
+%% @returns `{ok, [string()]}' with list of usernames, or `{error, term()}' on parse failure
+%%   Common error reasons include `invalid_response' and `parse_error'.
+-spec parse_users_list_response(string()) -> {ok, [string()]} | {error, term()}.
+parse_users_list_response(RespStr) ->
+    try
+        case string:trim(RespStr) of
+            "[]" ->
+                {ok, []};
+            _ ->
+                %% Use regex to extract all quoted strings from the JSON array
+                case re:run(RespStr, "\"([^\"]+)\"", [global, {capture, [1], list}]) of
+                    {match, Matches} ->
+                        Users = [lists:flatten(Match) || [Match] <- Matches],
+                        {ok, Users};
+                    nomatch ->
+                        {error, invalid_response}
+                end
         end
     catch
         _:_ ->

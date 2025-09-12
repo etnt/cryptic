@@ -109,6 +109,33 @@ init(Req, recv_blobs) ->
             {ok, cowboy_req:reply(400, 
                 #{<<"content-type">> => <<"application/json">>}, 
                 ErrorResp5, Req), state}
+    end;
+
+%% Handler for listing all users with prekeys
+init(Req = #{method := <<"GET">>}, list_users) ->
+    try
+        %% Get all users from the prekeys table
+        AllUsers = ets:tab2list(prekeys),
+        UserNames = [UserId || {UserId, _PubKey} <- AllUsers],
+        
+        %% Create JSON response with user list
+        UsersJson = case UserNames of
+            [] ->
+                <<"[]">>;
+            _ ->
+                UserNamesStr = string:join([io_lib:format("\"~s\"", [User]) || User <- UserNames], ","),
+                iolist_to_binary(["[", UserNamesStr, "]"])
+        end,
+        
+        {ok, cowboy_req:reply(200, 
+            #{<<"content-type">> => <<"application/json">>}, 
+            UsersJson, Req), state}
+    catch
+        _:_Error ->
+            ErrorResp = <<"{\"error\":\"failed to list users\"}">>,
+            {ok, cowboy_req:reply(500, 
+                #{<<"content-type">> => <<"application/json">>}, 
+                ErrorResp, Req), state}
     end.
 
 %% Simple JSON parsing helpers (VERY minimal; assumes no escapes)

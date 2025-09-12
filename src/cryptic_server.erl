@@ -73,7 +73,8 @@ start_http() ->
                                 [{"/upload_prekey/:user_id", cryptic_handlers, upload_prekey},
                                  {"/get_prekey/:user_id", cryptic_handlers, get_prekey},
                                  {"/send_blob", cryptic_handlers, send_blob},
-                                 {"/recv_blobs/:user_id", cryptic_handlers, recv_blobs}]}]),
+                                 {"/recv_blobs/:user_id", cryptic_handlers, recv_blobs},
+                                 {"/list_users", cryptic_handlers, list_users}]}]),
     {ok, _} =
         cowboy:start_clear(http_listener,
                            [{port, 8080}],
