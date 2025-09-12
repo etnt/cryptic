@@ -1,10 +1,3 @@
 #!/bin/bash
 
-RLWRAP=$(which rlwrap)
-if [ -n "$RLWRAP" ]; then
-    rlwrap "$(cd "$(dirname "$0")" && cd .. && pwd)/scripts/cryptic.escript"
-else
-    "$(cd "$(dirname "$0")" && cd .. && pwd)/scripts/cryptic.escript"
-fi
-
-    
+erl -pa _build/default/lib/*/ebin -eval "cryptic_cecho_ui:start()." -noinput

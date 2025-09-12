@@ -1,15 +1,82 @@
 # Cryptic - End-to-End Encrypted Chat System
 
-A proof-of-concept implementation of an end-to-end encrypted chat system built in Erlang/OTP, demonstrating modern cryptographic protocols and secure message exchange.
+A proof-of-concept implementation of an end-to-end encrypted chat system built in Erlang/OTP, featuring a professional terminal UI and demonstrating modern cryptographic protocols for secure message exchange.
 
 ## Overview
 
 Cryptic implements a secure messaging system using:
 - **X25519** key agreement for establishing shared secrets
-- **XChaCha20-Poly1305** AEAD encryption for message confidentiality and authenticity
-- **HKDF-SHA256** key derivation with ephemeral-based salts for enhanced security
+- **ChaCha20-Poly1305** AEAD encryption for message confidentiality and authenticity
+- **HKDF-SHA256** key derivation with multiple security strategies
 - **HTTP REST API** for prekey distribution and message delivery
 - **Forward secrecy** through ephemeral keys for each message exchange
+- **Professional Terminal UI** with real-time chat capabilities
+- **Color-coded interface** for enhanced user experience
+
+## Quick Start
+
+### Terminal UI Mode
+```bash
+# Start the server
+$ rebar3 shell
+
+# Or:
+$ erl -pa _build/default/lib/*/ebin
+1> cryptic_server:start().
+
+# In another terminal(s), start the UI
+$ ./bin/cryptic
+
+# Or:
+$ erl -pa _build/default/lib/*/ebin
+1> cryptic_cecho_ui:start().
+
+# Follow the on-screen instructions:
+# 1. Register with: register <username>
+# 2. Send messages with: send <user> <message>
+# 3. Enter chat mode with: chat <user>
+# 4. Use help command for more options
+```
+
+### UI Commands
+- **`help`** - Show available commands
+- **`register <username>`** - Register with the server
+- **`send <user> <message>`** - Send encrypted message
+- **`chat <user>`** - Enter real-time chat mode
+- **`inbox`** - Check for new messages manually
+- **`list_users`** - Show all registered users
+- **`quit`** - Exit the application
+
+### Chat Mode Commands
+Once in chat mode with `chat <username>`:
+- **Type any message** - Sends directly to chat target
+- **`:exit`** - Leave chat mode
+- **`:help`** - Show chat-specific help
+
+## Features
+
+### Terminal User Interface
+- **Full-screen terminal UI** with ncurses-based interface using cecho
+- **Real-time chat mode** for one-on-one conversations with automatic message polling
+- **Command-based interface** with comprehensive help system
+- **Color-coded messages** for better visual organization
+- **Status bar** showing server connection, user info, and undelivered message count
+- **Background message peeking** for non-intrusive notifications
+- **Context-sensitive help** that changes based on current mode
+
+### Cryptographic Security
+- **End-to-end encryption** using industry-standard algorithms
+- **Perfect forward secrecy** with ephemeral keys
+- **Multiple key derivation strategies** for different security/usability trade-offs
+- **Authenticated encryption** preventing tampering and ensuring confidentiality
+- **Libsodium integration** for battle-tested cryptographic implementations
+
+### User Experience
+- **Interactive registration** with server
+- **Real-time message delivery** in chat mode
+- **Message count notifications** without consuming messages
+- **Command history** and input handling
+- **Graceful error handling** with user-friendly messages
 
 ## Architecture
 
@@ -21,7 +88,7 @@ Cryptic implements a secure messaging system using:
 │    ephemeral│                    │    prekey   │
 │    keypair  │                    │             │
 │             │   2. Get prekey    │             │
-│             │◄─────────────────── │             │
+│             │◄────────────────── │             │
 │             │                    │             │
 │ 3. Compute  │                    │             │
 │    shared   │                    │             │
@@ -52,9 +119,9 @@ Cryptic implements a secure messaging system using:
 - The ephemeral public key as salt ensures unique keys for each message exchange
 
 ### 3. Message Encryption
-- Alice encrypts her message using XChaCha20-Poly1305:
+- Alice encrypts her message using ChaCha20-Poly1305:
   ```
-  {ciphertext, nonce} = XChaCha20-Poly1305-Encrypt(message, aead_key, "")
+  {ciphertext, nonce} = ChaCha20-Poly1305-Encrypt(message, aead_key, "")
   ```
 - The encrypted blob contains: ephemeral public key, nonce, and ciphertext
 
@@ -72,7 +139,7 @@ Cryptic implements a secure messaging system using:
 
 ### Cryptographic Strength
 - **X25519**: Elliptic curve Diffie-Hellman with Curve25519 (128-bit security)
-- **XChaCha20-Poly1305**: Authenticated encryption with 256-bit keys
+- **ChaCha20-Poly1305**: Authenticated encryption with 256-bit keys
 - **HKDF-SHA256**: Cryptographically strong key derivation
 - **Libsodium**: Battle-tested cryptographic library via NIF
 
@@ -96,8 +163,8 @@ Cryptic implements a secure messaging system using:
   - Side-channel resistance: Designed to be constant-time
 - **Standards**: RFC 7748, widely adopted in modern protocols (Signal, WireGuard, TLS 1.3)
 
-#### XChaCha20-Poly1305 AEAD
-- **Encryption**: XChaCha20 stream cipher
+#### ChaCha20-Poly1305 AEAD
+- **Encryption**: ChaCha20 stream cipher
 - **Authentication**: Poly1305 MAC
 - **Key Size**: 32 bytes (256 bits)
 - **Nonce Size**: 12 bytes (96 bits) - internally generated
@@ -134,7 +201,7 @@ The system provides **128-bit security** (limited by X25519), which is:
 | Algorithm | Security Level | Quantum Resistance | Standards Adoption | Status |
 |-----------|----------------|-------------------|-------------------|---------|
 | X25519 | 128-bit | ❌ No | ✅ High (RFC 7748) | Excellent |
-| XChaCha20-Poly1305 | 256-bit | 🟡 Partial* | ✅ High (RFC 8439) | Excellent |
+| ChaCha20-Poly1305 | 256-bit | 🟡 Partial* | ✅ High (RFC 8439) | Excellent |
 | HKDF-SHA256 | 256-bit | 🟡 Partial* | ✅ High (RFC 5869) | Excellent |
 
 *Symmetric algorithms have some quantum resistance (Grover's algorithm only provides quadratic speedup)
@@ -206,9 +273,12 @@ cryptic/
 │   ├── cryptic.app.src         # OTP application metadata
 │   ├── cryptic_server.erl      # HTTP server with Cowboy routing
 │   ├── cryptic_handlers.erl    # HTTP request handlers
-│   ├── cryptic_lib.erl         # High-level crypto API and HKDF
-│   ├── cryptic_nif.erl         # NIF interface definitions
-│   └── cryptic_client_example.erl # E2EE client demonstration
+│   ├── cryptic_lib.erl         # Core cryptographic functions
+│   ├── cryptic_client_lib.erl  # High-level client API
+│   ├── cryptic_cecho_ui.erl    # Terminal user interface
+│   └── cryptic_nif.erl         # NIF interface definitions
+├── test/
+│   └── cryptic_e2e_test.erl    # End-to-end test suite
 ├── c_src/
 │   ├── cryptic_nif.c           # Libsodium NIF implementation
 │   └── Makefile                # NIF compilation rules
@@ -228,6 +298,10 @@ cryptic/
 - `POST /send_blob` - Send an encrypted message blob
 - `GET /recv_blobs/{user_id}` - Retrieve pending encrypted messages
 
+### User Management
+- `GET /list_users` - List all registered users
+- `GET /peek_messages/{user_id}` - Check message count without consuming messages
+
 ### Message Format
 ```json
 {
@@ -245,6 +319,7 @@ cryptic/
 - Erlang/OTP 27+
 - Libsodium development libraries
 - Rebar3 build tool
+- cecho (Erlang ncurses library) - automatically installed via rebar3
 
 ### Build
 ```bash
@@ -264,9 +339,34 @@ erl -pa _build/default/lib/*/ebin
 1> cryptic_server:start().
 ```
 
+### Start Terminal UI
+```bash
+# Terminal 2: Start the interactive terminal UI
+erl -pa _build/default/lib/*/ebin
+1> cryptic_cecho_ui:start().
+
+# Or connect to a different server
+1> cryptic_cecho_ui:start("http://example.com:8080").
+```
+
+### Terminal UI Usage
+Once the UI starts, you'll see a full-screen interface with:
+- **Status bar** at the top showing server, user, and message info
+- **Message area** in the middle displaying conversation history  
+- **Help bar** showing available commands
+- **Input line** at the bottom for typing commands
+
+**Basic workflow:**
+1. Register: `register myusername`
+2. Send message: `send otherusername Hello there!`
+3. Enter chat mode: `chat otherusername`
+4. In chat mode, just type messages directly
+5. Exit chat mode: `:exit`
+6. Quit application: `quit`
+
 ### Run Client Demo
 ```bash
-# Terminal 2: Run the client example
+# Terminal 3: Run the programmatic client example
 erl -pa _build/default/lib/*/ebin -s cryptic_client_example test -s init stop -noshell
 ```
 
@@ -385,9 +485,16 @@ Complete send flow: encrypts message and sends to server in one call.
 **`receive_and_decrypt_messages/3`**
 ```erlang
 cryptic_client_lib:receive_and_decrypt_messages(ServerUrl, UserId, PrivateKey) -> 
-    {ok, [PlainTextMessage]} | {error, Reason}.
+    {ok, [{FromUser, PlainTextMessage}]} | {error, Reason}.
 ```
-Complete receive flow: fetches all pending messages and decrypts them.
+Complete receive flow: fetches all pending messages and decrypts them. Returns a list of tuples containing the sender and decrypted message text.
+
+**`peek_message_count/2`**
+```erlang
+cryptic_client_lib:peek_message_count(ServerUrl, UserId) -> 
+    {ok, Count} | {error, Reason}.
+```
+Check the number of undelivered messages without consuming them. Useful for notifications and status displays.
 
 ### Usage Patterns
 
@@ -584,9 +691,17 @@ Bob decrypted message: <<"Hello Bob!">>
 The system uses a custom C NIF that wraps libsodium functions:
 - `gen_keypair/0` - Generate X25519 keypair
 - `scalarmult/2` - X25519 scalar multiplication
-- `aead_encrypt/3` - XChaCha20-Poly1305 encryption
-- `aead_decrypt/4` - XChaCha20-Poly1305 decryption
+- `aead_encrypt/3` - ChaCha20-Poly1305 encryption
+- `aead_decrypt/4` - ChaCha20-Poly1305 decryption
 - `rand_bytes/1` - Cryptographically secure random bytes
+
+### Terminal UI Architecture
+The cecho-based UI uses an event-driven architecture:
+- **Main event loop** processes user input and system events
+- **Input handler process** captures keyboard input asynchronously
+- **Status updater process** refreshes the status bar periodically
+- **Auto-peek timer** checks for new messages in the background
+- **Chat poll timer** provides real-time messaging in chat mode
 
 ### HKDF Implementation
 Pure Erlang implementation of HKDF-SHA256:
@@ -619,6 +734,40 @@ For production use, consider adding:
 - Key rotation mechanisms
 - Multiple prekeys per user (X3DH protocol)
 - Perfect forward secrecy with Double Ratchet
+- Message delivery receipts and read confirmations
+- Group messaging capabilities
+- File transfer support
+
+## UI Screenshots
+
+The terminal interface provides a professional chat experience:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CRYPTIC CHAT | Server: http://localhost:8080 | User: alice | Chat with: bob | │
+│              | Undelivered: 2 | 14:23:45                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ === CRYPTIC CHAT ===                                                        │
+│ Server: http://localhost:8080                                               │
+│ Successfully registered as: alice                                           │
+│ Entering chat mode with bob. Type ':exit' to leave chat mode.              │
+│ bob: Hello Alice! How are you?                                              │
+│ You -> bob: I'm doing great, thanks for asking!                            │
+│ bob: That's wonderful to hear.                                              │
+│                                                                              │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Chat Mode: Type message to send | :exit to leave chat | :help for commands  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ > Great! Let me tell you about my day...                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Features visible in the interface:**
+- **Status bar** shows server, current user, chat target, and message count
+- **Message area** displays conversation with color-coded messages
+- **Help bar** provides context-sensitive command information
+- **Input line** shows current typing with prompt
 
 ## Testing Different Security Modes
 

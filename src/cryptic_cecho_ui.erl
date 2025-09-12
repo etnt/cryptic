@@ -1,3 +1,63 @@
+%%% @doc Cryptic Chat Terminal User Interface
+%%%
+%%% This module provides a full-screen terminal-based user interface for the
+%%% Cryptic chat application using the cecho (ncurses) library. It implements
+%%% a modern chat interface with real-time messaging, status updates, and
+%%% interactive features.
+%%%
+%%% == Features ==
+%%%
+%%% <ul>
+%%%   <li>Full-screen terminal UI with status bar, message area, and input line</li>
+%%%   <li>Real-time chat mode for one-on-one conversations</li>
+%%%   <li>Automatic message count peeking without consuming messages</li>
+%%%   <li>Color-coded message display for better readability</li>
+%%%   <li>Command-based interface with help system</li>
+%%%   <li>Background polling for new messages in chat mode</li>
+%%%   <li>Persistent message history during session</li>
+%%% </ul>
+%%%
+%%% == Architecture ==
+%%%
+%%% The UI uses a main event loop with helper processes:
+%%% <ul>
+%%%   <li>`ui_main_loop/1' - Main event processing loop</li>
+%%%   <li>`input_handler/1' - Dedicated process for keyboard input</li>
+%%%   <li>`status_updater/1' - Timer-based status bar updates</li>
+%%%   <li>Auto-peek timer - Background message count checking</li>
+%%%   <li>Chat poll timer - Real-time message polling in chat mode</li>
+%%% </ul>
+%%%
+%%% == Screen Layout ==
+%%%
+%%% ```
+%%% +--------------------------------------------------+
+%%% | Status Bar (server, user, chat mode, messages)  |
+%%% +--------------------------------------------------+
+%%% |                                                  |
+%%% |            Message Display Area                  |
+%%% |         (scrollable message history)            |
+%%% |                                                  |
+%%% +--------------------------------------------------+
+%%% | Help Bar (context-sensitive commands)           |
+%%% +--------------------------------------------------+
+%%% | > Input Line                                     |
+%%% +--------------------------------------------------+
+%%% '''
+%%%
+%%% == Usage ==
+%%%
+%%% ```
+%%% %% Start with default server
+%%% cryptic_cecho_ui:start().
+%%%
+%%% %% Start with custom server
+%%% cryptic_cecho_ui:start("http://example.com:8080").
+%%% '''
+%%%
+%%% @author Cryptic Team
+%%% @version 1.0
+%%% @since 2025-09-12
 -module(cryptic_cecho_ui).
 
 %% Public API
@@ -11,7 +71,23 @@
 %% Peek interval in milliseconds
 -define(PEEK_INTERVAL, 5000).
 
-%% Chat state record
+%% @doc Chat state record containing server connection and user information.
+%%
+%% This record maintains the core state for chat operations including
+%% server connection details, user authentication, and message monitoring.
+%%
+%% @type chat_state() = #chat_state{
+%%   server_url :: string(),
+%%   current_user :: string() | undefined,
+%%   keypair :: {binary(), binary()} | undefined,
+%%   user_cache :: #{string() => binary()},
+%%   peek_enabled :: boolean(),
+%%   peek_interval :: pos_integer(),
+%%   peek_timer :: timer:tref() | undefined,
+%%   storage_initialized :: boolean(),
+%%   last_peek_check :: calendar:datetime() | undefined,
+%%   undelivered_count :: non_neg_integer()
+%% }.
 -record(chat_state, {
     server_url = "http://localhost:8080" :: string(),
     current_user :: string() | undefined,
@@ -27,7 +103,25 @@
     undelivered_count = 0 :: non_neg_integer()    % Number of undelivered messages
 }).
 
-%% UI State record
+%% @doc UI state record containing screen layout and interaction state.
+%%
+%% This record manages all UI-specific state including screen dimensions,
+%% message display, input handling, and chat mode operations.
+%%
+%% @type ui_state() = #ui_state{
+%%   chat_state :: #chat_state{},
+%%   screen_height :: integer(),
+%%   screen_width :: integer(),
+%%   message_history :: [{string(), string(), string()}],
+%%   scroll_position :: integer(),
+%%   command_history :: [string()],
+%%   current_input :: string(),
+%%   input_pid :: pid(),
+%%   status_pid :: pid(),
+%%   chat_mode :: boolean(),
+%%   chat_target :: string() | undefined,
+%%   chat_poll_timer :: timer:tref() | undefined
+%% }.
 -record(ui_state, {
     chat_state :: #chat_state{},
     screen_height :: integer(),
@@ -59,10 +153,32 @@
 %%%===================================================================
 
 %% @doc Start the cecho-based UI with default server.
+%%
+%% Initializes the terminal UI with the default localhost server.
+%% This is equivalent to calling `start("http://localhost:8080")'.
+%%
+%% @returns `ok' when the UI exits normally.
 start() ->
     start("http://localhost:8080").
 
 %% @doc Start the cecho-based UI with specified server.
+%%
+%% Initializes the full-screen terminal interface including:
+%% <ul>
+%%   <li>ncurses/cecho initialization with color support</li>
+%%   <li>Screen layout setup (status, message, help, input areas)</li>
+%%   <li>Background processes for input handling and status updates</li>
+%%   <li>Auto-peek timer for undelivered message notifications</li>
+%%   <li>Main event loop for user interaction</li>
+%% </ul>
+%%
+%% The UI will display welcome messages and enter the main interaction loop.
+%% Users can register, send messages, enter chat mode, and perform other
+%% operations through the command interface.
+%%
+%% @param ServerUrl Base URL of the Cryptic server (e.g., "http://localhost:8080")
+%% @returns `ok' when the UI exits normally.
+%% @throws Any exception that occurs during initialization or operation.
 -spec start(string()) -> ok.
 start(ServerUrl) ->
     %% Start cecho first (handles ncurses initialization)
@@ -148,7 +264,22 @@ start(ServerUrl) ->
 %%%===================================================================
 
 %% @private
-%% @doc Main UI event loop.
+%% @doc Main UI event loop handling user interactions and background tasks.
+%%
+%% This is the central event processing loop that handles:
+%% <ul>
+%%   <li>`{input, Input}' - User keyboard input from input_handler process</li>
+%%   <li>`{status_update}' - Periodic status bar refresh from status_updater</li>
+%%   <li>`auto_peek' - Background message count checking</li>
+%%   <li>`chat_poll' - Real-time message polling in chat mode</li>
+%%   <li>`quit' - Graceful shutdown request</li>
+%% </ul>
+%%
+%% The loop ensures the UI remains responsive while handling background
+%% operations like message polling and status updates.
+%%
+%% @param UIState Current UI state record
+%% @returns `ok' when the loop exits gracefully.
 ui_main_loop(UIState) ->
     receive
         {input, Input} ->
@@ -226,7 +357,13 @@ ui_main_loop(UIState) ->
 %%%===================================================================
 
 %% @private
-%% @doc Position cursor in the input area.
+%% @doc Position cursor in the input area at the end of current input.
+%%
+%% Calculates the correct cursor position based on the prompt length
+%% and current input text, then moves the terminal cursor there.
+%% This ensures the cursor appears at the natural typing position.
+%%
+%% @param UIState Current UI state containing input text and screen dimensions.
 position_cursor(UIState) ->
     #ui_state{current_input = Input, screen_height = Height} = UIState,
     Prompt = "> ",
@@ -234,7 +371,20 @@ position_cursor(UIState) ->
     cecho:move(Height - 1, CursorX).
 
 %% @private
-%% @doc Draw the complete screen layout.
+%% @doc Draw the complete screen layout with all UI components.
+%%
+%% Renders the full terminal interface in the correct order:
+%% <ol>
+%%   <li>Clear the entire screen</li>
+%%   <li>Draw status bar at the top</li>
+%%   <li>Draw scrollable message area</li>
+%%   <li>Draw context-sensitive help bar</li>
+%%   <li>Draw input line with current text</li>
+%%   <li>Refresh the display</li>
+%%   <li>Position cursor for typing</li>
+%% </ol>
+%%
+%% @param UIState Current UI state containing all display information.
 draw_screen(UIState) ->
     %% Clear screen
     cecho:erase(),
@@ -258,7 +408,21 @@ draw_screen(UIState) ->
     position_cursor(UIState).
 
 %% @private
-%% @doc Draw the status bar at the top.
+%% @doc Draw the status bar at the top showing connection and user info.
+%%
+%% The status bar displays:
+%% <ul>
+%%   <li>Application name and server URL</li>
+%%   <li>Current user login status</li>
+%%   <li>Chat mode status and target user</li>
+%%   <li>Undelivered message count (when > 0)</li>
+%%   <li>Current time</li>
+%% </ul>
+%%
+%% The status bar uses blue background with white text and automatically
+%% truncates content to fit the screen width.
+%%
+%% @param UIState Current UI state containing chat and display information.
 draw_status_bar(UIState) ->
     #ui_state{
         chat_state = ChatState,
@@ -311,7 +475,20 @@ draw_status_bar(UIState) ->
     cecho:move(CurY, CurX).
 
 %% @private
-%% @doc Draw the message display area.
+%% @doc Draw the scrollable message display area.
+%%
+%% Renders the message history in the central area of the screen.
+%% Messages are displayed with color coding:
+%% <ul>
+%%   <li>Yellow for system messages</li>
+%%   <li>Cyan for messages from other users</li>
+%%   <li>Green for own messages (future enhancement)</li>
+%% </ul>
+%%
+%% The message area supports scrolling to view message history, though
+%% scrolling controls are not yet implemented in the current version.
+%%
+%% @param UIState Current UI state containing message history and screen info.
 draw_message_area(UIState) ->
     #ui_state{
         message_history = Messages,
@@ -332,7 +509,15 @@ draw_message_area(UIState) ->
     draw_messages(VisibleMessages, StartLine, Width).
 
 %% @private
-%% @doc Draw individual messages.
+%% @doc Draw individual messages with appropriate color coding.
+%%
+%% Iterates through the visible message list and renders each message
+%% with the appropriate color scheme based on the sender type.
+%% System messages get special formatting without sender name.
+%%
+%% @param Messages List of {From, Message, Timestamp} tuples to display
+%% @param Line Starting line number for drawing
+%% @param Width Screen width for text formatting
 draw_messages([], _Line, _Width) ->
     ok;
 draw_messages([{From, Message, Timestamp} | Rest], Line, Width) ->
@@ -354,7 +539,18 @@ draw_messages([{From, Message, Timestamp} | Rest], Line, Width) ->
     draw_messages(Rest, Line + 1, Width).
 
 %% @private
-%% @doc Draw the help bar.
+%% @doc Draw the context-sensitive help bar.
+%%
+%% Displays different help text based on the current mode:
+%% <ul>
+%%   <li>Normal mode: Shows available commands (register, send, chat, etc.)</li>
+%%   <li>Chat mode: Shows chat-specific commands (:exit, :help, message sending)</li>
+%% </ul>
+%%
+%% The help bar uses white text on black background and is positioned
+%% near the bottom of the screen for easy reference.
+%%
+%% @param UIState Current UI state to determine the appropriate help text.
 draw_help_bar(UIState) ->
     #ui_state{screen_height = Height, screen_width = Width} = UIState,
     
@@ -371,7 +567,21 @@ draw_help_bar(UIState) ->
     cecho:attroff(?ceCOLOR_PAIR(?COLOR_HELP_BAR)).
 
 %% @private
-%% @doc Draw the input line.
+%% @doc Draw the input line with prompt and current user text.
+%%
+%% Renders the bottom input line where users type their commands or messages.
+%% The line includes:
+%% <ul>
+%%   <li>A ">" prompt to indicate input readiness</li>
+%%   <li>The current input text being typed</li>
+%%   <li>Automatic truncation if text exceeds screen width</li>
+%%   <li>White text on black background for visibility</li>
+%% </ul>
+%%
+%% The input line is cleared before drawing to handle backspace operations
+%% and text editing properly.
+%%
+%% @param UIState Current UI state containing input text and screen dimensions.
 draw_input_line(UIState) ->
     #ui_state{
         current_input = Input,
@@ -406,7 +616,22 @@ draw_input_line(UIState) ->
 %%%===================================================================
 
 %% @private
-%% @doc Handle user input.
+%% @doc Handle user input events from the input handler process.
+%%
+%% Processes different types of input:
+%% <ul>
+%%   <li>`quit' - Initiates graceful shutdown</li>
+%%   <li>`{char, Char}' - Adds printable characters to input buffer</li>
+%%   <li>`{key, 10}' - Enter key processes current command</li>
+%%   <li>`{key, backspace}' - Removes last character from input</li>
+%% </ul>
+%%
+%% The function updates the UI state appropriately and triggers command
+%% processing when Enter is pressed.
+%%
+%% @param Input Input event from the input handler process
+%% @param UIState Current UI state
+%% @returns Updated UI state after processing the input.
 handle_input(Input, UIState) ->
     case Input of
         quit ->
@@ -437,7 +662,35 @@ handle_input(Input, UIState) ->
     end.
 
 %% @private
-%% @doc Process a user command.
+%% @doc Process a user command and return updated UI state.
+%%
+%% This is the main command dispatcher that handles all user commands:
+%%
+%% === Core Commands ===
+%% <ul>
+%%   <li>`help' - Display available commands</li>
+%%   <li>`register <username>' - Register with the server</li>
+%%   <li>`send <user> <message>' - Send encrypted message</li>
+%%   <li>`chat <user>' - Enter real-time chat mode</li>
+%%   <li>`inbox' - Check for new messages</li>
+%%   <li>`list_users' - Show registered users</li>
+%%   <li>`quit' - Exit the application</li>
+%% </ul>
+%%
+%% === Chat Mode Commands ===
+%% When in chat mode, commands are processed differently:
+%% <ul>
+%%   <li>`:exit' - Leave chat mode</li>
+%%   <li>`:help' - Show chat-specific help</li>
+%%   <li>Any other text - Send as message to chat target</li>
+%% </ul>
+%%
+%% The function handles error cases, validates user registration state,
+%% and provides appropriate feedback through system messages.
+%%
+%% @param Command The command string entered by the user
+%% @param UIState Current UI state
+%% @returns Updated UI state with command results displayed.
 process_command("", UIState) ->
     %% Empty command, do nothing
     UIState;
@@ -594,6 +847,26 @@ process_command(Command, UIState) ->
 
 %% @private
 %% @doc Process commands while in chat mode.
+%%
+%% Chat mode provides a streamlined interface for real-time conversations.
+%% It handles special chat commands that start with ":" and treats all
+%% other input as messages to send to the chat target.
+%%
+%% === Chat Commands ===
+%% <ul>
+%%   <li>`:exit' - Leave chat mode and stop polling</li>
+%%   <li>`:help' - Show chat mode specific help</li>
+%%   <li>`:<unknown>' - Display error for unknown chat commands</li>
+%% </ul>
+%%
+%% === Message Sending ===
+%% Any text that doesn't start with ":" is treated as a message to send
+%% to the current chat target. Messages are sent immediately and displayed
+%% in the chat format "You -> target: message".
+%%
+%% @param Command The command or message entered in chat mode
+%% @param UIState Current UI state in chat mode
+%% @returns Updated UI state after processing the chat command.
 process_chat_command(":exit", UIState) ->
     %% Exit chat mode and stop polling timer
     case UIState#ui_state.chat_poll_timer of
@@ -648,6 +921,18 @@ process_chat_command(Message, UIState) ->
 
 %% @private
 %% @doc Process peek check for undelivered message count.
+%%
+%% This function performs a non-destructive check of the user's message
+%% inbox to determine how many undelivered messages are waiting. It uses
+%% the `/peek_messages/<user>' endpoint which returns just the count
+%% without consuming the messages.
+%%
+%% This is used by the auto-peek timer to update the status bar with
+%% undelivered message notifications without interfering with normal
+%% message retrieval operations.
+%%
+%% @param UIState Current UI state
+%% @returns Updated UI state with new undelivered count, or unchanged state on error.
 process_peek_check(UIState) ->
     ChatState = UIState#ui_state.chat_state,
     case ChatState#chat_state.current_user of
@@ -671,6 +956,21 @@ process_peek_check(UIState) ->
 
 %% @private
 %% @doc Process chat poll check for new messages in chat mode.
+%%
+%% When in chat mode, this function polls for new messages every 2 seconds
+%% to provide a real-time chat experience. It:
+%% <ol>
+%%   <li>Retrieves all new messages for the user</li>
+%%   <li>Filters to only show messages from the chat target</li>
+%%   <li>Displays new messages in chat format "sender: message"</li>
+%%   <li>Ignores errors silently to avoid disrupting the chat flow</li>
+%% </ol>
+%%
+%% This creates a responsive chat experience where messages appear
+%% automatically without manual inbox checking.
+%%
+%% @param UIState Current UI state in chat mode
+%% @returns Updated UI state with new messages displayed, or unchanged state.
 process_chat_poll(UIState) ->
     ChatState = UIState#ui_state.chat_state,
     case {ChatState#chat_state.current_user, UIState#ui_state.chat_target} of
@@ -718,7 +1018,22 @@ process_chat_poll(UIState) ->
 %%%===================================================================
 
 %% @private
-%% @doc Input handler process.
+%% @doc Input handler process for keyboard input capture.
+%%
+%% This dedicated process continuously reads keyboard input using cecho
+%% and forwards it to the main UI process. It handles:
+%% <ul>
+%%   <li>Ctrl+C (ASCII 3) - Graceful quit signal</li>
+%%   <li>Enter (ASCII 10) - Command execution</li>
+%%   <li>Backspace (ASCII 127 or cecho backspace) - Character deletion</li>
+%%   <li>Printable characters (32-126) - Text input</li>
+%%   <li>Other keys - Ignored for now</li>
+%% </ul>
+%%
+%% The process runs in an infinite loop and is linked to the main process
+%% for automatic cleanup on exit.
+%%
+%% @param MainPid PID of the main UI process to send input events to.
 input_handler(MainPid) ->
     case cecho:getch() of
         3 ->  % Ctrl+C
@@ -739,7 +1054,22 @@ input_handler(MainPid) ->
     input_handler(MainPid).
 
 %% @private
-%% @doc Status updater process.
+%% @doc Status updater process for periodic status bar refresh.
+%%
+%% This process sends status update messages to the main UI process
+%% every second to ensure the status bar displays current time and
+%% other dynamic information.
+%%
+%% The status bar shows:
+%% <ul>
+%%   <li>Current time (HH:MM:SS format)</li>
+%%   <li>Server connection status</li>
+%%   <li>User login information</li>
+%%   <li>Chat mode and target user</li>
+%%   <li>Undelivered message count</li>
+%% </ul>
+%%
+%% @param MainPid PID of the main UI process to send update signals to.
 status_updater(MainPid) ->
     timer:sleep(1000),
     MainPid ! {status_update},
@@ -750,7 +1080,19 @@ status_updater(MainPid) ->
 %%%===================================================================
 
 %% @private
-%% @doc Initialize color pairs.
+%% @doc Initialize color pairs for the terminal display.
+%%
+%% Sets up color combinations used throughout the interface:
+%% <ul>
+%%   <li>Status bar: White text on blue background</li>
+%%   <li>Help bar: White text on black background</li>
+%%   <li>System messages: Yellow text on black background</li>
+%%   <li>Other messages: Cyan text on black background</li>
+%%   <li>Input line: White text on black background</li>
+%% </ul>
+%%
+%% Colors enhance readability and provide visual organization of
+%% different UI elements and message types.
 init_colors() ->
     cecho:init_pair(?COLOR_STATUS_BAR, ?ceCOLOR_WHITE, ?ceCOLOR_BLUE),
     cecho:init_pair(?COLOR_HELP_BAR, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK),
@@ -761,7 +1103,20 @@ init_colors() ->
     cecho:init_pair(?COLOR_INPUT, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK).
 
 %% @private
-%% @doc Format a line to fit screen width.
+%% @doc Format a line to fit screen width with padding or truncation.
+%%
+%% Ensures text fits exactly within the screen width by either:
+%% <ul>
+%%   <li>Truncating long lines to fit the width</li>
+%%   <li>Padding short lines with spaces to fill the width</li>
+%% </ul>
+%%
+%% This creates a consistent visual appearance for status bars and
+%% other full-width elements.
+%%
+%% @param Line The text line to format
+%% @param Width Target width for the formatted line
+%% @returns String exactly `Width' characters long.
 format_line(Line, Width) ->
     case length(Line) of
         Len when Len > Width ->
@@ -771,7 +1126,22 @@ format_line(Line, Width) ->
     end.
 
 %% @private
-%% @doc Format a message for display.
+%% @doc Format a message for display with sender, content, and timestamp.
+%%
+%% Creates a formatted message line appropriate for the message type:
+%% <ul>
+%%   <li>System messages: Just the message text</li>
+%%   <li>User messages: "&lt;sender&gt;: message [timestamp]" format</li>
+%% </ul>
+%%
+%% The formatted message is truncated to fit the screen width to ensure
+%% proper display layout.
+%%
+%% @param From Sender identifier ("SYSTEM" for system messages, username for user messages)
+%% @param Message The message content text
+%% @param Timestamp Time string when the message was received/sent
+%% @param Width Screen width for text formatting
+%% @returns Formatted message string fitting within the specified width.
 format_message(From, Message, Timestamp, Width) ->
     case From of
         "SYSTEM" ->
@@ -783,6 +1153,22 @@ format_message(From, Message, Timestamp, Width) ->
 
 %% @private
 %% @doc Get visible messages for current scroll position.
+%%
+%% Calculates which messages should be displayed based on the total
+%% message history, scroll position, and available display area height.
+%% This supports future scrolling functionality to view message history.
+%%
+%% The algorithm ensures:
+%% <ul>
+%%   <li>Most recent messages are shown by default</li>
+%%   <li>Scrolling can reveal older messages</li>
+%%   <li>Display area constraints are respected</li>
+%% </ul>
+%%
+%% @param Messages Complete list of messages in chronological order
+%% @param ScrollPos Current scroll position (0 = most recent)
+%% @param AreaHeight Number of lines available for message display
+%% @returns List of messages that should be visible on screen.
 get_visible_messages(Messages, ScrollPos, AreaHeight) ->
     TotalMessages = length(Messages),
     StartIndex = max(1, TotalMessages - AreaHeight - ScrollPos + 1),
@@ -795,7 +1181,23 @@ get_visible_messages(Messages, ScrollPos, AreaHeight) ->
     end.
 
 %% @private
-%% @doc Add a system message.
+%% @doc Add a system message to the message history.
+%%
+%% System messages are used for:
+%% <ul>
+%%   <li>Command feedback and status updates</li>
+%%   <li>Error messages and warnings</li>
+%%   <li>Help text and instructions</li>
+%%   <li>Application status notifications</li>
+%% </ul>
+%%
+%% The message is automatically timestamped with the current local time
+%% and added to the message history. System messages are displayed in
+%% yellow color to distinguish them from user messages.
+%%
+%% @param Message The system message text to display
+%% @param UIState Current UI state
+%% @returns Updated UI state with the new message added to history.
 add_system_message(Message, UIState) ->
     {{_Year, _Month, _Day}, {Hour, Min, Sec}} = calendar:local_time(),
     Timestamp = io_lib:format("~2..0w:~2..0w:~2..0w", [Hour, Min, Sec]),
@@ -806,6 +1208,10 @@ add_system_message(Message, UIState) ->
     UIState#ui_state{message_history = CurrentMessages ++ [NewMessage]}.
 
 %% @private
-%% @doc Cleanup UI on exit.
+%% @doc Cleanup UI resources on exit.
+%%
+%% Properly shuts down the ncurses interface and restores the terminal
+%% to its original state. This should be called before the application
+%% exits to ensure the terminal is left in a usable state.
 cleanup_ui() ->
     cecho:endwin().
