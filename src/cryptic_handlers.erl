@@ -4,12 +4,14 @@
 
 -export([init/2]).
 
+-include("cryptic.hrl").
+
 %% Handler for uploading prekeys
 init(Req, upload_prekey) ->
     try
         UserId = binary_to_list(cowboy_req:binding(user_id, Req)),
         {ok, Body, Req2} = cowboy_req:read_body(Req),
-        io:format("Upload prekey - UserId: ~p, Body: ~p~n", [UserId, Body]),
+        ?dbg("Upload prekey - UserId: ~p, Body: ~p~n", [UserId, Body]),
         PubBin = parse_prekey_json(Body),
         ets:insert(prekeys, {UserId, PubBin}),
         Resp = <<"{\"status\":\"ok\"}">>,
@@ -18,7 +20,7 @@ init(Req, upload_prekey) ->
             Resp, Req2), state}
     catch
         Error:Reason ->
-            io:format("Upload prekey error: ~p:~p~n", [Error, Reason]),
+            ?error("Upload prekey error: ~p:~p~n", [Error, Reason]),
             ErrorResp1 = <<"{\"error\":\"invalid request\"}">>,
             {ok, cowboy_req:reply(400, 
                 #{<<"content-type">> => <<"application/json">>}, 
@@ -29,6 +31,7 @@ init(Req, upload_prekey) ->
 init(Req, get_prekey) ->
     try
         UserId = cowboy_req:binding(user_id, Req),
+        ?dbg("Get prekey - UserId: ~s~n", [UserId]),
         case ets:lookup(prekeys, binary_to_list(UserId)) of
             [{UserIdStr, PubBin}] ->
                 B64 = base64:encode(PubBin),
@@ -60,6 +63,7 @@ init(Req, send_blob) ->
         Ephemeral = base64:decode(EphemeralB64),
         Nonce = base64:decode(NonceB64),
         Cipher = base64:decode(CiphB64),
+        ?dbg("Send blob - From: ~s, To: ~s~n", [From, To]),
         ets:insert(blobs, {To, {From, Ephemeral, Nonce, Cipher}}),
         Resp = <<"{\"status\":\"ok\"}">>,
         {ok, cowboy_req:reply(201, 
@@ -83,23 +87,24 @@ init(Req, recv_blobs) ->
             EphB64 = base64:encode(Ephemeral),
             NonceB64 = base64:encode(Nonce),
             CiphB64 = base64:encode(Cipher),
+            ?dbg("Receive blob - From: ~s, To: ~s~n", [From, UserId]),
             iolist_to_binary(
                 io_lib:format("{\"from\":\"~s\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}", 
                     [From, EphB64, NonceB64, CiphB64]))
         end, Blobs),
-        
+
         Resp = case Items of
             [] -> <<"[]">>;
-            _ -> 
+            _ ->
                 ItemsStr = string:join([binary_to_list(Item) || Item <- Items], ","),
                 iolist_to_binary(["[", ItemsStr, "]"])
         end,
-        
+
         %% Remove delivered blobs
         lists:foreach(fun({Key, Val}) ->
             ets:delete_object(blobs, {Key, Val})
         end, Blobs),
-        
+
         {ok, cowboy_req:reply(200, 
             #{<<"content-type">> => <<"application/json">>}, 
             Resp, Req), state}
@@ -117,7 +122,7 @@ init(Req = #{method := <<"GET">>}, list_users) ->
         %% Get all users from the prekeys table
         AllUsers = ets:tab2list(prekeys),
         UserNames = [UserId || {UserId, _PubKey} <- AllUsers],
-        
+        ?dbg("List users - Found users: ~p~n", [UserNames]),
         %% Create JSON response with user list
         UsersJson = case UserNames of
             [] ->
@@ -126,7 +131,7 @@ init(Req = #{method := <<"GET">>}, list_users) ->
                 UserNamesStr = string:join([io_lib:format("\"~s\"", [User]) || User <- UserNames], ","),
                 iolist_to_binary(["[", UserNamesStr, "]"])
         end,
-        
+
         {ok, cowboy_req:reply(200, 
             #{<<"content-type">> => <<"application/json">>}, 
             UsersJson, Req), state}

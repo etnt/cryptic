@@ -1,8 +1,20 @@
 {application, cryptic, [
-    {description, "Minimal Encrypted Chat"},
+    {description, "Minimal End-to-End Encrypted Chat"},
     {vsn, "0.1.0"},
     {registered, []},
     {applications, [kernel, stdlib, asn1, public_key, ssl, crypto, ranch, cowlib, cowboy]},
     {mod, {cryptic_app, []}},
-    {env, []}
+    {env, [
+        %% Event handling configuration
+        {cryptic_event_handlers, [cryptic_console_logger]},
+
+        % Server listen port
+        {server_port, 8080},
+
+        % Poll interval (seconds)
+        {poll_interval, 2},  % FIXME: adjust as needed
+
+        % Enable debug output
+        {enable_debug, false}
+    ]}
 ]}.

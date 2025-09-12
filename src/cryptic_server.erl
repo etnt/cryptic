@@ -6,7 +6,15 @@
 -export([start_link/0]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([init/1
+    , handle_call/3
+    , handle_cast/2
+    , handle_continue/2
+    , handle_info/2
+    , terminate/2
+    , code_change/3]).
+
+-include("cryptic.hrl").
 
 -define(SERVER, ?MODULE).
 
@@ -24,14 +32,38 @@ start_link() ->
 
 %% @doc Initializes the server
 init([]) ->
+     process_flag(trap_exit, true),
+    {ok, #{}, {continue, start_server}}.
+
+handle_continue(start_server, CfgMap) ->
+    %% Setup event handlers for Cryptic events
+    cryptic_event_manager:setup_event_handlers(),
+    % Allow time for event manager setup
+    sleep(1),
+
+    continue(
+        cryptic_app:get_config(
+            [
+                server_port
+            ],
+            CfgMap
+        )
+    ).
+
+sleep(T) ->
+    receive
+    after T -> ok
+    end.
+
+continue(CfgMap) ->
     %% Create ETS stores
     ets:new(prekeys, [named_table, public, set]),
     ets:new(blobs, [named_table, public, bag]),
-    
+
     %% Start HTTP server
-    start_http(),
-    
-    {ok, #{}}.
+    start_http(CfgMap),
+
+    {noreply, CfgMap}.
 
 %% @doc Handling call messages
 handle_call(_Request, _From, State) ->
@@ -52,11 +84,11 @@ handle_info(_Info, State) ->
 terminate(_Reason, _State) ->
     %% Stop HTTP server
     cowboy:stop_listener(http_listener),
-    
+
     %% Clean up ETS tables
     catch ets:delete(prekeys),
     catch ets:delete(blobs),
-    
+
     ok.
 
 %% @doc Convert process state when code is changed
@@ -67,7 +99,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-start_http() ->
+start_http(CfgMap) ->
+    Port = maps:get(server_port, CfgMap, 8080),
     Dispatch =
         cowboy_router:compile([{'_',
                                 [{"/upload_prekey/:user_id", cryptic_handlers, upload_prekey},
@@ -77,7 +110,7 @@ start_http() ->
                                  {"/list_users", cryptic_handlers, list_users}]}]),
     {ok, _} =
         cowboy:start_clear(http_listener,
-                           [{port, 8080}],
+                           [{port, Port}],
                            #{env => #{dispatch => Dispatch}}),
-    io:format("Server running at http://localhost:8080~n"),
+    ?dbg("Server running at http://localhost:~p~n", [Port]),
     ok.

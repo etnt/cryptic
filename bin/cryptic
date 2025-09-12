@@ -1,0 +1,10 @@
+#!/bin/bash
+
+RLWRAP=$(which rlwrap)
+if [ -n "$RLWRAP" ]; then
+    rlwrap "$(cd "$(dirname "$0")" && cd .. && pwd)/scripts/cryptic.escript"
+else
+    "$(cd "$(dirname "$0")" && cd .. && pwd)/scripts/cryptic.escript"
+fi
+
+    

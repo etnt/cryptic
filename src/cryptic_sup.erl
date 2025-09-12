@@ -30,8 +30,13 @@ init([]) ->
           intensity => 10,
           period => 10},
 
+    % Event handlers should be started first as the RAFT application uses it
+    EventManager = #{id => cryptic_event_manager,
+                     start => {gen_event, start_link, [{local, cryptic_event_manager}]},
+                     modules => dynamic},
+
     %% Start the HTTP server as a child process
-    HTTPServerSpec =
+    CrypticServer =
         #{id => cryptic_server,
           start => {cryptic_server, start_link, []},
           restart => permanent,
@@ -39,7 +44,7 @@ init([]) ->
           type => worker,
           modules => [cryptic_server]},
 
-    ChildSpecs = [HTTPServerSpec],
+    ChildSpecs = [EventManager, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions
