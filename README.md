@@ -720,15 +720,49 @@ hkdf_sha256(IKM, Salt, Info, L) ->
 
 ## Security Considerations
 
-### Limitations
+### Current Limitations
 - **In-memory storage**: Messages and prekeys stored in ETS (not persistent)
-- **No authentication**: No user authentication or message authentication beyond crypto
+- **⚠️ No authentication**: Anyone can register with any username - **SECURITY RISK**
 - **No replay protection**: Messages could theoretically be replayed
 - **Single prekey**: Bob uses one prekey for all conversations
 
+### Authentication Security Gap
+
+**CRITICAL**: The current system allows unrestricted registration:
+```bash
+register alice  # Anyone can claim to be "alice"
+```
+
+This poses significant security risks in any real-world deployment. See our comprehensive [**Authentication Plan**](docs/AUTHENTICATION_PLAN.md) for modern solutions.
+
+### Recommended Authentication Solutions
+
+We've designed a **4-phase authentication roadmap** with increasing security levels:
+
+1. **Phase 1: Pre-Shared Keys** (1-2 days) - Quick security fix
+   - Users need a secret token to register
+   - Immediate protection against unauthorized access
+   - Simple to deploy
+
+2. **Phase 2: JWT Authentication** (3-5 days) - Modern standard
+   - Username/password login with JWT tokens
+   - Fine-grained permissions and role-based access
+   - Industry-standard security
+
+3. **Phase 3: Ed25519 Digital Signatures** (4-7 days) - Cryptographically strong
+   - Challenge-response authentication with digital signatures
+   - Cryptographically provable identity
+   - No passwords to compromise
+
+4. **Phase 4: Hardware Security Keys** (1-2 weeks) - Enterprise grade
+   - FIDO2/WebAuthn support for hardware tokens
+   - Multi-factor authentication
+   - Maximum security for sensitive deployments
+
+**📖 Full details**: [Authentication and Access Control Plan](docs/AUTHENTICATION_PLAN.md)
+
 ### Production Considerations
-For production use, consider adding:
-- User authentication and authorization
+For production use, implementing authentication is **essential**. Additionally consider:
 - Message ordering and replay protection
 - Persistent storage with proper key management
 - Key rotation mechanisms
@@ -737,6 +771,8 @@ For production use, consider adding:
 - Message delivery receipts and read confirmations
 - Group messaging capabilities
 - File transfer support
+- Rate limiting and abuse prevention
+- Audit logging and monitoring
 
 ## UI Screenshots
 
