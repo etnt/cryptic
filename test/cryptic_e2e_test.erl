@@ -19,6 +19,10 @@ setup() ->
     application:ensure_all_started(ranch),
     application:ensure_all_started(cowboy),
     
+    %% Start event manager for server handlers
+    {ok, _} = gen_event:start_link({local, cryptic_event_manager}),
+    cryptic_event_manager:setup_event_handlers(),
+    
     %% Start test server
     ServerPid = start_test_server(),
     timer:sleep(100), % Give server time to start
@@ -26,6 +30,8 @@ setup() ->
 
 cleanup({ok, ServerPid}) ->
     stop_test_server(ServerPid),
+    %% Stop event manager
+    catch gen_event:stop(cryptic_event_manager),
     ok;
 cleanup(_) ->
     ok.
