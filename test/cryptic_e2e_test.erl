@@ -49,7 +49,9 @@ start_test_server() ->
             {"/upload_prekey/:user_id", cryptic_handlers, upload_prekey},
             {"/get_prekey/:user_id", cryptic_handlers, get_prekey},
             {"/send_blob", cryptic_handlers, send_blob},
-            {"/recv_blobs/:user_id", cryptic_handlers, recv_blobs}
+            {"/recv_blobs/:user_id", cryptic_handlers, recv_blobs},
+            {"/peek_messages/:user_id", cryptic_handlers, peek_messages},
+            {"/list_users", cryptic_handlers, list_users}
         ]}
     ]),
     {ok, Pid} = cowboy:start_clear(

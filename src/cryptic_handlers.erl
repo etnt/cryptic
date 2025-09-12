@@ -132,18 +132,38 @@ init(Req = #{method := <<"GET">>}, list_users) ->
                 iolist_to_binary(["[", UserNamesStr, "]"])
         end,
 
-        {ok, cowboy_req:reply(200, 
-            #{<<"content-type">> => <<"application/json">>}, 
-            UsersJson, Req), state}
+            {ok, cowboy_req:reply(200, 
+                #{<<"content-type">> => <<"application/json">>}, 
+                UsersJson, Req), state}
     catch
         _:_Error ->
             ErrorResp = <<"{\"error\":\"failed to list users\"}">>,
             {ok, cowboy_req:reply(500, 
                 #{<<"content-type">> => <<"application/json">>}, 
                 ErrorResp, Req), state}
-    end.
+    end;
 
-%% Simple JSON parsing helpers (VERY minimal; assumes no escapes)
+%% Handler for peeking at message count without consuming them
+init(Req, peek_messages) ->
+    try
+        UserId = cowboy_req:binding(user_id, Req),
+        UserIdStr = binary_to_list(UserId),
+        Blobs = ets:lookup(blobs, UserIdStr),
+        Count = length(Blobs),
+        ?dbg("Peek messages - User: ~s, Count: ~p~n", [UserIdStr, Count]),
+        
+        CountJson = iolist_to_binary(io_lib:format("{\"count\":~p}", [Count])),
+        
+        {ok, cowboy_req:reply(200, 
+            #{<<"content-type">> => <<"application/json">>}, 
+            CountJson, Req), state}
+    catch
+        _:_Error ->
+            ErrorResp = <<"{\"error\":\"failed to peek messages\"}">>,
+            {ok, cowboy_req:reply(500, 
+                #{<<"content-type">> => <<"application/json">>}, 
+                ErrorResp, Req), state}
+    end.%% Simple JSON parsing helpers (VERY minimal; assumes no escapes)
 parse_prekey_json(Body) ->
     %% Body like {"prekey":"BASE64"}
     S = binary_to_list(Body),

@@ -8,8 +8,8 @@
 
 -include_lib("cecho/include/cecho.hrl").
 
-%% Polling interval in milliseconds
--define(POLL_INTERVAL, 2000).
+%% Peek interval in milliseconds
+-define(PEEK_INTERVAL, 5000).
 
 %% Chat state record
 -record(chat_state, {
@@ -18,13 +18,13 @@
     keypair :: {binary(), binary()} | undefined,
     user_cache = #{} :: #{string() => binary()},  % Username -> PubKey cache
 
-    %% Phase 2 enhancements
-    polling_enabled = false :: boolean(),         % Auto-polling for messages
-    polling_interval = ?POLL_INTERVAL :: pos_integer(), % Polling interval in milliseconds
-    polling_timer :: timer:tref() | undefined,    % Timer reference for polling
+    %% Message peek enhancements
+    peek_enabled = true :: boolean(),             % Auto-peeking for message count
+    peek_interval = ?PEEK_INTERVAL :: pos_integer(), % Peek interval in milliseconds
+    peek_timer :: timer:tref() | undefined,       % Timer reference for peeking
     storage_initialized = false :: boolean(),     % Storage system status
-    last_inbox_check :: calendar:datetime() | undefined,  % Last inbox check time
-    unread_count = 0 :: non_neg_integer()         % Number of unread messages
+    last_peek_check :: calendar:datetime() | undefined,  % Last peek check time
+    undelivered_count = 0 :: non_neg_integer()    % Number of undelivered messages
 }).
 
 %% UI State record
@@ -37,7 +37,12 @@
     command_history = [] :: [string()],
     current_input = "" :: string(),
     input_pid :: pid(),
-    status_pid :: pid()
+    status_pid :: pid(),
+    
+    %% Chat mode state
+    chat_mode = false :: boolean(),               % Whether in chat mode
+    chat_target :: string() | undefined,         % Username being chatted with
+    chat_poll_timer :: timer:tref() | undefined   % Timer for chat mode polling
 }).
 
 %% Color pairs
@@ -122,6 +127,15 @@ start(ServerUrl) ->
     %% Redraw screen with welcome messages
     draw_screen(WelcomeState4),
 
+    %% Start peek timer for undelivered message count
+    ChatState = WelcomeState4#ui_state.chat_state,
+    case ChatState#chat_state.peek_enabled of
+        true ->
+            timer:send_interval(ChatState#chat_state.peek_interval, self(), auto_peek);
+        false ->
+            ok
+    end,
+
     %% Start main UI loop
     try
         ui_main_loop(WelcomeState4)
@@ -153,24 +167,46 @@ ui_main_loop(UIState) ->
 
             ui_main_loop(UIState);
 
-        auto_poll ->
-            %% Automatic polling for new messages
+        auto_peek ->
+            %% Automatic peeking for undelivered message count
             ChatState = UIState#ui_state.chat_state,
-            case ChatState#chat_state.polling_enabled of
+            case ChatState#chat_state.peek_enabled of
                 true ->
-                    %% Check for new messages silently (no "No new messages" spam)
-                    PollUIState = process_silent_inbox_check(UIState),
-                    case PollUIState of
+                    %% Peek at message count and update status
+                    PeekUIState = process_peek_check(UIState),
+                    %% Only update status bar if count changed
+                    case PeekUIState#ui_state.chat_state#chat_state.undelivered_count of
+                        OldCount when OldCount =:= ChatState#chat_state.undelivered_count ->
+                            ui_main_loop(UIState);
+                        _NewCount ->
+                            %% Count changed, update status bar
+                            draw_status_bar(PeekUIState),
+                            cecho:refresh(),
+                            position_cursor(PeekUIState),
+                            ui_main_loop(PeekUIState)
+                    end;
+                false ->
+                    %% Peeking disabled, ignore
+                    ui_main_loop(UIState)
+            end;
+
+        chat_poll ->
+            %% Automatic polling for new messages in chat mode
+            case UIState#ui_state.chat_mode of
+                true ->
+                    %% Check for new messages from chat target
+                    ChatPollUIState = process_chat_poll(UIState),
+                    case ChatPollUIState of
                         UIState ->
-                            %% No changes, no need to redraw
+                            %% No new messages, continue
                             ui_main_loop(UIState);
                         _ ->
                             %% New messages found, redraw screen
-                            draw_screen(PollUIState),
-                            ui_main_loop(PollUIState)
+                            draw_screen(ChatPollUIState),
+                            ui_main_loop(ChatPollUIState)
                     end;
                 false ->
-                    %% Polling disabled, ignore
+                    %% Not in chat mode, ignore
                     ui_main_loop(UIState)
             end;
 
@@ -236,19 +272,32 @@ draw_status_bar(UIState) ->
     {_, {Hour, Min, Sec}} = calendar:local_time(),
     TimeStr = io_lib:format("~2..0w:~2..0w:~2..0w", [Hour, Min, Sec]),
     
-    %% Get user info
+    %% Get user info and chat mode
     UserStr = case ChatState#chat_state.current_user of
         undefined -> "Not logged in";
         User -> "User: " ++ User
     end,
     
-    %% Get message count
-    MsgCountStr = io_lib:format("Messages: ~w", [ChatState#chat_state.unread_count]),
+    %% Get chat mode status
+    ChatModeStr = case UIState#ui_state.chat_mode of
+        false -> "";
+        true -> 
+            case UIState#ui_state.chat_target of
+                undefined -> " | Chat mode";
+                Target -> " | Chat with: " ++ Target
+            end
+    end,
+    
+    %% Get undelivered message count (only show if > 0)
+    MsgCountStr = case ChatState#chat_state.undelivered_count of
+        0 -> "";
+        Count -> io_lib:format(" | Undelivered: ~w", [Count])
+    end,
     
     %% Create status line
     ServerStr = "Server: " ++ ChatState#chat_state.server_url,
-    StatusLine = io_lib:format("CRYPTIC CHAT | ~s | ~s | ~s | ~s", 
-                              [ServerStr, UserStr, MsgCountStr, TimeStr]),
+    StatusLine = io_lib:format("CRYPTIC CHAT | ~s | ~s~s~s | ~s", 
+                              [ServerStr, UserStr, ChatModeStr, MsgCountStr, TimeStr]),
     
     %% Truncate or pad to screen width
     StatusLineFmt = format_line(lists:flatten(StatusLine), Width),
@@ -309,7 +358,12 @@ draw_messages([{From, Message, Timestamp} | Rest], Line, Width) ->
 draw_help_bar(UIState) ->
     #ui_state{screen_height = Height, screen_width = Width} = UIState,
     
-    HelpLine = "Commands: help | register <user> | send <user> <msg> | inbox | list_users | polling on/off | quit",
+    HelpLine = case UIState#ui_state.chat_mode of
+        false ->
+            "Commands: help | register <user> | send <user> <msg> | chat <user> | inbox | list_users | quit";
+        true ->
+            "Chat Mode: Type message to send | :exit to leave chat | :help for commands"
+    end,
     HelpLineFmt = format_line(HelpLine, Width),
     
     cecho:attron(?ceCOLOR_PAIR(?COLOR_HELP_BAR)),
@@ -396,11 +450,12 @@ process_command("help", UIState) ->
     HelpState = add_system_message("=== COMMANDS ===", UIState),
     HelpState2 = add_system_message("register <username> - Register with server", HelpState),
     HelpState3 = add_system_message("send <user> <message> - Send message", HelpState2),
-    HelpState4 = add_system_message("inbox - Check for new messages", HelpState3),
-    HelpState5 = add_system_message("list_users - List all registered users", HelpState4),
-    HelpState6 = add_system_message("polling on/off - Enable/disable auto polling", HelpState5),
+    HelpState4 = add_system_message("chat <user> - Enter chat mode with user", HelpState3),
+    HelpState5 = add_system_message("inbox - Check for new messages", HelpState4),
+    HelpState6 = add_system_message("list_users - List all registered users", HelpState5),
     HelpState7 = add_system_message("quit - Exit application", HelpState6),
-    HelpState7;
+    HelpState8 = add_system_message("In chat mode: :exit to leave, :help for commands", HelpState7),
+    HelpState8;
 process_command("register " ++ Username, UIState) ->
     %% Real server registration using cryptic_client_lib
     User = string:trim(Username),
@@ -504,38 +559,128 @@ process_command("send " ++ Rest, UIState) ->
                     add_system_message("Usage: send <username> <message>", UIState)
             end
     end;
-process_command("polling on", UIState) ->
-    %% Enable automatic polling for new messages
+process_command("chat " ++ Username, UIState) ->
+    %% Enter chat mode with specified user
     ChatState = UIState#ui_state.chat_state,
     case ChatState#chat_state.current_user of
         undefined ->
-            add_system_message("Please register first before enabling polling", UIState);
-        _User ->
-            %% Start polling timer (every 5 seconds)
-            timer:send_interval(5000, self(), auto_poll),
-            NewChatState = ChatState#chat_state{polling_enabled = true},
-            NewUIState = UIState#ui_state{chat_state = NewChatState},
-            add_system_message("Automatic polling enabled (5 second interval)", NewUIState)
+            add_system_message("Please register first using: register <username>", UIState);
+        _CurrentUser ->
+            TrimmedUser = string:trim(Username),
+            case TrimmedUser of
+                "" ->
+                    add_system_message("Usage: chat <username>", UIState);
+                _ ->
+                    %% Start chat polling timer (every 2 seconds for real-time feel)
+                    {ok, TimerRef} = timer:send_interval(2000, self(), chat_poll),
+                    NewUIState = UIState#ui_state{
+                        chat_mode = true,
+                        chat_target = TrimmedUser,
+                        chat_poll_timer = TimerRef
+                    },
+                    Msg = io_lib:format("Entering chat mode with ~s. Type ':exit' to leave chat mode.", [TrimmedUser]),
+                    add_system_message(lists:flatten(Msg), NewUIState)
+            end
     end;
-process_command("polling off", UIState) ->
-    %% Disable automatic polling
-    ChatState = UIState#ui_state.chat_state,
-    NewChatState = ChatState#chat_state{polling_enabled = false},
-    NewUIState = UIState#ui_state{chat_state = NewChatState},
-    add_system_message("Automatic polling disabled", NewUIState);
 process_command(Command, UIState) ->
-    %% Unknown command
-    add_system_message("Unknown command: " ++ Command, UIState).
+    %% Check if we're in chat mode
+    case UIState#ui_state.chat_mode of
+        true ->
+            process_chat_command(Command, UIState);
+        false ->
+            %% Unknown command
+            add_system_message("Unknown command: " ++ Command, UIState)
+    end.
 
 %% @private
-%% @doc Process inbox check silently for auto-polling (no spam when no messages).
-process_silent_inbox_check(UIState) ->
+%% @doc Process commands while in chat mode.
+process_chat_command(":exit", UIState) ->
+    %% Exit chat mode and stop polling timer
+    case UIState#ui_state.chat_poll_timer of
+        undefined -> ok;
+        TimerRef -> timer:cancel(TimerRef)
+    end,
+    NewUIState = UIState#ui_state{
+        chat_mode = false,
+        chat_target = undefined,
+        chat_poll_timer = undefined
+    },
+    add_system_message("Exited chat mode", NewUIState);
+process_chat_command(":help", UIState) ->
+    %% Show chat mode help
+    HelpState = add_system_message("=== CHAT MODE COMMANDS ===", UIState),
+    HelpState2 = add_system_message(":exit - Leave chat mode", HelpState),
+    HelpState3 = add_system_message(":help - Show this help", HelpState2),
+    HelpState4 = add_system_message("Any other text - Send as message", HelpState3),
+    HelpState4;
+process_chat_command(":" ++ Command, UIState) ->
+    %% Unknown chat command
+    add_system_message("Unknown chat command: :" ++ Command, UIState);
+process_chat_command(Message, UIState) ->
+    %% Send message to chat target
+    ChatState = UIState#ui_state.chat_state,
+    case {ChatState#chat_state.current_user, UIState#ui_state.chat_target} of
+        {undefined, _} ->
+            add_system_message("Error: Not registered", UIState);
+        {_, undefined} ->
+            add_system_message("Error: No chat target set", UIState);
+        {FromUser, ToUser} ->
+            case ChatState#chat_state.keypair of
+                undefined ->
+                    add_system_message("No keypair found. Please register again.", UIState);
+                {_PubKey, PrivKey} ->
+                    case cryptic_client_lib:send_encrypted_message(
+                        ChatState#chat_state.server_url, 
+                        FromUser, 
+                        ToUser, 
+                        Message, 
+                        PrivKey) of
+                        ok ->
+                            %% Show the sent message in chat format
+                            MsgText = io_lib:format("You -> ~s: ~s", [ToUser, Message]),
+                            add_system_message(lists:flatten(MsgText), UIState);
+                        {error, Reason} ->
+                            ErrMsg = io_lib:format("Failed to send message: ~p", [Reason]),
+                            add_system_message(lists:flatten(ErrMsg), UIState)
+                    end
+            end
+    end.
+
+%% @private
+%% @doc Process peek check for undelivered message count.
+process_peek_check(UIState) ->
     ChatState = UIState#ui_state.chat_state,
     case ChatState#chat_state.current_user of
         undefined ->
-            %% Not registered, no polling
+            %% Not registered, no peeking
             UIState;
         User ->
+            case cryptic_client_lib:peek_message_count(ChatState#chat_state.server_url, User) of
+                {ok, Count} ->
+                    %% Update undelivered count
+                    NewChatState = ChatState#chat_state{
+                        undelivered_count = Count,
+                        last_peek_check = calendar:universal_time()
+                    },
+                    UIState#ui_state{chat_state = NewChatState};
+                {error, _Reason} ->
+                    %% Error peeking, keep current state
+                    UIState
+            end
+    end.
+
+%% @private
+%% @doc Process chat poll check for new messages in chat mode.
+process_chat_poll(UIState) ->
+    ChatState = UIState#ui_state.chat_state,
+    case {ChatState#chat_state.current_user, UIState#ui_state.chat_target} of
+        {undefined, _} ->
+            %% Not registered, no polling
+            UIState;
+        {_, undefined} ->
+            %% No chat target, no polling
+            UIState;
+        {User, ChatTarget} ->
             case ChatState#chat_state.keypair of
                 undefined ->
                     %% No keypair, no polling
@@ -543,16 +688,26 @@ process_silent_inbox_check(UIState) ->
                 {_PubKey, PrivKey} ->
                     case cryptic_client_lib:receive_and_decrypt_messages(ChatState#chat_state.server_url, User, PrivKey) of
                         {ok, []} ->
-                            %% No new messages, return unchanged state (no spam)
+                            %% No new messages, return unchanged state
                             UIState;
                         {ok, Messages} ->
-                            %% New messages found, add them without header
-                            lists:foldl(fun({From, Msg}, AccState) ->
-                                MsgText = io_lib:format("<~s>: ~s", [From, Msg]),
-                                add_system_message(lists:flatten(MsgText), AccState)
-                            end, UIState, Messages);
+                            %% Filter messages to only show ones from chat target
+                            ChatMessages = lists:filter(fun({From, _Msg}) ->
+                                From =:= ChatTarget
+                            end, Messages),
+                            case ChatMessages of
+                                [] ->
+                                    %% No messages from chat target
+                                    UIState;
+                                _ ->
+                                    %% Display chat messages in chat format
+                                    lists:foldl(fun({From, Msg}, AccState) ->
+                                        MsgText = io_lib:format("~s: ~s", [From, Msg]),
+                                        add_system_message(lists:flatten(MsgText), AccState)
+                                    end, UIState, ChatMessages)
+                            end;
                         {error, _Reason} ->
-                            %% Error checking messages, silently ignore for auto-polling
+                            %% Error checking messages, silently ignore for chat polling
                             UIState
                     end
             end

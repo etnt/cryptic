@@ -72,7 +72,8 @@
     
     %% E2E flow helpers
     send_encrypted_message/5,
-    receive_and_decrypt_messages/3
+    receive_and_decrypt_messages/3,
+    peek_message_count/2
 ]).
 
 %% == Types ==
@@ -818,6 +819,58 @@ parse_users_list_response(RespStr) ->
                     nomatch ->
                         {error, invalid_response}
                 end
+        end
+    catch
+        _:_ ->
+            {error, parse_error}
+    end.
+
+%% @doc Peek at the number of undelivered messages without consuming them.
+%%
+%% Checks how many encrypted messages are waiting for the specified user
+%% on the server without actually downloading or consuming them. This is
+%% useful for showing notification counts in the UI.
+%%
+%% == Example ==
+%% ```
+%% {ok, Count} = cryptic_client_lib:peek_message_count(
+%%     "http://localhost:8080", "alice").
+%% io:format("~p undelivered messages~n", [Count]).
+%% '''
+%%
+%% @param ServerUrl Base URL of the Cryptic server
+%% @param UserId User identifier to check messages for
+%% @returns `{ok, Count}' if successful, `{error, Reason}' if it fails.
+-spec peek_message_count(server_url(), user_id()) -> {ok, non_neg_integer()} | {error, term()}.
+peek_message_count(ServerUrl, UserId) ->
+    Url = lists:flatten(io_lib:format("~s/peek_messages/~s", [ServerUrl, UserId])),
+    
+    case httpc:request(get, {Url, []}, [], []) of
+        {ok, {{_, 200, _}, _, Body}} ->
+            %% Parse JSON response to extract count
+            case parse_peek_response(Body) of
+                {ok, Count} ->
+                    {ok, Count};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {ok, {{_, StatusCode, _}, _, Body}} ->
+            {error, {http_error, StatusCode, Body}};
+        {error, Reason} ->
+            {error, {http_request_failed, Reason}}
+    end.
+
+%% @private
+%% @doc Parse peek message count response.
+parse_peek_response(Body) ->
+    try
+        %% Expected format: {"count":5}
+        case re:run(Body, "\"count\"\\s*:\\s*(\\d+)", [{capture, [1], list}]) of
+            {match, [CountStr]} ->
+                Count = list_to_integer(lists:flatten(CountStr)),
+                {ok, Count};
+            nomatch ->
+                {error, invalid_response}
         end
     catch
         _:_ ->
