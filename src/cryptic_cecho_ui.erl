@@ -204,7 +204,7 @@ start(ServerUrl) ->
 
     %% Initialize storage
     InitResult = try
-        cryptic_lib:initialize_storage()
+        cryptic_chat_storage:init_storage()
     catch
         _:_ ->
             error
