@@ -8,8 +8,9 @@
         %% Event handling configuration
         {cryptic_event_handlers, [cryptic_console_logger]},
 
-        % Server listen port
-        {server_port, 8080},
+        % WebSocket mTLS server configuration
+        {websocket_mtls_enabled, true},
+        {websocket_mtls_port, 8443},
 
         % Poll interval (seconds)
         {poll_interval, 2},  % FIXME: adjust as needed

@@ -28,7 +28,8 @@
     notify/2,
     add_handler/2,
     delete_handler/2,
-    setup_event_handlers/0
+    setup_event_handlers/0,
+    setup_event_handlers/1
 ]).
 
 %%--------------------------------------------------------------------
@@ -46,13 +47,12 @@ notify(EventId, Data) ->
 %% @doc
 %% Adds an event handler to the event manager.
 %% @param Handler The event handler module to add
-%% @param Args Initialization arguments for the handler
+%% @param Args Initialization arguments for the handler (map)
 %% @end
 %%--------------------------------------------------------------------
--spec add_handler(Handler :: module(), Args :: list()) ->
+-spec add_handler(Handler :: module(), Args :: map()) ->
     ok | {'EXIT', term()} | term().
 add_handler(Handler, Args) ->
-    error_logger:info_msg("Cryptic adding event handler: ~p", [Handler]),
     gen_event:add_handler(?MODULE, Handler, Args).
 
 %%--------------------------------------------------------------------
@@ -75,7 +75,18 @@ delete_handler(Handler, Args) ->
 %%--------------------------------------------------------------------
 -spec setup_event_handlers() -> ok.
 setup_event_handlers() ->
-    %% An envornment variable can override the default event handlers
+    setup_event_handlers(#{}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Sets up the event handlers for the Cryptic implementation with configuration.
+%% Reads configuration from application environment or environment variables.
+%% @param Config Configuration map passed to event handlers (e.g., #{log_type => server})
+%% @end
+%%--------------------------------------------------------------------
+-spec setup_event_handlers(Config :: map()) -> ok.
+setup_event_handlers(Config) ->
+    %% An environment variable can override the default event handlers
     %% defined in the application configuration.
     case
         maybe_env_handlers(
@@ -83,12 +94,10 @@ setup_event_handlers() ->
         )
     of
         [] ->
-            io:format("No event handlers configured, using default~n", []),
             ok;
         EventHandlers ->
-            io:format("Setting up event handlers: ~p~n", [EventHandlers]),
             try
-                [add_handler(M, []) || M <- EventHandlers]
+                [add_handler(M, Config) || M <- EventHandlers]
             catch
                 _:Error ->
                     error_logger:error_msg(

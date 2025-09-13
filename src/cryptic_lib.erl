@@ -64,7 +64,13 @@
     hkdf_sha256/4,
     derive_aead_key_random/1,
     derive_aead_key_ephemeral/2,
-    derive_aead_key_simple/1
+    derive_aead_key_simple/1,
+    %% Server storage functions
+    store_prekey/2,
+    get_prekey/1,
+    list_users/0,
+    store_message/2,
+    get_messages/1
 ]).
 
 %% Use our custom NIF functions (wraps libsodium)
@@ -362,3 +368,66 @@ derive_aead_key_ephemeral(SharedSecret, EphemeralPubKey) ->
 %% @returns 32-byte AEAD key for ChaCha20-Poly1305
 derive_aead_key_simple(SharedSecret) ->
     hkdf_sha256(SharedSecret, <<"encryption">>, 32).
+
+%%%===================================================================
+%%% Server Storage Functions (Simple in-memory implementation)
+%%%===================================================================
+
+%% Simple in-memory storage (for demo purposes - would use persistent storage in production)
+-define(PREKEY_TABLE, cryptic_prekeys).
+-define(MESSAGE_TABLE, cryptic_messages).
+-define(USER_TABLE, cryptic_users).
+
+%% @doc Store a user's prekey.
+-spec store_prekey(string(), binary()) -> ok | {error, term()}.
+store_prekey(Username, Prekey) ->
+    ensure_tables(),
+    ets:insert(?PREKEY_TABLE, {Username, Prekey}),
+    ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
+    ok.
+
+%% @doc Get a user's prekey.
+-spec get_prekey(string()) -> {ok, binary()} | {error, not_found}.
+get_prekey(Username) ->
+    ensure_tables(),
+    case ets:lookup(?PREKEY_TABLE, Username) of
+        [{Username, Prekey}] -> {ok, Prekey};
+        [] -> {error, not_found}
+    end.
+
+%% @doc List all registered users.
+-spec list_users() -> [string()].
+list_users() ->
+    ensure_tables(),
+    [Username || {Username, _Timestamp} <- ets:tab2list(?USER_TABLE)].
+
+%% @doc Store a message for a user.
+-spec store_message(string(), map()) -> ok.
+store_message(ToUser, MessageBlob) ->
+    ensure_tables(),
+    MessageId = erlang:unique_integer([positive]),
+    ets:insert(?MESSAGE_TABLE, {MessageId, ToUser, MessageBlob}),
+    ok.
+
+%% @doc Get all messages for a user.
+-spec get_messages(string()) -> [map()].
+get_messages(Username) ->
+    ensure_tables(),
+    Messages = [MessageBlob || {_Id, ToUser, MessageBlob} <- ets:tab2list(?MESSAGE_TABLE), ToUser == Username],
+    %% Remove retrieved messages (simple implementation)
+    [ets:delete(?MESSAGE_TABLE, Id) || {Id, ToUser, _} <- ets:tab2list(?MESSAGE_TABLE), ToUser == Username],
+    Messages.
+
+%% @doc Ensure ETS tables exist.
+ensure_tables() ->
+    ensure_table(?PREKEY_TABLE),
+    ensure_table(?MESSAGE_TABLE),
+    ensure_table(?USER_TABLE).
+
+ensure_table(TableName) ->
+    case ets:info(TableName) of
+        undefined ->
+            ets:new(TableName, [named_table, public, bag]);
+        _ ->
+            ok
+    end.
