@@ -1,141 +1,384 @@
 # Cryptic - End-to-End Encrypted Chat System
 
-A proof-of-concept implementation of an end-to-end encrypted chat system built in Erlang/OTP, featuring a professional terminal UI and demonstrating modern cryptographic protocols for secure message exchange.
+A professional implementation of an end-to-end encrypted chat system built in Erlang/OTP, featuring WebSocket mTLS communication, real-time messaging, and demonstrating modern cryptographic protocols for secure message exchange.
 
 ## Overview
 
 Cryptic implements a secure messaging system using:
+- **WebSocket mTLS** communication for real-time, certificate-authenticated messaging
 - **X25519** key agreement for establishing shared secrets
 - **ChaCha20-Poly1305** AEAD encryption for message confidentiality and authenticity
-- **HKDF-SHA256** key derivation with multiple security strategies
-- **HTTP REST API** for prekey distribution and message delivery
-- **Forward secrecy** through ephemeral keys for each message exchange
-- **Professional Terminal UI** with real-time chat capabilities
-- **Color-coded interface** for enhanced user experience
+- **HKDF-SHA256** key derivation with ephemeral-based salts
+- **Automatic keypair generation** and prekey exchange on connect
+- **Perfect forward secrecy** through ephemeral keys for each message exchange
+- **Professional Terminal UI** with real-time chat capabilities and inbox functionality
+- **Color-coded interface** with interactive chat mode and command processing
 
 ## Quick Start
 
-### Terminal UI Mode
+### WebSocket mTLS Mode (Current Implementation)
 ```bash
-# Start the server
-$ rebar3 shell
+# Start the server with WebSocket support
+$ ./scripts/start-server.sh
 
-# Or:
-$ erl -pa _build/default/lib/*/ebin
-1> cryptic_server:start().
-
-# In another terminal(s), start the UI
-$ ./bin/cryptic
-
-# Or:
-$ erl -pa _build/default/lib/*/ebin
-1> cryptic_cecho_ui:start().
+# In another terminal, start the UI client
+$ ./scripts/start-client.sh bob
 
 # Follow the on-screen instructions:
-# 1. Register with: register <username>
-# 2. Send messages with: send <user> <message>
-# 3. Enter chat mode with: chat <user>
-# 4. Use help command for more options
+# 1. Connect to server: connect
+# 2. Send messages: send <user> <message>
+# 3. Enter chat mode: chat <user>
+# 4. Check inbox: inbox
+# 5. List users: list_users
+# 6. Use help command for more options
 ```
 
 ### UI Commands
 - **`help`** - Show available commands
-- **`register <username>`** - Register with the server
-- **`send <user> <message>`** - Send encrypted message
-- **`chat <user>`** - Enter real-time chat mode
-- **`inbox`** - Check for new messages manually
-- **`list_users`** - Show all registered users
+- **`connect`** - Connect to WebSocket server with certificate authentication
+- **`send <user> <message>`** - Send encrypted message to user
+- **`chat <user>`** - Enter real-time chat mode with automatic message polling
+- **`inbox`** - View all received encrypted messages with timestamps
+- **`list_users`** - Show all users registered on the server
 - **`quit`** - Exit the application
 
 ### Chat Mode Commands
 Once in chat mode with `chat <username>`:
-- **Type any message** - Sends directly to chat target
-- **`:exit`** - Leave chat mode
+- **Type any message** - Sends encrypted message directly to chat target
+- **`:exit`** - Leave chat mode and return to command mode
 - **`:help`** - Show chat-specific help
+
+## Certificate handling
+
+The Cryptic system uses the [`myca`](https://github.com/etnt/myca.git) Certificate Authority framework for managing X.509 certificates required for WebSocket mTLS authentication. This section explains how to set up the CA infrastructure and manage client certificates.
+
+### CA Infrastructure Setup
+
+The certificate infrastructure is based on the `myca` framework located in the `CA/` directory. This provides a complete Certificate Authority with modern elliptic curve cryptography (secp384r1) for enhanced security and performance.
+
+#### Initial CA and Server Certificate Creation
+
+```bash
+# Navigate to the CA directory
+cd CA/
+
+# Generate CA certificate and server certificate (first time setup)
+make all
+```
+
+This creates:
+- **CA certificate** (`certs/ca.crt`) - Root certificate for signing all other certificates
+- **Server certificate** (`certs/server.crt`) and key (`private/server.key`) - Used by the WebSocket server
+- Directory structure for organized certificate management:
+  - `certs/` - CA and issued certificates
+  - `private/` - Private keys (CA and server)
+  - `csr/` - Certificate signing requests
+  - `client_keys/` - Client certificates and keys
+  - `crl/` - Certificate revocation lists
+
+#### Pre-defined Client Certificates
+
+The system comes with several pre-configured client certificates for immediate testing:
+
+- **alice** - `CA/client_keys/alice.{crt,key,pem}`
+- **bob** - `CA/client_keys/bob.{crt,key,pem}`
+- **charlie** - `CA/client_keys/charlie.{crt,key,pem}`
+- **admin** - `CA/client_keys/admin.{crt,key,pem}`
+
+Each client has three files:
+- `.crt` - Certificate only
+- `.key` - Private key only  
+- `.pem` - Combined certificate and private key (used by Erlang SSL)
+
+### Creating New Client Certificates
+
+To create a new client certificate for additional users:
+
+```bash
+cd CA/
+make client
+```
+
+The system will prompt for:
+- **Client name**: Full name of the user (e.g., "Dave Anderson")
+- **Client email**: Email address (e.g., "dave@example.com")
+- **Subject Alternative Names (SANs)**: Optional additional identities
+
+Example session:
+```bash
+❯ make client
+Enter client name: Dave Anderson
+Enter client email: dave@example.com
+Do you want to add Subject Alternative Names (SANs)? (y/N): y
+Enter Subject Alternative Names (SANs) - press Enter to skip each type:
+DNS names (comma-separated): dave.internal.com
+IP addresses (comma-separated): 192.168.1.50
+Email addresses (comma-separated): d.anderson@example.com
+URIs (comma-separated): 
+```
+
+This generates:
+```bash
+# Certificate files
+CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.crt
+CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.key  
+CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.pem
+```
+
+### Certificate Verification and Management
+
+#### Verify Certificate Validity
+```bash
+cd CA/
+./scripts/verify-crt.sh client_keys/alice.crt
+# Output: client_keys/alice.crt: OK
+```
+
+#### Generate Certificate Fingerprint
+```bash
+cd CA/
+./scripts/fingerprint.sh client_keys/alice.crt
+# Output: sha256 Fingerprint=A1:B2:C3:D4:E5:F6:...
+```
+
+#### View Certificate Details
+```bash
+cd CA/
+openssl x509 -in client_keys/alice.crt -text -noout
+```
+
+### Certificate Revocation
+
+To revoke a compromised or no longer valid certificate:
+
+```bash
+cd CA/
+./scripts/revoke-cert.sh certs/02.pem  # Revoke certificate with serial 02
+```
+
+This updates:
+- `index.txt` - Marks certificate as revoked (status flag changes from 'V' to 'R')
+- `crl/rootca.crl` - Certificate Revocation List for the Erlang SSL application
+
+#### Check Revocation Status
+```bash
+cd CA/
+./scripts/print-crl.sh  # View all revoked certificates
+```
+
+### Using Certificates with Cryptic
+
+#### Starting the Server with Certificates
+```bash
+# Use the provided script that sets up certificate paths
+./scripts/start-server.sh
+```
+
+#### Starting Clients with Specific Certificates
+```bash
+# Start client with alice's certificate
+./scripts/start-client.sh alice
+
+# Start client with bob's certificate  
+./scripts/start-client.sh bob
+
+# Start client with charlie's certificate
+./scripts/start-client.sh charlie
+```
+
+The start scripts automatically configure the WebSocket client to use:
+- CA certificate for server verification: `CA/certs/ca.crt`
+- Client certificate for mTLS authentication: `CA/client_keys/{user}.pem`
+
+#### Manual Certificate Configuration
+
+For custom setups, use environment variables to specify certificate paths as
+demonstrated in the start scripts:
+
+**Environment Variables for Certificate Paths**:
+```bash
+# Set certificate paths via environment variables
+export CRYPTIC_CLIENT_CERT="CA/client_keys/alice.crt"
+export CRYPTIC_CLIENT_KEY="CA/client_keys/alice.key" 
+export CRYPTIC_CA_CERT="CA/certs/ca.crt"
+
+# Start client with custom certificate configuration
+erl -pa _build/default/lib/*/ebin -eval "cryptic_ws_ui:start(\"alice\", \"localhost\")." -noinput
+```
+
+This approach allows flexible certificate management without modifying code,
+making it suitable for different deployment environments.
+
+### Certificate Security Features
+
+#### Modern Cryptography
+- **Algorithm**: Elliptic Curve (secp384r1) instead of RSA for better security/performance
+- **Validity**: 10-year certificate lifetime (3652 days) for production stability
+- **Key Size**: 384-bit EC keys provide equivalent security to 7680-bit RSA keys
+
+#### Subject Alternative Names (SAN) Support
+Client certificates can include multiple identity types:
+- **DNS names**: For domain-based authentication
+- **IP addresses**: For IP-based connections
+- **Email addresses**: For email-based identity verification  
+- **URIs**: For service endpoint authentication
+
+#### Certificate Revocation List (CRL)
+- Real-time revocation checking during WebSocket mTLS handshake
+- Automatic CRL updates when certificates are revoked
+- Proper CRL formatting for Erlang SSL application compatibility
+
+### Production Certificate Management
+
+#### Certificate Rotation Strategy
+```bash
+# Generate new server certificate (keeping same CA)
+cd CA/
+./scripts/gen-server-cert.sh
+
+# Generate new client certificate for existing user
+make client  # Enter same user details to replace old certificate
+```
+
+#### Backup and Recovery
+```bash
+# Backup critical certificate infrastructure
+tar -czf cryptic-ca-backup-$(date +%Y%m%d).tar.gz CA/
+
+# Essential files to backup:
+# - CA/certs/ca.crt (CA certificate)
+# - CA/private/ca.key (CA private key) 
+# - CA/index.txt (certificate database)
+# - CA/serial (certificate serial counter)
+# - CA/client_keys/ (all client certificates)
+```
+
+#### Monitoring Certificate Expiration
+```bash
+# Check certificate expiration dates
+cd CA/
+for cert in client_keys/*.crt; do
+    echo "=== $cert ==="
+    openssl x509 -in "$cert" -noout -dates
+done
+```
+
+This certificate infrastructure provides enterprise-grade security for the Cryptic messaging system, ensuring strong authentication and secure transport for all WebSocket mTLS communications.
+
 
 ## Features
 
+### WebSocket mTLS Communication
+- **Real-time WebSocket messaging** with persistent connections for instant delivery
+- **Mutual TLS authentication** using client certificates for strong identity verification
+- **Automatic connection management** with reconnection handling and error recovery
+- **Message type handling** for users, prekey exchange, success/error responses, and encrypted messages
+- **Asynchronous command processing** with queued responses for smooth user experience
+
 ### Terminal User Interface
-- **Full-screen terminal UI** with ncurses-based interface using cecho
+- **Full-screen terminal UI** with ncurses-based interface using professional layout
 - **Real-time chat mode** for one-on-one conversations with automatic message polling
-- **Command-based interface** with comprehensive help system
-- **Color-coded messages** for better visual organization
-- **Status bar** showing server connection, user info, and undelivered message count
-- **Background message peeking** for non-intrusive notifications
-- **Context-sensitive help** that changes based on current mode
+- **Command-based interface** with comprehensive help system and auto-completion
+- **Inbox functionality** for viewing all received messages with timestamps
+- **Status display** showing connection state, current user, and available commands
+- **Interactive chat experience** with dedicated chat mode and command mode separation
 
 ### Cryptographic Security
-- **End-to-end encryption** using industry-standard algorithms
-- **Perfect forward secrecy** with ephemeral keys
-- **Multiple key derivation strategies** for different security/usability trade-offs
+- **End-to-end encryption** using industry-standard X25519 + ChaCha20-Poly1305
+- **Perfect forward secrecy** with ephemeral keys generated for each message
+- **Automatic keypair generation** and prekey upload on WebSocket connection
 - **Authenticated encryption** preventing tampering and ensuring confidentiality
 - **Libsodium integration** for battle-tested cryptographic implementations
+- **Secure prekey exchange** flow with proper key derivation using ephemeral-based HKDF
 
 ### User Experience
-- **Interactive registration** with server
-- **Real-time message delivery** in chat mode
-- **Message count notifications** without consuming messages
-- **Command history** and input handling
-- **Graceful error handling** with user-friendly messages
+- **Automatic connection** to WebSocket server with certificate authentication
+- **Real-time message delivery** with instant notification in chat mode
+- **Message history** with inbox functionality showing all received messages
+- **User discovery** with list_users command to find available contacts
+- **Graceful error handling** with user-friendly messages and recovery options
+- **Context-sensitive help** that changes based on current mode (command vs chat)
 
 ## Architecture
 
 ```
-┌─────────────┐                    ┌─────────────┐
-│   Alice     │                    │     Bob     │
-│             │                    │             │
-│ 1. Generate │                    │ 1. Upload   │
-│    ephemeral│                    │    prekey   │
-│    keypair  │                    │             │
-│             │   2. Get prekey    │             │
-│             │◄────────────────── │             │
-│             │                    │             │
-│ 3. Compute  │                    │             │
-│    shared   │                    │             │
-│    secret   │                    │             │
-│             │                    │             │
-│ 4. Derive   │                    │             │
-│    AEAD key │                    │             │
-│             │                    │             │
-│ 5. Encrypt  │  Encrypted blob    │ 6. Decrypt  │
-│    message  │──────────────────► │    message  │
-└─────────────┘                    └─────────────┘
+┌─────────────────┐           WebSocket mTLS            ┌───────────────┐
+│     Alice       │         ←──────────────────→        │      Bob      │
+│  (Terminal UI)  │                                     │ (Terminal UI) │
+└─────────┬───────┘                                     └───────┬───────┘
+          │                                                     │
+          │ 1. Connect with client cert                         │ 1. Connect with client cert
+          │ 2. Auto-generate keypair                            │ 2. Auto-generate keypair
+          │ 3. Upload prekey                                    │ 3. Upload prekey
+          │                                                     │
+          │ ┌─────────────────────────────────────────────────┐ │
+          └─│            WebSocket mTLS Server                │─┘
+            │        Certificate Authentication               │
+            │     Real-time Message Forwarding                │
+            │        User/Prekey Management                   │
+            └─────────────────────────────────────────────────┘
+
+Message Flow:
+1. Alice generates ephemeral keypair for message
+2. Alice fetches Bob's prekey via WebSocket
+3. Alice computes shared secret: X25519(alice_ephemeral_private, bob_prekey_public)
+4. Alice derives AEAD key: HKDF-SHA256(shared_secret, SHA256(ephemeral_public), "encryption")
+5. Alice encrypts message: ChaCha20-Poly1305(message, aead_key)
+6. Alice sends encrypted blob via WebSocket
+7. Server forwards message to Bob's WebSocket connection
+8. Bob decrypts message using same shared secret derivation
 ```
 
 ## Cryptographic Protocol
 
-### 1. Key Exchange
-- Bob generates a long-term X25519 keypair and uploads his public key (prekey) to the server
-- Alice generates an ephemeral X25519 keypair for each message
-- Alice retrieves Bob's prekey and computes: `shared_secret = X25519(alice_ephemeral_private, bob_prekey_public)`
-- Bob computes the same shared secret: `shared_secret = X25519(bob_prekey_private, alice_ephemeral_public)`
+### 1. WebSocket mTLS Authentication
+- Client connects to WebSocket server using mutual TLS authentication
+- Client certificate provides cryptographic identity verification
+- Secure channel established for all subsequent communication
 
-### 2. Key Derivation
-- Both parties derive an AEAD encryption key using HKDF-SHA256:
+### 2. Automatic Key Setup
+- Upon WebSocket connection, client automatically generates X25519 keypair
+- Client uploads public key (prekey) to server via WebSocket message
+- Server stores prekey and associates it with client connection
+
+### 3. Key Exchange per Message
+- Alice generates fresh ephemeral X25519 keypair for each message
+- Alice fetches Bob's prekey via WebSocket: `{"type": "get_prekey", "user": "bob"}`
+- Alice computes: `shared_secret = X25519(alice_ephemeral_private, bob_prekey_public)`
+- Bob computes same shared secret: `shared_secret = X25519(bob_prekey_private, alice_ephemeral_public)`
+
+### 4. Key Derivation
+- Both parties derive AEAD encryption key using HKDF-SHA256:
   ```
   salt = SHA256(ephemeral_public_key)
   aead_key = HKDF-SHA256(shared_secret, salt, "encryption", 32)
   ```
-- The ephemeral public key as salt ensures unique keys for each message exchange
+- Ephemeral public key as salt ensures unique keys per message exchange
 
-### 3. Message Encryption
-- Alice encrypts her message using ChaCha20-Poly1305:
-  ```
-  {ciphertext, nonce} = ChaCha20-Poly1305-Encrypt(message, aead_key, "")
-  ```
-- The encrypted blob contains: ephemeral public key, nonce, and ciphertext
+### 5. Message Encryption & Transmission
+- Alice encrypts: `{ciphertext, nonce} = ChaCha20-Poly1305-Encrypt(message, aead_key)`
+- Alice sends encrypted blob via WebSocket to server
+- Server forwards encrypted message to Bob's WebSocket connection in real-time
+- Bob receives and decrypts using same derived AEAD key
 
-### 4. Message Transmission
-- Alice sends the encrypted blob to the server via HTTP POST
-- Bob retrieves pending messages via HTTP GET
-- Bob decrypts using the same derived AEAD key
+### 6. Real-time Delivery
+- WebSocket connections enable instant message delivery
+- No polling required - messages pushed immediately to recipients
+- Inbox functionality stores all received messages with timestamps
 
 ## Security Features
+
+### Real-time WebSocket mTLS
+- **Certificate-based authentication**: Client certificates provide cryptographic identity
+- **Mutual TLS**: Both client and server authenticate each other
+- **Secure transport**: All communication encrypted at transport layer
+- **Connection persistence**: Maintains secure channel for real-time messaging
 
 ### Forward Secrecy
 - **Ephemeral keys**: Each message uses a fresh ephemeral keypair
 - **Unique AEAD keys**: Different ephemeral keys produce different encryption keys
 - **Past message security**: Compromise of current keys doesn't affect previous messages
+- **No key reuse**: Every message exchange uses completely fresh cryptographic material
 
 ### Cryptographic Strength
 - **X25519**: Elliptic curve Diffie-Hellman with Curve25519 (128-bit security)
@@ -145,7 +388,7 @@ Once in chat mode with `chat <username>`:
 
 ### Enhanced Key Derivation
 - **Ephemeral-based salt**: Uses `SHA256(ephemeral_public_key)` as HKDF salt
-- **Deterministic**: Both parties derive identical keys
+- **Deterministic**: Both parties derive identical keys without coordination
 - **Unique per exchange**: Different ephemeral keys → different AEAD keys
 - **No protocol overhead**: Salt derivation requires no additional data transmission
 
@@ -265,18 +508,18 @@ The cryptographic foundation of this system is **solid and production-ready** fo
 
 ```
 cryptic/
-├── README.md                    # This file
-├── rebar.config                 # Erlang build configuration
+├── README.md                    # This comprehensive documentation
+├── rebar.config                 # Erlang build configuration  
 ├── docs/
 │   └── CRYPTIC_PLAN.md         # Original design document
 ├── src/
 │   ├── cryptic.app.src         # OTP application metadata
-│   ├── cryptic_server.erl      # HTTP server with Cowboy routing
-│   ├── cryptic_handlers.erl    # HTTP request handlers
-│   ├── cryptic_lib.erl         # Core cryptographic functions
-│   ├── cryptic_client_lib.erl  # High-level client API
-│   ├── cryptic_cecho_ui.erl    # Terminal user interface
-│   └── cryptic_nif.erl         # NIF interface definitions
+│   ├── cryptic_server.erl      # WebSocket mTLS server with Cowboy
+│   ├── cryptic_handlers.erl    # WebSocket message handlers  
+│   ├── cryptic_lib.erl         # Core cryptographic functions and storage
+│   ├── cryptic_ws_client.erl   # WebSocket client with mTLS authentication
+│   ├── cryptic_ws_ui.erl       # Professional terminal UI with ncurses
+│   └── cryptic_event_manager.erl # Event handling and logging system
 ├── test/
 │   └── cryptic_e2e_test.erl    # End-to-end test suite
 ├── c_src/
@@ -285,26 +528,29 @@ cryptic/
 ├── priv/
 │   └── cryptic_nif.so          # Compiled NIF shared library
 └── scripts/
-    └── cryptic_client_example.erl # Client example script
+    └── cryptic_client_example.erl # Legacy HTTP client example
 ```
 
-## API Endpoints
+## WebSocket Message Protocol
 
-### Prekey Management
-- `POST /upload_prekey/{user_id}` - Upload a user's public prekey
-- `GET /get_prekey/{user_id}` - Retrieve a user's public prekey
+### Client to Server Messages
+- `{"type": "upload_prekey", "user": "alice", "prekey": "base64_public_key"}` - Upload user's public key
+- `{"type": "get_prekey", "user": "bob"}` - Request another user's public key
+- `{"type": "send_message", "from": "alice", "to": "bob", "ephemeral": "base64_ephemeral_public", "nonce": "base64_nonce", "cipher": "base64_ciphertext"}` - Send encrypted message
+- `{"type": "list_users"}` - Get list of all registered users
 
-### Message Delivery
-- `POST /send_blob` - Send an encrypted message blob
-- `GET /recv_blobs/{user_id}` - Retrieve pending encrypted messages
+### Server to Client Messages  
+- `{"type": "welcome", "message": "Connected to Cryptic server"}` - Connection confirmation
+- `{"type": "success", "operation": "upload_prekey", "message": "Prekey uploaded for alice"}` - Operation success
+- `{"type": "prekey", "user": "bob", "prekey": "base64_public_key"}` - Prekey response
+- `{"type": "users", "users": ["alice", "bob", "charlie"]}` - Users list response
+- `{"type": "message", "from": "alice", "ephemeral": "...", "nonce": "...", "cipher": "..."}` - Incoming encrypted message
+- `{"type": "error", "message": "User not found"}` - Error response
 
-### User Management
-- `GET /list_users` - List all registered users
-- `GET /peek_messages/{user_id}` - Check message count without consuming messages
-
-### Message Format
+### Message Encryption Format
 ```json
 {
+  "type": "send_message",
   "from": "alice",
   "to": "bob", 
   "ephemeral": "base64_ephemeral_public_key",
@@ -332,41 +578,42 @@ cd cryptic
 rebar3 compile
 ```
 
-### Start Server
+### Start WebSocket Server
 ```bash
-# Terminal 1: Start the server
+# Terminal 1: Start the WebSocket mTLS server
 erl -pa _build/default/lib/*/ebin
 1> cryptic_server:start().
 ```
 
-### Start Terminal UI
+### Start Terminal UI Client
 ```bash
-# Terminal 2: Start the interactive terminal UI
+# Terminal 2: Start the interactive WebSocket UI
 erl -pa _build/default/lib/*/ebin
-1> cryptic_cecho_ui:start().
+1> cryptic_ws_ui:start().
 
-# Or connect to a different server
-1> cryptic_cecho_ui:start("http://example.com:8080").
+# Or connect to a remote server
+1> cryptic_ws_ui:start("wss://example.com:8443").
 ```
 
 ### Terminal UI Usage
-Once the UI starts, you'll see a full-screen interface with:
-- **Status bar** at the top showing server, user, and message info
-- **Message area** in the middle displaying conversation history  
-- **Help bar** showing available commands
-- **Input line** at the bottom for typing commands
+Once the UI starts, you'll see a clean interface with:
+- **Command prompt** for entering commands
+- **Message display area** showing conversation history and system messages
+- **Status indicators** for connection state and current mode
 
 **Basic workflow:**
-1. Register: `register myusername`
-2. Send message: `send otherusername Hello there!`
-3. Enter chat mode: `chat otherusername`
-4. In chat mode, just type messages directly
-5. Exit chat mode: `:exit`
-6. Quit application: `quit`
+1. Connect to server: `connect`
+2. Send message: `send bob Hello there!`
+3. Enter chat mode: `chat bob`
+4. In chat mode, type messages directly (they're automatically encrypted and sent)
+5. Check inbox: `inbox` (to see all received messages with timestamps)
+6. List users: `list_users`
+7. Exit chat mode: `:exit`
+8. Quit application: `quit`
 
-### Run Client Demo
+### Run Legacy Client Demo
 ```bash
-# Terminal 3: Run the programmatic client example
+# Terminal 3: Run the legacy HTTP client example (for comparison)
 erl -pa _build/default/lib/*/ebin -s cryptic_client_example test -s init stop -noshell
 ```
 
@@ -376,332 +623,180 @@ erl -pa _build/default/lib/*/ebin -s cryptic_client_example test -s init stop -n
 rebar3 eunit
 ```
 
-## Client Library Usage
+## WebSocket Client Library Usage
 
-The `cryptic_client_lib` module provides a high-level API for building E2EE messaging applications. It abstracts away the cryptographic complexity and HTTP communication details.
+The WebSocket client provides real-time encrypted messaging with automatic certificate authentication. The UI (`cryptic_ws_ui`) demonstrates the complete implementation.
 
 ### Quick Start
 
 ```erlang
-%% Initialize the client library
-cryptic_client_lib:init_client().
+%% Start the WebSocket UI for interactive messaging
+cryptic_ws_ui:start().
 
-%% Generate keypairs for users
-{AlicePub, AlicePriv} = cryptic_lib:gen_keypair(),
-{BobPub, BobPriv} = cryptic_lib:gen_keypair().
-
-%% Bob uploads his prekey to the server
-cryptic_client_lib:upload_prekey("http://localhost:8080", "bob", BobPub).
-
-%% Alice sends an encrypted message to Bob
-cryptic_client_lib:send_encrypted_message(
-    "http://localhost:8080", "alice", "bob", BobPub, <<"Hello Bob!">>).
-
-%% Bob receives and decrypts his messages
-{ok, Messages} = cryptic_client_lib:receive_and_decrypt_messages(
-    "http://localhost:8080", "bob", BobPriv).
+%% Or programmatically use the WebSocket client
+{ok, ClientPid} = cryptic_ws_client:start_link(),
+cryptic_ws_client:connect(ClientPid),
+cryptic_ws_client:send_message(ClientPid, "bob", <<"Hello!">>).
 ```
 
-### API Reference
+### WebSocket Client API Reference
 
-#### Client Initialization
+#### Connection Management
 
-**`init_client/0`**
+**`start_link/0`**
 ```erlang
-cryptic_client_lib:init_client() -> ok.
+{ok, Pid} = cryptic_ws_client:start_link().
 ```
-Initializes the client by starting required applications (`inets`, `crypto`) and loading the cryptographic NIF.
+Starts a new WebSocket client process.
 
-#### Prekey Management
-
-**`upload_prekey/3`**
+**`connect/1`**
 ```erlang
-cryptic_client_lib:upload_prekey(ServerUrl, UserId, PublicKey) -> 
-    ok | {error, Reason}.
+ok = cryptic_ws_client:connect(ClientPid).
 ```
-- **ServerUrl**: Base URL of the Cryptic server (e.g., `"http://localhost:8080"`)
-- **UserId**: User identifier (string or binary)
-- **PublicKey**: User's X25519 public key (32 bytes)
+Connects to the WebSocket server using mTLS authentication. Automatically generates keypair and uploads prekey.
+
+**`set_ui_pid/2`**
+```erlang
+ok = cryptic_ws_client:set_ui_pid(ClientPid, UIPid).
+```
+Sets the UI process that will receive forwarded server messages.
+
+#### Messaging Operations
+
+**`send_message/3`**
+```erlang
+ok = cryptic_ws_client:send_message(ClientPid, "bob", <<"Hello Bob!">>).
+```
+Sends an encrypted message to the specified user. Automatically handles:
+- Fetching recipient's prekey
+- Generating ephemeral keypair
+- Encrypting message with ChaCha20-Poly1305
+- Sending via WebSocket
 
 **`get_prekey/2`**
 ```erlang
-cryptic_client_lib:get_prekey(ServerUrl, UserId) -> 
-    {ok, PublicKey} | {error, Reason}.
+ok = cryptic_ws_client:get_prekey(ClientPid, "bob").
 ```
-Retrieves a user's public prekey from the server.
+Requests a user's public prekey from the server.
 
-#### Message Operations
-
-**`encrypt_message/2`**
+**`list_users/1`**
 ```erlang
-cryptic_client_lib:encrypt_message(Message, RecipientPubKey) -> 
-    {ok, {EphPub, Nonce, Cipher, SharedSecret}} | {error, Reason}.
+ok = cryptic_ws_client:list_users(ClientPid).
 ```
-- Generates ephemeral keypair automatically
-- Computes shared secret using X25519
-- Derives AEAD key using ephemeral-based HKDF
-- Encrypts message with XChaCha20-Poly1305
+Requests the list of all registered users.
 
-**`send_message/6`**
-```erlang
-cryptic_client_lib:send_message(ServerUrl, FromUserId, ToUserId, 
-                                EphPub, Nonce, Cipher) -> 
-    ok | {error, Reason}.
-```
-Sends pre-encrypted message components to the server.
-
-**`receive_messages/2`**
-```erlang
-cryptic_client_lib:receive_messages(ServerUrl, UserId) -> 
-    {ok, [EncryptedBlob]} | {error, Reason}.
-```
-Fetches pending encrypted messages for a user. Returns list of message blobs with structure:
-```erlang
-#{
-    from => "sender_id",
-    ephemeral => "base64_ephemeral_pubkey",
-    nonce => "base64_nonce", 
-    cipher => "base64_ciphertext"
-}
-```
-
-**`decrypt_message/2`**
-```erlang
-cryptic_client_lib:decrypt_message(EncryptedBlob, RecipientPrivKey) -> 
-    {ok, PlainText} | {error, Reason}.
-```
-Decrypts a single message blob using the recipient's private key.
-
-#### High-Level E2E Functions
-
-**`send_encrypted_message/5`**
-```erlang
-cryptic_client_lib:send_encrypted_message(ServerUrl, FromUserId, ToUserId, 
-                                         RecipientPubKey, Message) -> 
-    ok | {error, Reason}.
-```
-Complete send flow: encrypts message and sends to server in one call.
-
-**`receive_and_decrypt_messages/3`**
-```erlang
-cryptic_client_lib:receive_and_decrypt_messages(ServerUrl, UserId, PrivateKey) -> 
-    {ok, [{FromUser, PlainTextMessage}]} | {error, Reason}.
-```
-Complete receive flow: fetches all pending messages and decrypts them. Returns a list of tuples containing the sender and decrypted message text.
-
-**`peek_message_count/2`**
-```erlang
-cryptic_client_lib:peek_message_count(ServerUrl, UserId) -> 
-    {ok, Count} | {error, Reason}.
-```
-Check the number of undelivered messages without consuming them. Useful for notifications and status displays.
-
-### Usage Patterns
-
-#### Basic Chat Application
+### Message Flow Example
 
 ```erlang
--module(my_chat_client).
--export([start/0]).
+%% Start client and UI
+{ok, ClientPid} = cryptic_ws_client:start_link(),
+{ok, UIPid} = cryptic_ws_ui:start_link(),
 
-start() ->
-    %% Initialize
-    cryptic_client_lib:init_client(),
-    
-    %% Generate user keypairs
-    {MyPub, MyPriv} = cryptic_lib:gen_keypair(),
-    {FriendPub, _} = cryptic_lib:gen_keypair(), % In reality, get from server
-    
-    %% Upload my prekey
-    ok = cryptic_client_lib:upload_prekey(
-        "http://localhost:8080", "me", MyPub),
-    
-    %% Send message to friend
-    ok = cryptic_client_lib:send_encrypted_message(
-        "http://localhost:8080", "me", "friend", FriendPub, 
-        <<"Hello from Erlang!">>),
-    
-    %% Check for messages
-    {ok, Messages} = cryptic_client_lib:receive_and_decrypt_messages(
-        "http://localhost:8080", "me", MyPriv),
-    
-    lists:foreach(fun(Msg) -> 
-        io:format("Received: ~s~n", [Msg]) 
-    end, Messages).
+%% Link client to UI for message forwarding
+cryptic_ws_client:set_ui_pid(ClientPid, UIPid),
+
+%% Connect with certificate authentication
+cryptic_ws_client:connect(ClientPid),
+
+%% Send encrypted message
+cryptic_ws_client:send_message(ClientPid, "alice", <<"Hello Alice!">>),
+
+%% UI will automatically receive and decrypt incoming messages
 ```
 
-#### Message Loop
+### Terminal UI Integration
+
+The `cryptic_ws_ui` module provides a complete terminal interface:
 
 ```erlang
-message_loop(ServerUrl, UserId, PrivKey) ->
-    timer:sleep(1000), % Poll every second
-    case cryptic_client_lib:receive_and_decrypt_messages(ServerUrl, UserId, PrivKey) of
-        {ok, []} -> 
-            message_loop(ServerUrl, UserId, PrivKey);
-        {ok, Messages} ->
-            lists:foreach(fun(Msg) ->
-                io:format("~s: ~s~n", [UserId, Msg])
-            end, Messages),
-            message_loop(ServerUrl, UserId, PrivKey);
-        {error, Reason} ->
-            io:format("Error receiving messages: ~p~n", [Reason])
-    end.
+%% Start the terminal UI (includes client management)
+cryptic_ws_ui:start().
+
+%% UI commands:
+%% connect          - Connect to WebSocket server
+%% send bob hello   - Send encrypted message to bob  
+%% chat alice       - Enter real-time chat with alice
+%% inbox            - View all received messages
+%% list_users       - Show registered users
+%% help             - Show command help
+%% quit             - Exit application
 ```
 
-#### Error Handling Best Practices
+### Message Handling
+
+The WebSocket client receives various message types from the server:
 
 ```erlang
-send_with_retry(ServerUrl, From, To, RecipientPubKey, Message, Retries) ->
-    case cryptic_client_lib:send_encrypted_message(
-        ServerUrl, From, To, RecipientPubKey, Message) of
-        ok -> 
-            ok;
-        {error, _Reason} when Retries > 0 ->
-            timer:sleep(1000),
-            send_with_retry(ServerUrl, From, To, RecipientPubKey, Message, Retries - 1);
-        {error, Reason} ->
-            {error, {max_retries_exceeded, Reason}}
-    end.
+%% Server message examples:
+#{type => welcome, message => <<"Connected to server">>}
+#{type => success, operation => upload_prekey, message => <<"Prekey uploaded">>}
+#{type => prekey, user => <<"bob">>, prekey => <<"base64_pubkey">>}
+#{type => users, users => [<<"alice">>, <<"bob">>, <<"charlie">>]}
+#{type => message, from => <<"alice">>, ephemeral => <<"...">>, nonce => <<"...">>, cipher => <<"...">>}
+#{type => error, message => <<"User not found">>}
 ```
 
-### Security Considerations
-
-#### Key Management
-```erlang
-%% Store private keys securely - never log or expose them
-{PubKey, PrivKey} = cryptic_lib:gen_keypair(),
-
-%% Public keys can be safely shared and stored
-store_public_key(UserId, PubKey),
-
-%% Private keys should be encrypted at rest in production
-SecurePrivKey = encrypt_private_key(PrivKey, UserPassword).
-```
-
-#### Message Validation
-```erlang
-validate_and_decrypt(EncryptedBlob, PrivKey) ->
-    case cryptic_client_lib:decrypt_message(EncryptedBlob, PrivKey) of
-        {ok, PlainText} when byte_size(PlainText) =< 10000 -> % Size limit
-            case is_valid_utf8(PlainText) of
-                true -> {ok, PlainText};
-                false -> {error, invalid_encoding}
-            end;
-        {ok, _} -> {error, message_too_large};
-        {error, Reason} -> {error, Reason}
-    end.
-```
-
-### Integration Examples
-
-#### With OTP GenServer
-```erlang
--module(chat_client_server).
--behaviour(gen_server).
-
--record(state, {
-    server_url,
-    user_id,
-    private_key,
-    contacts = #{} % user_id => public_key
-}).
-
-init([ServerUrl, UserId, PrivateKey]) ->
-    cryptic_client_lib:init_client(),
-    {ok, #state{
-        server_url = ServerUrl,
-        user_id = UserId, 
-        private_key = PrivateKey
-    }}.
-
-handle_call({send_message, ToUserId, Message}, _From, State) ->
-    case maps:get(ToUserId, State#state.contacts, undefined) of
-        undefined ->
-            {reply, {error, contact_not_found}, State};
-        ToPubKey ->
-            Result = cryptic_client_lib:send_encrypted_message(
-                State#state.server_url,
-                State#state.user_id,
-                ToUserId,
-                ToPubKey,
-                Message
-            ),
-            {reply, Result, State}
-    end.
-```
-
-#### Command Line Interface
-```erlang
-main([ServerUrl, UserId]) ->
-    cryptic_client_lib:init_client(),
-    {PubKey, PrivKey} = cryptic_lib:gen_keypair(),
-    
-    %% Upload prekey
-    cryptic_client_lib:upload_prekey(ServerUrl, UserId, PubKey),
-    
-    %% Interactive loop
-    cli_loop(ServerUrl, UserId, PrivKey).
-
-cli_loop(ServerUrl, UserId, PrivKey) ->
-    case io:get_line("Command (send/check/quit): ") of
-        "send\n" ->
-            ToUser = string:trim(io:get_line("To: ")),
-            Message = list_to_binary(string:trim(io:get_line("Message: "))),
-            case get_user_pubkey(ServerUrl, ToUser) of
-                {ok, ToPubKey} ->
-                    cryptic_client_lib:send_encrypted_message(
-                        ServerUrl, UserId, ToUser, ToPubKey, Message),
-                    io:format("Message sent!~n");
-                {error, Reason} ->
-                    io:format("Error: ~p~n", [Reason])
-            end,
-            cli_loop(ServerUrl, UserId, PrivKey);
-        "check\n" ->
-            {ok, Messages} = cryptic_client_lib:receive_and_decrypt_messages(
-                ServerUrl, UserId, PrivKey),
-            lists:foreach(fun(Msg) ->
-                io:format("Message: ~s~n", [Msg])
-            end, Messages),
-            cli_loop(ServerUrl, UserId, PrivKey);
-        "quit\n" ->
-            ok
-    end.
-```
-
-The client library provides a clean, type-safe API that handles all the cryptographic complexity while giving you full control over the messaging flow.
+All incoming messages are automatically forwarded to the registered UI process for display and user interaction.
 
 ### Expected Output
 ```
-Generating keypairs for alice and bob...
-Bob prekey uploaded.
-RespData from get_prekey: "{\"user_id\":\"bob\",\"pub\":\"...\"}"
-Alice - EphPub: <<"...">>
-Alice - Shared: <<"...">>
-Alice - AeadKey: <<"...">>
-Alice sent encrypted blob to server.
-Bob received: [{"from":"alice","ephemeral":"...","nonce":"...","cipher":"..."}]
-Bob - Shared: <<"...">>
-Bob - AeadKey: <<"...">>
-Bob decrypted message: <<"Hello Bob!">>
+Starting WebSocket UI...
+Connecting to wss://localhost:8443...
+Connected! Type 'help' for commands.
+
+> connect
+Generating keypair...
+Uploading prekey...
+Connected and ready!
+
+> send bob Hello from the new WebSocket system!
+Fetching prekey for bob...
+Encrypting message...
+Message sent to bob!
+
+> chat alice
+Entering chat mode with alice. Type ':exit' to leave.
+[Chat] alice: Hey! How's the new WebSocket implementation?
+> It's working great! Real-time messaging is so much better.
+[Chat] You -> alice: It's working great! Real-time messaging is so much better.
+[Chat] alice: I love the instant delivery!
+> :exit
+Left chat mode.
+
+> inbox
+=== INBOX ===
+[2024-09-13 14:23:15] alice: Hey! How's the new WebSocket implementation?
+[2024-09-13 14:23:45] alice: I love the instant delivery!
+[2024-09-13 14:24:12] bob: Thanks for the message! This is much faster than HTTP polling.
+
+> quit
+Goodbye!
 ```
 
 ## Implementation Details
 
+### WebSocket mTLS Communication
+The system uses Cowboy WebSocket handlers for real-time communication:
+- **Certificate-based authentication** with mutual TLS verification
+- **Persistent connections** for instant message delivery without polling
+- **JSON message protocol** with typed messages for different operations
+- **Automatic reconnection** handling with graceful error recovery
+
 ### Custom NIF (Native Implemented Functions)
 The system uses a custom C NIF that wraps libsodium functions:
 - `gen_keypair/0` - Generate X25519 keypair
-- `scalarmult/2` - X25519 scalar multiplication
+- `scalarmult/2` - X25519 scalar multiplication  
 - `aead_encrypt/3` - ChaCha20-Poly1305 encryption
 - `aead_decrypt/4` - ChaCha20-Poly1305 decryption
 - `rand_bytes/1` - Cryptographically secure random bytes
 
 ### Terminal UI Architecture
-The cecho-based UI uses an event-driven architecture:
-- **Main event loop** processes user input and system events
-- **Input handler process** captures keyboard input asynchronously
-- **Status updater process** refreshes the status bar periodically
-- **Auto-peek timer** checks for new messages in the background
-- **Chat poll timer** provides real-time messaging in chat mode
+The WebSocket UI uses a clean command-based architecture:
+- **Command processor** handles user input and dispatches operations
+- **WebSocket client** manages server communication and message forwarding
+- **Message handler** processes incoming server messages and updates display
+- **Inbox storage** maintains message history with timestamps
+- **Chat mode** provides real-time messaging with automatic message polling
 
 ### HKDF Implementation
 Pure Erlang implementation of HKDF-SHA256:
@@ -713,97 +808,134 @@ hkdf_sha256(IKM, Salt, Info, L) ->
 ```
 
 ### Error Handling
-- Comprehensive NIF error checking with descriptive error atoms
-- HTTP request validation and proper error responses
-- Base64 encoding/decoding with error handling
-- Cryptographic operation failure detection
+- Comprehensive WebSocket error handling with reconnection logic
+- JSON parsing validation with descriptive error messages
+- Cryptographic operation failure detection and recovery
+- User-friendly error display without technical implementation details
 
 ## Security Considerations
 
 ### Current Limitations
-- **In-memory storage**: Messages and prekeys stored in ETS (not persistent)
-- **⚠️ No authentication**: Anyone can register with any username - **SECURITY RISK**
-- **No replay protection**: Messages could theoretically be replayed
-- **Single prekey**: Bob uses one prekey for all conversations
+- **In-memory storage**: Messages and prekeys stored in ETS (not persistent across restarts)
+- **⚠️ Certificate-based identity**: WebSocket mTLS provides authentication but not user identity verification
+- **No replay protection**: Messages could theoretically be replayed (no sequence numbers)
+- **Single prekey**: Users have one prekey for all conversations (no key rotation)
 
-### Authentication Security Gap
+### Certificate Authentication vs User Identity
 
-**CRITICAL**: The current system allows unrestricted registration:
+**Important**: While WebSocket mTLS provides strong transport authentication, the current system doesn't link certificates to specific usernames. This means:
+
 ```bash
-register alice  # Anyone can claim to be "alice"
+# Anyone with a valid certificate can claim any username
+connect
+send alice "impersonation message"  # Could claim to be from alice
 ```
 
-This poses significant security risks in any real-world deployment. See our comprehensive [**Authentication Plan**](docs/AUTHENTICATION_PLAN.md) for modern solutions.
+For production deployment, consider implementing certificate-to-username mapping or additional identity verification layers.
 
-### Recommended Authentication Solutions
+### Recommended Security Enhancements
 
-We've designed a **4-phase authentication roadmap** with increasing security levels:
+For production deployment, consider implementing:
 
-1. **Phase 1: Pre-Shared Keys** (1-2 days) - Quick security fix
-   - Users need a secret token to register
-   - Immediate protection against unauthorized access
-   - Simple to deploy
+1. **Certificate-Username Binding**
+   - Map client certificates to specific usernames
+   - Prevent username impersonation with valid certificates
+   - Certificate revocation and rotation mechanisms
 
-2. **Phase 2: JWT Authentication** (3-5 days) - Modern standard
-   - Username/password login with JWT tokens
-   - Fine-grained permissions and role-based access
-   - Industry-standard security
+2. **Enhanced Authentication**
+   - Username/password registration with certificate generation
+   - Digital signature verification for message authenticity
+   - Multi-factor authentication with hardware security keys
 
-3. **Phase 3: Ed25519 Digital Signatures** (4-7 days) - Cryptographically strong
-   - Challenge-response authentication with digital signatures
-   - Cryptographically provable identity
-   - No passwords to compromise
+3. **Message Integrity**
+   - Sequence numbers for replay protection
+   - Message ordering and duplicate detection
+   - Delivery receipts and read confirmations
 
-4. **Phase 4: Hardware Security Keys** (1-2 weeks) - Enterprise grade
-   - FIDO2/WebAuthn support for hardware tokens
-   - Multi-factor authentication
-   - Maximum security for sensitive deployments
-
-**📖 Full details**: [Authentication and Access Control Plan](docs/AUTHENTICATION_PLAN.md)
+4. **Key Management**
+   - Multiple prekeys per user (X3DH protocol)
+   - Automatic key rotation mechanisms
+   - Perfect forward secrecy with Double Ratchet algorithm
 
 ### Production Considerations
-For production use, implementing authentication is **essential**. Additionally consider:
-- Message ordering and replay protection
-- Persistent storage with proper key management
-- Key rotation mechanisms
-- Multiple prekeys per user (X3DH protocol)
-- Perfect forward secrecy with Double Ratchet
-- Message delivery receipts and read confirmations
-- Group messaging capabilities
-- File transfer support
-- Rate limiting and abuse prevention
-- Audit logging and monitoring
+For production use, implementing proper identity verification is **essential**. Additionally consider:
+- **Persistent storage** with proper database backend and key management
+- **Message ordering** and replay protection with sequence numbers
+- **User registration** with certificate generation and identity verification
+- **Key rotation** mechanisms and multiple prekeys per user (X3DH protocol)
+- **Perfect forward secrecy** with Double Ratchet for ongoing conversations
+- **Group messaging** capabilities with efficient key distribution
+- **File transfer** support with chunked encryption
+- **Rate limiting** and abuse prevention at WebSocket level
+- **Audit logging** and monitoring of security events
+- **High availability** with server clustering and load balancing
 
-## UI Screenshots
+## UI Interface
 
-The terminal interface provides a professional chat experience:
+The WebSocket terminal interface provides a clean, professional messaging experience:
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ CRYPTIC CHAT | Server: http://localhost:8080 | User: alice | Chat with: bob | │
-│              | Undelivered: 2 | 14:23:45                                     │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ === CRYPTIC CHAT ===                                                        │
-│ Server: http://localhost:8080                                               │
-│ Successfully registered as: alice                                           │
-│ Entering chat mode with bob. Type ':exit' to leave chat mode.              │
-│ bob: Hello Alice! How are you?                                              │
-│ You -> bob: I'm doing great, thanks for asking!                            │
-│ bob: That's wonderful to hear.                                              │
-│                                                                              │
-│                                                                              │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ Chat Mode: Type message to send | :exit to leave chat | :help for commands  │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ > Great! Let me tell you about my day...                                    │
-└──────────────────────────────────────────────────────────────────────────────┘
+=== CRYPTIC WEBSOCKET CLIENT ===
+Server: wss://localhost:8443
+Status: Connected | User: alice
+
+> connect
+Generating keypair...
+Uploading prekey...
+Connected and ready for secure messaging!
+
+> send bob Hello from the encrypted world!
+Fetching prekey for bob...
+Encrypting message...
+Message sent to bob!
+
+> chat alice
+Entering chat mode with alice. Type ':exit' to leave chat mode.
+[Chat] alice: Hey! How's the new WebSocket implementation working?
+> It's fantastic! Real-time messaging feels so much more natural.
+[Chat] You -> alice: It's fantastic! Real-time messaging feels so much more natural.
+[Chat] alice: I agree! The instant delivery makes a huge difference.
+> The encryption is completely transparent to the user experience.
+[Chat] You -> alice: The encryption is completely transparent to the user experience.
+> :exit
+Left chat mode. Back to command mode.
+
+> inbox
+=== INBOX ===
+[2024-09-13 14:23:15] alice: Hey! How's the new WebSocket implementation working?
+[2024-09-13 14:23:45] alice: I agree! The instant delivery makes a huge difference.
+[2024-09-13 14:24:12] bob: Thanks for the message! This WebSocket system is so much better.
+[2024-09-13 14:24:18] charlie: The real-time updates are game-changing for user experience.
+
+> list_users
+=== REGISTERED USERS ===
+- alice (online)
+- bob (online)  
+- charlie (online)
+- dave (online)
+
+> help
+=== AVAILABLE COMMANDS ===
+connect                    - Connect to WebSocket server
+send <user> <message>      - Send encrypted message to user
+chat <user>                - Enter real-time chat mode
+inbox                      - View all received messages
+list_users                 - Show all registered users
+help                       - Show this help message  
+quit                       - Exit application
+
+> quit
+Disconnecting from server...
+Goodbye!
 ```
 
-**Features visible in the interface:**
-- **Status bar** shows server, current user, chat target, and message count
-- **Message area** displays conversation with color-coded messages
-- **Help bar** provides context-sensitive command information
-- **Input line** shows current typing with prompt
+**Key Interface Features:**
+- **Clean command-line interface** with clear prompts and feedback
+- **Real-time chat mode** with automatic message polling and instant delivery
+- **Message history** via inbox command showing all conversations with timestamps
+- **User discovery** with online status indicators
+- **Context-sensitive help** showing available commands
+- **Seamless encryption** - all cryptographic operations are transparent to the user
 
 ## Testing Different Security Modes
 
