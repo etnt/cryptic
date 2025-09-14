@@ -114,6 +114,8 @@
 %%   scroll_position :: integer(),
 %%   command_history :: [string()],
 %%   current_input :: string(),
+%%   cursor_position :: integer(),
+%%   history_position :: integer(),
 %%   input_pid :: pid(),
 %%   status_pid :: pid(),
 %%   chat_mode :: boolean(),
@@ -127,6 +129,8 @@
     scroll_position = 0 :: integer(),
     command_history = [] :: [string()],
     current_input = "" :: string(),
+    cursor_position = 0 :: integer(),             % Cursor position in current_input
+    history_position = 0 :: integer(),            % Position in command history (0 = not browsing)
     input_pid :: pid(),
     status_pid :: pid(),
     
@@ -319,10 +323,10 @@ ui_main_loop(UIState) ->
         {status_update} ->
             %% Update status bar
             draw_status_bar(UIState),
-            cecho:refresh(),
-
-            %% Reposition cursor after status bar update
+            
+            %% Position cursor before refresh to avoid flickering
             position_cursor(UIState),
+            cecho:refresh(),
 
             ui_main_loop(UIState);
 
@@ -374,10 +378,33 @@ ui_main_loop(UIState) ->
 %%
 %% @param UIState Current UI state containing input text and screen dimensions.
 position_cursor(UIState) ->
-    #ui_state{current_input = Input, screen_height = Height} = UIState,
+    #ui_state{
+        current_input = Input,
+        cursor_position = CursorPos,
+        screen_height = Height,
+        screen_width = Width
+    } = UIState,
+    
     Prompt = "> ",
-    CursorX = length(Prompt ++ Input),
-    cecho:move(Height - 1, CursorX).
+    PromptLen = length(Prompt),
+    InputLine = Prompt ++ Input,
+    
+    %% Calculate cursor screen position
+    CursorScreenPos = PromptLen + CursorPos,
+    
+    %% Handle horizontal scrolling if line is too long
+    FinalCursorPos = case length(InputLine) of
+        Len when Len > Width ->
+            %% Need to scroll - center cursor if possible
+            ScrollOffset = max(0, CursorScreenPos - (Width div 2)),
+            ScrollOffset2 = min(ScrollOffset, Len - Width),
+            CursorScreenPos - ScrollOffset2;
+        _ ->
+            CursorScreenPos
+    end,
+    
+    %% Position cursor correctly
+    cecho:move(Height - 1, min(FinalCursorPos, Width - 1)).
 
 %% @private
 %% @doc Draw the complete screen layout with all UI components.
@@ -407,14 +434,14 @@ draw_screen(UIState) ->
     %% Draw help bar (line Height-3)
     draw_help_bar(UIState),
     
-    %% Draw input line (line Height-1) - but don't position cursor yet
+    %% Draw input line (line Height-1)
     draw_input_line(UIState),
     
-    %% Refresh screen first to update physical display
-    cecho:refresh(),
+    %% Position cursor BEFORE refresh to avoid flickering
+    position_cursor(UIState),
     
-    %% NOW position cursor after refresh
-    position_cursor(UIState).
+    %% Refresh screen to update physical display
+    cecho:refresh().
 
 %% @private
 %% @doc Draw the status bar at the top showing WebSocket connection and user info.
@@ -437,9 +464,6 @@ draw_status_bar(UIState) ->
         ws_chat_state = WSChatState,
         screen_width = Width
     } = UIState,
-    
-    %% Save current cursor position
-    {CurY, CurX} = cecho:getyx(),
     
     %% Get current time
     {_, {Hour, Min, Sec}} = calendar:local_time(),
@@ -491,10 +515,7 @@ draw_status_bar(UIState) ->
     %% Draw with status bar colors
     cecho:attron(?ceCOLOR_PAIR(?COLOR_STATUS_BAR)),
     cecho:mvaddstr(0, 0, StatusLineFmt),
-    cecho:attroff(?ceCOLOR_PAIR(?COLOR_STATUS_BAR)),
-    
-    %% Restore cursor position
-    cecho:move(CurY, CurX).
+    cecho:attroff(?ceCOLOR_PAIR(?COLOR_STATUS_BAR)).
 
 %% @private
 %% @doc Draw the scrollable message display area.
@@ -621,18 +642,26 @@ draw_help_bar(UIState) ->
 draw_input_line(UIState) ->
     #ui_state{
         current_input = Input,
+        cursor_position = CursorPos,
         screen_height = Height,
         screen_width = Width
     } = UIState,
     
     %% Create input line with prompt
     Prompt = "> ",
+    PromptLen = length(Prompt),
     InputLine = Prompt ++ Input,
     
-    %% Truncate if too long
+    %% Calculate cursor screen position
+    CursorScreenPos = PromptLen + CursorPos,
+    
+    %% Handle horizontal scrolling if line is too long
     DisplayLine = case length(InputLine) of
         Len when Len > Width ->
-            string:substr(InputLine, 1, Width);
+            %% Need to scroll - center cursor if possible
+            ScrollOffset = max(0, CursorScreenPos - (Width div 2)),
+            ScrollOffset2 = min(ScrollOffset, Len - Width),
+            string:substr(InputLine, ScrollOffset2 + 1, Width);
         _ ->
             InputLine
     end,
@@ -645,6 +674,7 @@ draw_input_line(UIState) ->
     %% Now draw the actual input content
     cecho:mvaddstr(Height - 1, 0, DisplayLine),
     
+    %% Don't position cursor here - that's done separately in position_cursor/1
     cecho:attroff(?ceCOLOR_PAIR(?COLOR_INPUT)).
 
 %%%===================================================================
@@ -654,13 +684,27 @@ draw_input_line(UIState) ->
 %% @private
 %% @doc Handle user input events from the input handler process.
 %%
-%% Processes different types of input:
+%% Processes different types of input with enhanced editing capabilities:
 %% <ul>
 %%   <li>`quit' - Initiates graceful shutdown</li>
-%%   <li>`{char, Char}' - Adds printable characters to input buffer</li>
-%%   <li>`{key, 10}' - Enter key processes current command</li>
-%%   <li>`{key, backspace}' - Removes last character from input</li>
+%%   <li>`{char, Char}' - Inserts printable characters at cursor position</li>
+%%   <li>`{key, 10}' - Enter key processes current command and adds to history</li>
+%%   <li>`{key, backspace}' - Removes character before cursor</li>
+%%   <li>`{key, delete}' - Removes character after cursor</li>
+%%   <li>`{key, left}' - Moves cursor left</li>
+%%   <li>`{key, right}' - Moves cursor right</li>
+%%   <li>`{key, home}' - Moves cursor to beginning of line</li>
+%%   <li>`{key, end_key}' - Moves cursor to end of line</li>
+%%   <li>`{key, up}' - Navigate up in command history</li>
+%%   <li>`{key, down}' - Navigate down in command history</li>
 %% </ul>
+%%
+%% Features:
+%% - Full cursor movement and text editing
+%% - Command history with up/down arrow navigation
+%% - Insert/delete at any position in the input line
+%% - Automatic command history management (up to 50 commands)
+%% - Horizontal scrolling for long input lines
 %%
 %% The function updates the UI state appropriately and triggers command
 %% processing when Enter is pressed.
@@ -675,23 +719,128 @@ handle_input(Input, UIState) ->
             self() ! quit,
             UIState;
         {char, Char} ->
-            %% Add character to input
+            %% Insert character at cursor position
             CurrentInput = UIState#ui_state.current_input,
-            NewInput = CurrentInput ++ [Char],
-            UIState#ui_state{current_input = NewInput};
+            CursorPos = UIState#ui_state.cursor_position,
+            {Before, After} = lists:split(CursorPos, CurrentInput),
+            NewInput = Before ++ [Char] ++ After,
+            NewCursorPos = CursorPos + 1,
+            %% Reset history position when typing
+            UIState#ui_state{
+                current_input = NewInput,
+                cursor_position = NewCursorPos,
+                history_position = 0
+            };
         {key, 10} ->  % Enter key (ASCII 10)
             %% Process command and clear input
             Command = UIState#ui_state.current_input,
-            ProcessedUIState = process_command(Command, UIState),
-            ProcessedUIState#ui_state{current_input = ""};
-        {key, ?ceKEY_BACKSPACE} ->
-            %% Remove last character
-            CurrentInput = UIState#ui_state.current_input,
-            NewInput = case length(CurrentInput) of
-                0 -> "";
-                Len -> string:substr(CurrentInput, 1, Len - 1)
+            %% Add non-empty commands to history
+            NewHistory = case string:strip(Command) of
+                "" -> UIState#ui_state.command_history;
+                CleanCommand -> 
+                    %% Add to front, limit to 50 commands
+                    lists:sublist([CleanCommand | UIState#ui_state.command_history], 50)
             end,
-            UIState#ui_state{current_input = NewInput};
+            ProcessedUIState = process_command(Command, UIState),
+            ProcessedUIState#ui_state{
+                current_input = "",
+                cursor_position = 0,
+                history_position = 0,
+                command_history = NewHistory
+            };
+        {key, ?ceKEY_BACKSPACE} ->
+            %% Remove character before cursor
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            if 
+                CursorPos > 0 ->
+                    {Before, After} = lists:split(CursorPos, CurrentInput),
+                    NewBefore = lists:sublist(Before, length(Before) - 1),
+                    NewInput = NewBefore ++ After,
+                    UIState#ui_state{
+                        current_input = NewInput,
+                        cursor_position = CursorPos - 1,
+                        history_position = 0
+                    };
+                true ->
+                    UIState
+            end;
+        {key, delete} ->
+            %% Remove character after cursor
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            if 
+                CursorPos < length(CurrentInput) ->
+                    {Before, After} = lists:split(CursorPos, CurrentInput),
+                    NewAfter = case After of
+                        [] -> [];
+                        [_|Rest] -> Rest
+                    end,
+                    NewInput = Before ++ NewAfter,
+                    UIState#ui_state{
+                        current_input = NewInput,
+                        history_position = 0
+                    };
+                true ->
+                    UIState
+            end;
+        {key, left} ->
+            %% Move cursor left
+            CursorPos = UIState#ui_state.cursor_position,
+            NewCursorPos = max(0, CursorPos - 1),
+            UIState#ui_state{cursor_position = NewCursorPos};
+        {key, right} ->
+            %% Move cursor right
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            NewCursorPos = min(length(CurrentInput), CursorPos + 1),
+            UIState#ui_state{cursor_position = NewCursorPos};
+        {key, home} ->
+            %% Move cursor to beginning
+            UIState#ui_state{cursor_position = 0};
+        {key, end_key} ->
+            %% Move cursor to end
+            CurrentInput = UIState#ui_state.current_input,
+            UIState#ui_state{cursor_position = length(CurrentInput)};
+        {key, up} ->
+            %% Navigate up in command history
+            History = UIState#ui_state.command_history,
+            HistoryPos = UIState#ui_state.history_position,
+            if 
+                HistoryPos < length(History) ->
+                    NewHistoryPos = HistoryPos + 1,
+                    HistoryCommand = lists:nth(NewHistoryPos, History),
+                    UIState#ui_state{
+                        current_input = HistoryCommand,
+                        cursor_position = length(HistoryCommand),
+                        history_position = NewHistoryPos
+                    };
+                true ->
+                    UIState
+            end;
+        {key, down} ->
+            %% Navigate down in command history
+            HistoryPos = UIState#ui_state.history_position,
+            if 
+                HistoryPos > 1 ->
+                    NewHistoryPos = HistoryPos - 1,
+                    History = UIState#ui_state.command_history,
+                    HistoryCommand = lists:nth(NewHistoryPos, History),
+                    UIState#ui_state{
+                        current_input = HistoryCommand,
+                        cursor_position = length(HistoryCommand),
+                        history_position = NewHistoryPos
+                    };
+                HistoryPos == 1 ->
+                    %% Return to empty input
+                    UIState#ui_state{
+                        current_input = "",
+                        cursor_position = 0,
+                        history_position = 0
+                    };
+                true ->
+                    UIState
+            end;
         _ ->
             %% Ignore other input
             UIState
@@ -1548,9 +1697,19 @@ format_timestamp(Timestamp) ->
 %%   <li>Ctrl+C (ASCII 3) - Graceful quit signal</li>
 %%   <li>Enter (ASCII 10) - Command execution</li>
 %%   <li>Backspace (ASCII 127 or cecho backspace) - Character deletion</li>
+%%   <li>Delete key - Forward character deletion</li>
+%%   <li>Arrow keys (left/right) - Cursor movement</li>
+%%   <li>Arrow keys (up/down) - Command history navigation</li>
+%%   <li>Home/End keys - Beginning/end of line navigation</li>
 %%   <li>Printable characters (32-126) - Text input</li>
-%%   <li>Other keys - Ignored for now</li>
+%%   <li>Other keys - Ignored</li>
 %% </ul>
+%%
+%% Enhanced input handling features:
+%% - Full cursor movement within the input line
+%% - Command history browsing with up/down arrows
+%% - Insert and delete operations at any cursor position
+%% - Home/End for quick line navigation
 %%
 %% The process runs in an infinite loop and is linked to the main process
 %% for automatic cleanup on exit.
@@ -1566,6 +1725,20 @@ input_handler(MainPid) ->
             MainPid ! {input, {key, ?ceKEY_BACKSPACE}};
         127 ->  % Sometimes backspace is 127
             MainPid ! {input, {key, ?ceKEY_BACKSPACE}};
+        ?ceKEY_DEL ->  % Delete key
+            MainPid ! {input, {key, delete}};
+        ?ceKEY_LEFT ->  % Left arrow
+            MainPid ! {input, {key, left}};
+        ?ceKEY_RIGHT ->  % Right arrow
+            MainPid ! {input, {key, right}};
+        ?ceKEY_UP ->  % Up arrow (command history)
+            MainPid ! {input, {key, up}};
+        ?ceKEY_DOWN ->  % Down arrow (command history)
+            MainPid ! {input, {key, down}};
+        ?ceKEY_HOME ->  % Home key
+            MainPid ! {input, {key, home}};
+        ?ceKEY_END ->  % End key
+            MainPid ! {input, {key, end_key}};
         Char when Char >= 32, Char =< 126 ->
             %% Printable character
             MainPid ! {input, {char, Char}};
