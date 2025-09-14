@@ -421,10 +421,10 @@ draw_screen(UIState) ->
 %%
 %% The status bar displays:
 %% <ul>
-%%   <li>Application name and server URL</li>
+%%   <li>Application name and auto_display status (Auto:on/Auto:off)</li>
 %%   <li>Current certificate user and connection status</li>
 %%   <li>Chat mode status and target user</li>
-%%   <li>WebSocket mTLS connection indicator</li>
+%%   <li>Pending message count when available</li>
 %%   <li>Current time</li>
 %% </ul>
 %%
@@ -475,10 +475,15 @@ draw_status_bar(UIState) ->
         N -> " | Msgs: " ++ integer_to_list(N)
     end,
     
+    %% Get auto_display status
+    AutoDisplayStr = case UIState#ui_state.auto_display of
+        true -> "Auto:on";
+        false -> "Auto:off"
+    end,
+    
     %% Create status line
-    ServerStr = WSChatState#ws_chat_state.server_host ++ ":8443",
     StatusLine = io_lib:format("CRYPTIC WS mTLS | ~s | ~s~s~s~s | ~s", 
-                              [ServerStr, UserStr, ConnStatusStr, ChatModeStr, MessageCountStr, TimeStr]),
+                              [AutoDisplayStr, UserStr, ConnStatusStr, ChatModeStr, MessageCountStr, TimeStr]),
     
     %% Truncate or pad to screen width
     StatusLineFmt = format_line(lists:flatten(StatusLine), Width),
@@ -965,20 +970,19 @@ process_command("chat " ++ Username, UIState) ->
     end;
 process_command("auto_display on", UIState) ->
     NewState = UIState#ui_state{auto_display = true},
-    StatusState = add_system_message("Auto-display enabled: messages will appear immediately", NewState),
     
     %% Check if there are any pending messages to display
     case UIState#ui_state.pending_messages of
         Empty when Empty =:= #{} ->
             %% No pending messages
-            StatusState;
+            NewState;
         PendingMessages ->
             %% Show all pending messages and clear the pending counts
             TotalPending = maps:fold(fun(_, Count, Acc) -> Acc + Count end, 0, PendingMessages),
             case TotalPending > 0 of
                 true ->
                     %% Show pending messages notification
-                    NotifyState = add_system_message("=== DISPLAYING PENDING MESSAGES ===", StatusState),
+                    NotifyState = add_system_message("=== DISPLAYING PENDING MESSAGES ===", NewState),
                     
                     %% Display messages from inbox for each sender with pending count > 0
                     FinalState = maps:fold(fun(From, Count, AccState) ->
@@ -999,12 +1003,11 @@ process_command("auto_display on", UIState) ->
                     %% Clear all pending message counts
                     FinalState#ui_state{pending_messages = #{}};
                 false ->
-                    StatusState
+                    NewState
             end
     end;
 process_command("auto_display off", UIState) ->
-    NewState = UIState#ui_state{auto_display = false},
-    add_system_message("Auto-display disabled: messages stored in inbox", NewState);
+    UIState#ui_state{auto_display = false};
 process_command("auto_display", UIState) ->
     Status = case UIState#ui_state.auto_display of
         true -> "enabled";
