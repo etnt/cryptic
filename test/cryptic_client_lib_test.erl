@@ -113,7 +113,7 @@ message_crypto_test_() ->
 
 test_encrypt_decrypt_roundtrip() ->
     %% Generate keys
-    {SenderPub, SenderPriv} = cryptic_lib:gen_keypair(),
+    {_SenderPub, _SenderPriv} = cryptic_lib:gen_keypair(),
     {RecipientPub, RecipientPriv} = cryptic_lib:gen_keypair(),
     
     Message = "Hello, this is a test message!",

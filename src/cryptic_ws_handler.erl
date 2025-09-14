@@ -270,6 +270,35 @@ handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
     },
     {reply, Response};
 
+%% Room management commands
+handle_command(#{<<"type">> := <<"create_room">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(create_room, Command, Username),
+    {reply, Response};
+
+handle_command(#{<<"type">> := <<"join_room">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(join_room, Command, Username),
+    {reply, Response};
+
+handle_command(#{<<"type">> := <<"leave_room">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(leave_room, Command, Username),
+    {reply, Response};
+
+handle_command(#{<<"type">> := <<"list_rooms">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(list_rooms, Command, Username),
+    {reply, Response};
+
+handle_command(#{<<"type">> := <<"send_room_message">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(send_room_message, Command, Username),
+    {reply, Response};
+
+handle_command(#{<<"type">> := <<"get_room_messages">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(get_room_messages, Command, Username),
+    {reply, Response};
+
+handle_command(#{<<"type">> := <<"get_room_members">>} = Command, Username, _State) ->
+    Response = cryptic_room_handlers:handle_room_command(get_room_members, Command, Username),
+    {reply, Response};
+
 handle_command(Command, Username, _State) ->
     io:format("Unknown command from ~s: ~p~n", [Username, Command]),
     {error, "Unknown command"}.

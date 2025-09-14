@@ -144,6 +144,9 @@ start_websocket_mtls(Config) ->
     catch ets:delete(user_connections),
     catch ets:delete(prekeys),
     catch ets:delete(blobs),
+    catch ets:delete(rooms),
+    catch ets:delete(room_messages),
+    catch ets:delete(user_rooms),
     
     %% Create user connections ETS table
     ets:new(user_connections, [named_table, set, public]),
@@ -151,6 +154,11 @@ start_websocket_mtls(Config) ->
     %% Create ETS stores for prekeys and blobs
     ets:new(prekeys, [named_table, public, set]),
     ets:new(blobs, [named_table, public, bag]),
+    
+    %% Create chat room ETS tables
+    ets:new(rooms, [named_table, set, public, {keypos, 2}]),
+    ets:new(room_messages, [named_table, bag, public, {keypos, 3}]),
+    ets:new(user_rooms, [named_table, bag, public]),
     
     Port = maps:get(port, Config, 8443),
     

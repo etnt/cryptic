@@ -2,7 +2,7 @@
     {description, "Minimal End-to-End Encrypted Chat"},
     {vsn, "0.1.0"},
     {registered, []},
-    {applications, [kernel, stdlib, asn1, public_key, ssl, crypto, ranch, cowlib, cowboy]},
+    {applications, [kernel, stdlib, asn1, public_key, ssl, crypto, ranch, cowlib, cowboy, uuid]},
     {mod, {cryptic_app, []}},
     {env, [
         %% Event handling configuration
