@@ -1205,14 +1205,30 @@ handle_websocket_message(Message, UIState) ->
                     <<"prekey">> ->
                         %% Prekey response - handle pending encrypted send
                         handle_prekey_response(Data, UIState);
+                    <<"user_status">> ->
+                        %% User status response (e.g., user offline) - handle pending send
+                        handle_user_status_response(Data, UIState);
                     <<"success">> ->
                         %% Success response
                         Content = binary_to_list(maps:get(<<"message">>, Data, <<"Operation successful">>)),
                         add_system_message("Success: " ++ Content, UIState);
                     <<"error">> ->
-                        %% Error response
+                        %% Error response - now only for actual errors (like user not found)
+                        WSChatState = UIState#ui_state.ws_chat_state,
                         Content = binary_to_list(maps:get(<<"message">>, Data, <<"Unknown error">>)),
-                        add_system_message("Error: " ++ Content, UIState);
+                        
+                        case WSChatState#ws_chat_state.pending_operation of
+                            #{type := send_encrypted, to_user := ToUser} ->
+                                %% This error is related to our pending message send
+                                %% Clear the pending operation and provide specific feedback
+                                NewWSChatState = WSChatState#ws_chat_state{pending_operation = undefined},
+                                UpdatedUIState = UIState#ui_state{ws_chat_state = NewWSChatState},
+                                UserFeedback = "Cannot send message to '" ++ ToUser ++ "': " ++ Content,
+                                add_system_message(UserFeedback, UpdatedUIState);
+                            _ ->
+                                %% Generic error not related to pending operations
+                                add_system_message("Error: " ++ Content, UIState)
+                        end;
                     <<"system">> ->
                         %% System message
                         Content = binary_to_list(maps:get(<<"message">>, Data, <<"System message">>)),
@@ -1289,6 +1305,36 @@ handle_prekey_response(Data, UIState) ->
         _ ->
             %% No pending operation or wrong type
             add_system_message("Received unexpected prekey response", UIState)
+    end.
+
+%% @doc Handle user status response from the server.
+%%
+%% This function handles user status responses (online/offline) that may be 
+%% received when attempting to send messages to users.
+handle_user_status_response(Data, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.pending_operation of
+        #{type := send_encrypted, to_user := ToUser} ->
+            Status = maps:get(<<"status">>, Data, <<"unknown">>),
+            case Status of
+                <<"offline">> ->
+                    %% Clear pending operation and show user-friendly message
+                    ClearWSChatState = WSChatState#ws_chat_state{
+                        pending_operation = undefined
+                    },
+                    ClearUIState = UIState#ui_state{ws_chat_state = ClearWSChatState},
+                    StatusMsg = io_lib:format("User ~s is currently offline", [ToUser]),
+                    add_system_message(lists:flatten(StatusMsg), ClearUIState);
+                <<"online">> ->
+                    %% This shouldn't happen since online users would get prekey response
+                    add_system_message("User is online but no prekey received", UIState);
+                _ ->
+                    StatusMsg = io_lib:format("User ~s status: ~s", [ToUser, Status]),
+                    add_system_message(lists:flatten(StatusMsg), UIState)
+            end;
+        _ ->
+            %% No pending operation or wrong type
+            add_system_message("Received unexpected user status response", UIState)
     end.
 
 %% @doc Handle prekey received from WebSocket client for immediate encryption.

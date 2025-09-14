@@ -262,6 +262,19 @@ handle_server_message(<<"users">>, Message, State) ->
     end,
     {noreply, State};
 
+handle_server_message(<<"user_status">>, Message, State) ->
+    User = maps:get(<<"user">>, Message),
+    Status = maps:get(<<"status">>, Message),
+    ?info("User ~s status: ~s", [User, Status]),
+    %% Forward user status to UI for handling
+    case State#state.ui_pid of
+        undefined ->
+            ?warning("No UI PID set, cannot forward user status", []);
+        UIPid ->
+            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
+    end,
+    {noreply, State};
+
 handle_server_message(<<"message">>, Message, State) ->
     From = maps:get(<<"from">>, Message),
     ?info("Message from ~s", [From]),
@@ -277,6 +290,13 @@ handle_server_message(<<"message">>, Message, State) ->
 handle_server_message(<<"error">>, Message, State) ->
     ErrorMsg = maps:get(<<"message">>, Message, <<"Unknown error">>),
     ?error("Server error: ~s", [ErrorMsg]),
+    %% Forward error to UI for proper handling
+    case State#state.ui_pid of
+        undefined ->
+            ?warning("No UI PID set, cannot forward error message", []);
+        UIPid ->
+            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
+    end,
     {noreply, State};
 
 handle_server_message(Type, Message, State) ->

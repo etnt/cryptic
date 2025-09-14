@@ -4,7 +4,7 @@
 -include("cryptic.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
--export([init/2, websocket_init/1, websocket_handle/2, websocket_info/2]).
+-export([init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 
 %% HTTP to WebSocket upgrade
 init(Req, State) ->
@@ -106,16 +106,30 @@ handle_command(#{<<"type">> := <<"upload_prekey">>, <<"prekey">> := PrekeyB64}, 
 
 handle_command(#{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State) ->
     User = binary_to_list(UserB),
-    case cryptic_lib:get_prekey(User) of
-        {ok, Prekey} ->
+    %% First check if the user is currently connected
+    case find_user_connection(User) of
+        {ok, _Pid} ->
+            %% User is online, get their prekey
+            case cryptic_lib:get_prekey(User) of
+                {ok, Prekey} ->
+                    Response = #{
+                        type => <<"prekey">>,
+                        user => UserB,
+                        prekey => base64:encode(Prekey)
+                    },
+                    {reply, Response};
+                {error, not_found} ->
+                    {error, "User not found"}
+            end;
+        not_found ->
+            %% User is not currently connected - this is normal, not an error
             Response = #{
-                type => <<"prekey">>,
+                type => <<"user_status">>,
                 user => UserB,
-                prekey => base64:encode(Prekey)
+                status => <<"offline">>,
+                message => <<"User is not currently online">>
             },
-            {reply, Response};
-        {error, not_found} ->
-            {error, "User not found"}
+            {reply, Response}
     end;
 
 handle_command(#{<<"type">> := <<"send_message">>, <<"to">> := ToUserB, 
@@ -228,3 +242,11 @@ find_user_connection(Username) ->
         [{Username, Pid}] -> {ok, Pid};
         [] -> not_found
     end.
+
+%% Clean up user connection when WebSocket terminates
+terminate(_Reason, _Req, #{username := Username}) ->
+    ets:delete(user_connections, Username),
+    ?info("User ~s disconnected and removed from connection table", [Username]),
+    ok;
+terminate(_Reason, _Req, _State) ->
+    ok.
