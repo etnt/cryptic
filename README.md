@@ -2,6 +2,16 @@
 
 A professional implementation of an end-to-end encrypted chat system built in Erlang/OTP, featuring WebSocket mTLS communication, real-time messaging, and demonstrating modern cryptographic protocols for secure message exchange.
 
+## Documentation
+
+📚 **[Complete API Documentation](https://etnt.github.io/cryptic/)** - Comprehensive EDoc-generated documentation
+
+For local documentation generation:
+```bash
+rebar3 edoc
+# Open doc/index.html in your browser
+```
+
 ## Overview
 
 Cryptic implements a secure messaging system using:

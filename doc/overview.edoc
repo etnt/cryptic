@@ -1,0 +1,267 @@
+@title Cryptic - End-to-End Encrypted Chat System
+@author Cryptic Team
+@version 1.0.0
+
+@doc 
+
+== Overview ==
+
+Cryptic is a professional implementation of an end-to-end encrypted chat system built in Erlang/OTP. It features WebSocket mTLS communication, real-time messaging, and demonstrates modern cryptographic protocols for secure message exchange.
+
+The system implements a secure messaging platform using:
+<ul>
+  <li><strong>WebSocket mTLS</strong> communication for real-time, certificate-authenticated messaging</li>
+  <li><strong>X25519</strong> key agreement for establishing shared secrets</li>
+  <li><strong>ChaCha20-Poly1305</strong> AEAD encryption for message confidentiality and authenticity</li>
+  <li><strong>HKDF-SHA256</strong> key derivation with ephemeral-based salts</li>
+  <li><strong>Automatic keypair generation</strong> and prekey exchange on connect</li>
+  <li><strong>Perfect forward secrecy</strong> through ephemeral keys for each message exchange</li>
+  <li><strong>Professional Terminal UI</strong> with real-time chat capabilities and inbox functionality</li>
+  <li><strong>Color-coded interface</strong> with interactive chat mode and command processing</li>
+</ul>
+
+== Architecture ==
+
+<pre>
+┌─────────────────┐           WebSocket mTLS            ┌───────────────┐
+│     Alice       │         ←──────────────────→        │      Bob      │
+│  (Terminal UI)  │                                     │ (Terminal UI) │
+└─────────┬───────┘                                     └───────┬───────┘
+          │                                                     │
+          │ 1. Connect with client cert                         │ 1. Connect with client cert
+          │ 2. Auto-generate keypair                            │ 2. Auto-generate keypair
+          │ 3. Upload prekey                                    │ 3. Upload prekey
+          │                                                     │
+          │ ┌─────────────────────────────────────────────────┐ │
+          └─│            WebSocket mTLS Server                │─┘
+            │        Certificate Authentication               │
+            │     Real-time Message Forwarding                │
+            │        User/Prekey Management                   │
+            └─────────────────────────────────────────────────┘
+</pre>
+
+== Key Components ==
+
+=== Server Components ===
+
+<dl>
+  <dt>{@link cryptic_server}</dt>
+  <dd>Main server process that manages the WebSocket mTLS server startup, ETS table creation, and overall application lifecycle. Provides configuration management through environment variables and handles graceful shutdown.</dd>
+
+  <dt>{@link cryptic_ws_handler}</dt>
+  <dd>Cowboy WebSocket handler that manages individual client connections. Handles mTLS authentication using client certificates, processes JSON commands, and routes messages between users in real-time.</dd>
+
+  <dt>{@link cryptic_lib}</dt>
+  <dd>Core cryptographic library providing high-level encryption operations. Implements message encryption/decryption, key derivation using HKDF-SHA256, and storage management for user prekeys and messages.</dd>
+
+  <dt>{@link cryptic_nif}</dt>
+  <dd>Native Interface Functions (NIFs) providing low-level cryptographic primitives. Wraps libsodium functions for X25519 key exchange, ChaCha20-Poly1305 AEAD encryption, and secure random number generation.</dd>
+</dl>
+
+=== Client Components ===
+
+<dl>
+  <dt>{@link cryptic_ws_client}</dt>
+  <dd>WebSocket client that handles mTLS connections to the server. Manages automatic keypair generation, prekey upload, message encryption/decryption, and provides a clean API for messaging operations.</dd>
+
+  <dt>{@link cryptic_ws_ui}</dt>
+  <dd>Professional terminal user interface built with ncurses (cecho). Provides real-time chat functionality, command processing, inbox management, and an intuitive user experience for secure messaging.</dd>
+</dl>
+
+=== Supporting Components ===
+
+<dl>
+  <dt>{@link cryptic_event_manager}</dt>
+  <dd>Event management system for logging and monitoring. Provides structured event handling with configurable output destinations and log levels.</dd>
+
+  <dt>{@link cryptic_console_logger}</dt>
+  <dd>Console-based event logger that outputs formatted log messages to the terminal. Used for debugging and real-time monitoring of system events.</dd>
+
+  <dt>{@link cryptic_file_logger}</dt>
+  <dd>File-based event logger that writes structured log entries to files. Supports log rotation and persistent audit trails for security events.</dd>
+
+  <dt>{@link cryptic_app}</dt>
+  <dd>OTP application behavior implementation that starts the supervision tree and initializes the Cryptic application components.</dd>
+
+  <dt>{@link cryptic_sup}</dt>
+  <dd>Root supervisor that manages the fault-tolerant supervision tree for all Cryptic processes, ensuring system reliability and automatic restart capabilities.</dd>
+</dl>
+
+== Cryptographic Protocol ==
+
+=== 1. WebSocket mTLS Authentication ===
+<ul>
+  <li>Client connects to WebSocket server using mutual TLS authentication</li>
+  <li>Client certificate provides cryptographic identity verification</li>
+  <li>Secure channel established for all subsequent communication</li>
+</ul>
+
+=== 2. Automatic Key Setup ===
+<ul>
+  <li>Upon WebSocket connection, client automatically generates X25519 keypair</li>
+  <li>Client uploads public key (prekey) to server via WebSocket message</li>
+  <li>Server stores prekey and associates it with client connection</li>
+</ul>
+
+=== 3. Message Exchange Protocol ===
+<ol>
+  <li>Alice generates fresh ephemeral X25519 keypair for each message</li>
+  <li>Alice fetches Bob's prekey via WebSocket: `{"type": "get_prekey", "user": "bob"}'</li>
+  <li>Alice computes: `shared_secret = X25519(alice_ephemeral_private, bob_prekey_public)'</li>
+  <li>Both parties derive AEAD encryption key using HKDF-SHA256 with ephemeral public key as salt</li>
+  <li>Alice encrypts: `{ciphertext, nonce} = ChaCha20-Poly1305-Encrypt(message, aead_key)'</li>
+  <li>Server forwards encrypted message to Bob's WebSocket connection in real-time</li>
+  <li>Bob decrypts using same derived AEAD key</li>
+</ol>
+
+== Security Features ==
+
+=== Cryptographic Strength ===
+<ul>
+  <li><strong>X25519</strong>: Elliptic curve Diffie-Hellman with Curve25519 (128-bit security)</li>
+  <li><strong>ChaCha20-Poly1305</strong>: Authenticated encryption with 256-bit keys</li>
+  <li><strong>HKDF-SHA256</strong>: Cryptographically strong key derivation</li>
+  <li><strong>Libsodium</strong>: Battle-tested cryptographic library via NIF</li>
+</ul>
+
+=== Forward Secrecy ===
+<ul>
+  <li><strong>Ephemeral keys</strong>: Each message uses a fresh ephemeral keypair</li>
+  <li><strong>Unique AEAD keys</strong>: Different ephemeral keys produce different encryption keys</li>
+  <li><strong>Past message security</strong>: Compromise of current keys doesn't affect previous messages</li>
+  <li><strong>No key reuse</strong>: Every message exchange uses completely fresh cryptographic material</li>
+</ul>
+
+=== Transport Security ===
+<ul>
+  <li><strong>Certificate-based authentication</strong>: Client certificates provide cryptographic identity</li>
+  <li><strong>Mutual TLS</strong>: Both client and server authenticate each other</li>
+  <li><strong>Secure transport</strong>: All communication encrypted at transport layer</li>
+  <li><strong>Connection persistence</strong>: Maintains secure channel for real-time messaging</li>
+</ul>
+
+== Quick Start ==
+
+=== Starting the Server ===
+<pre>
+$ erl -pa _build/default/lib/*/ebin
+1> cryptic_server:start_websocket_mtls().
+</pre>
+
+=== Starting a Client ===
+<pre>
+$ erl -pa _build/default/lib/*/ebin  
+1> cryptic_ws_ui:start().
+</pre>
+
+=== Basic Usage ===
+<ol>
+  <li>Connect to server: `connect'</li>
+  <li>Send messages: `send &lt;user&gt; &lt;message&gt;'</li>
+  <li>Enter chat mode: `chat &lt;user&gt;'</li>
+  <li>Check inbox: `inbox'</li>
+  <li>List users: `list_users'</li>
+  <li>Get help: `help'</li>
+</ol>
+
+== Certificate Management ==
+
+The system uses X.509 client certificates for mTLS authentication. Certificate infrastructure is managed using the included Certificate Authority (CA) framework:
+
+<ul>
+  <li><strong>CA Setup</strong>: `cd CA/ && make all'</li>
+  <li><strong>New Client Cert</strong>: `cd CA/ && make client'</li>
+  <li><strong>Certificate Verification</strong>: `./scripts/verify-crt.sh client_keys/alice.crt'</li>
+  <li><strong>Revocation</strong>: `./scripts/revoke-cert.sh certs/02.pem'</li>
+</ul>
+
+Pre-configured client certificates are available for immediate testing:
+<ul>
+  <li>alice - `CA/client_keys/alice.{crt,key,pem}'</li>
+  <li>bob - `CA/client_keys/bob.{crt,key,pem}'</li>
+  <li>charlie - `CA/client_keys/charlie.{crt,key,pem}'</li>
+  <li>admin - `CA/client_keys/admin.{crt,key,pem}'</li>
+</ul>
+
+== WebSocket Message Protocol ==
+
+=== Client to Server Messages ===
+<ul>
+  <li>`{"type": "upload_prekey", "prekey": "base64_public_key"}' - Upload user's public key</li>
+  <li>`{"type": "get_prekey", "user": "bob"}' - Request another user's public key</li>
+  <li>`{"type": "send_message", "to": "bob", "ephemeral": "...", "nonce": "...", "cipher": "..."}' - Send encrypted message</li>
+  <li>`{"type": "get_messages"}' - Retrieve stored messages</li>
+  <li>`{"type": "list_users"}' - Get list of all registered users</li>
+</ul>
+
+=== Server to Client Messages ===
+<ul>
+  <li>`{"type": "welcome", "message": "Connected to Cryptic server"}' - Connection confirmation</li>
+  <li>`{"type": "success", "message": "Operation completed"}' - Operation success</li>
+  <li>`{"type": "prekey", "user": "bob", "prekey": "base64_public_key"}' - Prekey response</li>
+  <li>`{"type": "users", "users": ["alice", "bob", "charlie"]}' - Users list response</li>
+  <li>`{"type": "message", "from": "alice", "ephemeral": "...", "nonce": "...", "cipher": "..."}' - Incoming encrypted message</li>
+  <li>`{"type": "error", "message": "Error description"}' - Error response</li>
+</ul>
+
+== Building and Development ==
+
+=== Prerequisites ===
+<ul>
+  <li>Erlang/OTP 27+</li>
+  <li>Libsodium development libraries</li>
+  <li>Rebar3 build tool</li>
+  <li>cecho (Erlang ncurses library) - automatically installed via rebar3</li>
+</ul>
+
+=== Build Commands ===
+<pre>
+# Install dependencies (macOS)
+$ brew install libsodium
+
+# Build the application
+$ rebar3 compile
+
+# Generate documentation
+$ rebar3 edoc
+
+# Run tests
+$ rebar3 eunit
+</pre>
+
+== Security Considerations ==
+
+=== Current Limitations ===
+<ul>
+  <li><strong>In-memory storage</strong>: Messages and prekeys stored in ETS (not persistent)</li>
+  <li><strong>Certificate-based identity</strong>: mTLS provides authentication but not username verification</li>
+  <li><strong>No replay protection</strong>: Messages could theoretically be replayed</li>
+  <li><strong>Single prekey</strong>: Users have one prekey for all conversations</li>
+</ul>
+
+=== Production Recommendations ===
+<ul>
+  <li><strong>Certificate-Username Binding</strong>: Map client certificates to specific usernames</li>
+  <li><strong>Message Integrity</strong>: Sequence numbers for replay protection</li>
+  <li><strong>Key Rotation</strong>: Multiple prekeys per user (X3DH protocol)</li>
+  <li><strong>Persistent Storage</strong>: Database backend with proper key management</li>
+  <li><strong>Perfect Forward Secrecy</strong>: Double Ratchet for ongoing conversations</li>
+</ul>
+
+== API Documentation ==
+
+For detailed API documentation of individual modules, see:
+<ul>
+  <li>{@link cryptic_server} - Server lifecycle and WebSocket management</li>
+  <li>{@link cryptic_ws_handler} - WebSocket connection handling and message routing</li>
+  <li>{@link cryptic_ws_client} - WebSocket client API for messaging operations</li>
+  <li>{@link cryptic_ws_ui} - Terminal user interface and command processing</li>
+  <li>{@link cryptic_lib} - High-level cryptographic operations and storage</li>
+  <li>{@link cryptic_nif} - Low-level cryptographic primitives via NIFs</li>
+</ul>
+
+== License ==
+
+Mozilla Public License Version 2.0
+
+@end
