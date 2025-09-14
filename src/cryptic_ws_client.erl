@@ -1,3 +1,51 @@
+%%% @doc Cryptic WebSocket mTLS Client
+%%%
+%%% This module provides a WebSocket client for the Cryptic chat application
+%%% that uses mutual TLS (mTLS) authentication for secure connections. It acts
+%%% as a bridge between the terminal UI and the WebSocket server, handling
+%%% connection management, message forwarding, and keepalive functionality.
+%%%
+%%% == Features ==
+%%%
+%%% <ul>
+%%%   <li>mTLS WebSocket connections with client certificate authentication</li>
+%%%   <li>Automatic connection establishment and reconnection handling</li>
+%%%   <li>Command queuing when disconnected</li>
+%%%   <li>Bidirectional message forwarding between UI and server</li>
+%%%   <li>WebSocket keepalive with ping/pong mechanism</li>
+%%%   <li>Certificate-based user authentication</li>
+%%%   <li>JSON message encoding/decoding</li>
+%%% </ul>
+%%%
+%%% == Message Flow ==
+%%%
+%%% The client handles several types of messages:
+%%% <ul>
+%%%   <li>`welcome' - Server welcome message on connection</li>
+%%%   <li>`success' - Operation success confirmations</li>
+%%%   <li>`prekey' - User public keys for message encryption</li>
+%%%   <li>`users' - List of registered users</li>
+%%%   <li>`user_status' - User online/offline status</li>
+%%%   <li>`message' - Encrypted messages from other users</li>
+%%%   <li>`error' - Error messages from server</li>
+%%% </ul>
+%%%
+%%% == Configuration ==
+%%%
+%%% The client requires certificate files for mTLS authentication:
+%%% <ul>
+%%%   <li>`CRYPTIC_CLIENT_CERT' - Environment variable for client certificate</li>
+%%%   <li>`CRYPTIC_CLIENT_KEY' - Environment variable for client private key</li>
+%%%   <li>`CRYPTIC_CA_CERT' - Environment variable for CA certificate</li>
+%%% </ul>
+%%%
+%%% Alternatively, certificate paths can be provided in the config map
+%%% passed to {@link start_link/3}.
+%%%
+%%% @author Cryptic Team
+%%% @version 1.0.0
+%%% @since 2025-09-14
+
 -module(cryptic_ws_client).
 -behaviour(gen_server).
 
@@ -6,6 +54,23 @@
 
 -include("cryptic.hrl").
 
+%% Internal state record for the WebSocket client gen_server.
+%%
+%% Fields:
+%% <ul>
+%%   <li>`username' - The authenticated username from client certificate</li>
+%%   <li>`server_host' - WebSocket server hostname</li>
+%%   <li>`server_port' - WebSocket server port (default: 8443)</li>
+%%   <li>`conn_pid' - Gun connection process PID</li>
+%%   <li>`stream_ref' - WebSocket stream reference</li>
+%%   <li>`cert_file' - Path to client certificate file</li>
+%%   <li>`key_file' - Path to client private key file</li>
+%%   <li>`ca_file' - Path to CA certificate file</li>
+%%   <li>`connected' - Boolean indicating connection status</li>
+%%   <li>`pending_commands' - Commands queued while disconnected</li>
+%%   <li>`ui_pid' - PID of the UI process for message forwarding</li>
+%%   <li>`ping_timer_ref' - Timer reference for WebSocket keepalive</li>
+%% </ul>
 -record(state, {
     username,
     server_host,
@@ -21,23 +86,123 @@
     ping_timer_ref
 }).
 
-%% API
+%%%===================================================================
+%%% API Functions
+%%%===================================================================
+
+%% @doc Start a WebSocket client with default configuration.
+%%
+%% Starts a WebSocket client process that connects to the specified server
+%% using mTLS authentication. Certificate paths are read from environment
+%% variables or default locations.
+%%
+%% @param Username The username for authentication (extracted from client cert)
+%% @param ServerHost The WebSocket server hostname to connect to
+%% @returns `{ok, Pid}' on success, `{error, Reason}' on failure
+%% @see start_link/3
 start_link(Username, ServerHost) ->
     start_link(Username, ServerHost, #{}).
 
+%% @doc Start a WebSocket client with custom configuration.
+%%
+%% Starts a WebSocket client process with the ability to override default
+%% settings through the configuration map. This is the main entry point
+%% for creating WebSocket client connections.
+%%
+%% == Configuration Options ==
+%%
+%% The Config map may contain:
+%% <ul>
+%%   <li>`port' - Server port (default: 8443)</li>
+%%   <li>`cert_file' - Path to client certificate file</li>
+%%   <li>`key_file' - Path to client private key file</li>
+%%   <li>`ca_file' - Path to CA certificate file</li>
+%% </ul>
+%%
+%% If certificate paths are not provided in the config, they will be
+%% read from environment variables:
+%% <ul>
+%%   <li>`CRYPTIC_CLIENT_CERT' - Client certificate file</li>
+%%   <li>`CRYPTIC_CLIENT_KEY' - Client private key file</li>
+%%   <li>`CRYPTIC_CA_CERT' - CA certificate file</li>
+%% </ul>
+%%
+%% @param Username The username for authentication
+%% @param ServerHost The WebSocket server hostname
+%% @param Config Configuration map with optional overrides
+%% @returns `{ok, Pid}' on success, `{error, Reason}' on failure
 start_link(Username, ServerHost, Config) ->
     gen_server:start_link(?MODULE, {Username, ServerHost, Config}, []).
 
+%% @doc Send a command to the WebSocket server.
+%%
+%% Sends a command (as an Erlang map) to the connected WebSocket server.
+%% The command will be JSON-encoded before transmission. If the client
+%% is not currently connected, the command will be queued and sent when
+%% the connection is established.
+%%
+%% == Command Format ==
+%%
+%% Commands should be Erlang maps that will be JSON-encoded. Common
+%% command types include:
+%% <ul>
+%%   <li>`#{type => <<"upload_prekey">>, prekey => PrekeyB64}' - Upload public key</li>
+%%   <li>`#{type => <<"get_prekey">>, user => UserBin}' - Request user's public key</li>
+%%   <li>`#{type => <<"send_message">>, ...}' - Send encrypted message</li>
+%%   <li>`#{type => <<"list_users">>}' - Request list of registered users</li>
+%% </ul>
+%%
+%% @param Pid The client process PID
+%% @param Command The command map to send
+%% @returns `ok' if sent immediately, `queued' if queued for later sending
 send_command(Pid, Command) ->
     gen_server:call(Pid, {send_command, Command}).
 
+%% @doc Stop the WebSocket client.
+%%
+%% Gracefully stops the WebSocket client process, closing any active
+%% connections and cleaning up resources.
+%%
+%% @param Pid The client process PID
+%% @returns `ok'
 stop(Pid) ->
     gen_server:call(Pid, stop).
 
+%% @doc Set the UI process PID for message forwarding.
+%%
+%% Registers the UI process PID so that incoming messages from the server
+%% can be forwarded to the user interface. This creates the communication
+%% bridge between the WebSocket client and the terminal UI.
+%%
+%% == Forwarded Messages ==
+%%
+%% The following message types are forwarded to the UI:
+%% <ul>
+%%   <li>`{prekey_received, User, Prekey}' - Public key for encryption</li>
+%%   <li>`{users_list_received, Users}' - List of registered users</li>
+%%   <li>`{websocket_message, {text, JsonData}}' - User status and errors</li>
+%%   <li>`{encrypted_message_received, Message}' - Encrypted chat messages</li>
+%% </ul>
+%%
+%% @param Pid The client process PID
+%% @param UiPid The UI process PID to forward messages to
+%% @returns `ok'
 set_ui_pid(Pid, UiPid) ->
     gen_server:call(Pid, {set_ui_pid, UiPid}).
 
-%% Callbacks
+%%%===================================================================
+%%% gen_server Callbacks
+%%%===================================================================
+
+%% @private
+%% @doc Initialize the WebSocket client gen_server.
+%%
+%% Validates certificate configuration and prepares for WebSocket connection.
+%% The actual connection is established in the handle_continue callback to
+%% avoid blocking the supervisor during startup.
+%%
+%% @param {Username, ServerHost, Config} Initialization parameters
+%% @returns `{ok, State, {continue, connect}}' on success, `{stop, Reason}' on error
 init({Username, ServerHost, Config}) ->
     %% Get certificate paths from environment variables or config
     CertFile = case os:getenv("CRYPTIC_CLIENT_CERT") of
@@ -73,6 +238,16 @@ init({Username, ServerHost, Config}) ->
         {ok, State, {continue, connect}}
     end.
 
+%% @private
+%% @doc Handle the continue callback to establish WebSocket connection.
+%%
+%% This callback is triggered after successful initialization to establish
+%% the actual WebSocket connection. Using continue prevents blocking the
+%% supervisor during potentially slow connection establishment.
+%%
+%% @param connect The continue message
+%% @param State Current gen_server state
+%% @returns `{noreply, NewState}' on success, `{stop, Reason, State}' on failure
 handle_continue(connect, State) ->
     case connect_websocket(State) of
         {ok, NewState} ->
@@ -82,6 +257,16 @@ handle_continue(connect, State) ->
             {stop, {connection_failed, Reason}, State}
     end.
 
+%% @private
+%% @doc Handle synchronous calls to the gen_server.
+%%
+%% Processes various client operations including command sending,
+%% UI PID registration, and shutdown requests.
+%%
+%% @param Request The call request
+%% @param From The caller's reference
+%% @param State Current gen_server state
+%% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
 handle_call({send_command, Command}, _From, State = #state{connected = true}) ->
     JsonCommand = jsx:encode(Command),
     gun:ws_send(State#state.conn_pid, State#state.stream_ref, {text, JsonCommand}),
@@ -103,9 +288,31 @@ handle_call({set_ui_pid, UiPid}, _From, State) ->
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
+%% @private
+%% @doc Handle asynchronous cast messages.
+%%
+%% Currently no cast messages are processed by this gen_server.
+%%
+%% @param Msg The cast message
+%% @param State Current gen_server state
+%% @returns `{noreply, State}'
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% @private
+%% @doc Handle asynchronous info messages.
+%%
+%% Processes various WebSocket-related events including:
+%% <ul>
+%%   <li>WebSocket upgrade completion</li>
+%%   <li>Incoming WebSocket messages</li>
+%%   <li>Connection errors and disconnections</li>
+%%   <li>Keepalive ping/pong mechanism</li>
+%% </ul>
+%%
+%% @param Info The info message
+%% @param State Current gen_server state
+%% @returns `{noreply, NewState}' or `{stop, Reason, State}'
 handle_info({gun_upgrade, ConnPid, StreamRef, [<<"websocket">>], _Headers}, 
             State = #state{conn_pid = ConnPid, stream_ref = StreamRef}) ->
     ?info("WebSocket connection established for ~s", [State#state.username]),
@@ -169,6 +376,15 @@ handle_info({gun_ws, _ConnPid, _StreamRef, pong}, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
+%% @private
+%% @doc Clean up resources when the gen_server terminates.
+%%
+%% Ensures proper cleanup of WebSocket connections and timers when
+%% the client process is shutting down.
+%%
+%% @param Reason Termination reason
+%% @param State Final gen_server state
+%% @returns `ok'
 terminate(_Reason, #state{conn_pid = ConnPid, ping_timer_ref = TimerRef}) when ConnPid =/= undefined ->
     %% Cancel ping timer
     case TimerRef of
@@ -179,10 +395,38 @@ terminate(_Reason, #state{conn_pid = ConnPid, ping_timer_ref = TimerRef}) when C
 terminate(_Reason, _State) ->
     ok.
 
+%% @private
+%% @doc Handle code change during hot code loading.
+%%
+%% @param OldVsn Previous version
+%% @param State Current state
+%% @param Extra Additional data
+%% @returns `{ok, NewState}'
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%% Internal functions
+%%%===================================================================
+%%% Internal Functions
+%%%===================================================================
+
+%% @private
+%% @doc Establish a WebSocket connection with mTLS authentication.
+%%
+%% Creates a TLS connection using the Gun HTTP client library with
+%% client certificate authentication, then upgrades to WebSocket.
+%%
+%% == TLS Configuration ==
+%%
+%% The connection uses:
+%% <ul>
+%%   <li>TLS 1.2 with peer verification</li>
+%%   <li>Client certificate authentication</li>
+%%   <li>CA certificate verification</li>
+%%   <li>HTTP/1.1 protocol (no HTTP/2)</li>
+%% </ul>
+%%
+%% @param State Current client state with certificate paths
+%% @returns `{ok, NewState}' on success, `{error, Reason}' on failure
 connect_websocket(State) ->
     application:ensure_all_started(gun),
     
@@ -228,6 +472,17 @@ connect_websocket(State) ->
             {error, Reason}
     end.
 
+%% @private
+%% @doc Handle incoming messages from the WebSocket server.
+%%
+%% Processes different types of server messages and forwards relevant
+%% information to the UI process. Each message type has specific handling
+%% logic and appropriate logging.
+%%
+%% @param Type The message type as a binary
+%% @param Message The complete message map
+%% @param State Current client state
+%% @returns `{noreply, State}'
 handle_server_message(<<"welcome">>, Message, State) ->
     ?info("Server welcome: ~s", [maps:get(<<"message">>, Message, <<"Unknown">>)]),
     {noreply, State};

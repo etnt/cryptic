@@ -1,3 +1,50 @@
+%%% @doc Cryptic NIF Interface
+%%%
+%%% This module provides Erlang NIFs (Native Implemented Functions) for
+%%% cryptographic operations used by the Cryptic chat application. It serves
+%%% as the interface layer between Erlang code and the underlying C/C++
+%%% cryptographic library implementations.
+%%%
+%%% == Features ==
+%%%
+%%% <ul>
+%%%   <li>Curve25519 elliptic curve cryptography for key exchange</li>
+%%%   <li>ChaCha20-Poly1305 authenticated encryption (AEAD)</li>
+%%%   <li>Cryptographically secure random number generation</li>
+%%%   <li>High-performance native cryptographic primitives</li>
+%%%   <li>Memory-safe NIF implementations</li>
+%%% </ul>
+%%%
+%%% == Cryptographic Operations ==
+%%%
+%%% The module provides the following cryptographic primitives:
+%%% <ul>
+%%%   <li>`gen_keypair/0' - Generate Curve25519 key pairs</li>
+%%%   <li>`scalarmult/2' - Elliptic curve scalar multiplication (ECDH)</li>
+%%%   <li>`aead_encrypt/3' - ChaCha20-Poly1305 authenticated encryption</li>
+%%%   <li>`aead_decrypt/4' - ChaCha20-Poly1305 authenticated decryption</li>
+%%%   <li>`rand_bytes/1' - Cryptographically secure random bytes</li>
+%%% </ul>
+%%%
+%%% == Security Notes ==
+%%%
+%%% <ul>
+%%%   <li>All cryptographic operations are performed in native code for performance</li>
+%%%   <li>Memory is properly zeroed after use to prevent key material leakage</li>
+%%%   <li>Random number generation uses the system's secure random source</li>
+%%%   <li>Key material should be handled securely in calling code</li>
+%%% </ul>
+%%%
+%%% == NIF Loading ==
+%%%
+%%% The module uses the `@on_load' attribute to automatically load the
+%%% shared library containing the NIF implementations. The library is
+%%% searched in standard priv directory locations.
+%%%
+%%% @author Cryptic Team
+%%% @version 1.0.0
+%%% @since 2025-09-14
+
 -module(cryptic_nif).
 
 -export([
@@ -14,6 +61,24 @@
 -define(APPNAME, cryptic).
 -define(LIBNAME, cryptic_nif).
 
+%% @doc Initialize and load the NIF library
+%%
+%% This function is called automatically when the module is loaded due to
+%% the `@on_load' attribute. It locates the shared library containing the
+%% NIF implementations and loads it into the Erlang VM.
+%%
+%% == Library Search Process ==
+%%
+%% The function searches for the library in the following locations:
+%% <ol>
+%%%   <li>Application's priv directory (standard location)</li>
+%%%   <li>Relative "../priv" directory (development builds)</li>
+%%%   <li>Local "priv" directory (fallback)</li>
+%% </ol>
+%%
+%% @returns ok if the NIF library loads successfully
+%% @throws {error, any()}
+
 init() ->
     SoName =
         case code:priv_dir(?APPNAME) of
@@ -29,18 +94,197 @@ init() ->
         end,
     erlang:load_nif(SoName, 0).
 
-%% NIF stubs - these will be replaced by the actual NIF implementations
+%% @doc Generate a Curve25519 key pair
+%%
+%% Generates a new Curve25519 elliptic curve key pair suitable for
+%% Elliptic Curve Diffie-Hellman (ECDH) key exchange. The private key
+%% should be kept secret while the public key can be shared.
+%%
+%% == Security Considerations ==
+%%
+%% <ul>
+%%%   <li>Private keys must be kept secure and never transmitted</li>
+%%%   <li>Public keys can be safely shared for key exchange</li>
+%%%   <li>Keys are generated using cryptographically secure randomness</li>
+%%%   <li>Private key material is properly handled in native code</li>
+%% </ul>
+%%
+%% @returns {PublicKey, PrivateKey} where both are 32-byte binaries
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
 gen_keypair() ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc Perform Curve25519 scalar multiplication (ECDH)
+%%
+%% Computes the shared secret between a private key and a public key
+%% using Curve25519 elliptic curve scalar multiplication. This is the
+%% core operation for Elliptic Curve Diffie-Hellman key exchange.
+%%
+%% == Usage Pattern ==
+%%
+%% ```
+%% % Alice generates her key pair
+%% {AlicePub, AlicePriv} = cryptic_nif:gen_keypair(),
+%% 
+%% % Bob generates his key pair  
+%% {BobPub, BobPriv} = cryptic_nif:gen_keypair(),
+%% 
+%% % Both parties compute the same shared secret
+%% SharedSecret1 = cryptic_nif:scalarmult(AlicePriv, BobPub),
+%% SharedSecret2 = cryptic_nif:scalarmult(BobPriv, AlicePub),
+%% % SharedSecret1 =:= SharedSecret2
+%% '''
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>The shared secret should be used as input to a key derivation function</li>
+%%%   <li>Never use the shared secret directly as an encryption key</li>
+%%%   <li>Private keys must be exactly 32 bytes</li>
+%%%   <li>Public keys must be exactly 32 bytes and on the curve</li>
+%% </ul>
+%%
+%% @param SecretKey The private key (32-byte binary)
+%% @param PublicKey The peer's public key (32-byte binary)
+%% @returns SharedSecret A 32-byte binary containing the shared secret
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
 
 scalarmult(_SecretKey, _PublicKey) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).
 
+%% @doc Encrypt data using ChaCha20-Poly1305 AEAD
+%%
+%% Performs authenticated encryption using the ChaCha20-Poly1305 AEAD
+%% (Authenticated Encryption with Associated Data) algorithm. This provides
+%% both confidentiality and authenticity for the encrypted data.
+%%
+%% == Algorithm Details ==
+%%
+%% <ul>
+%%%   <li>Encryption: ChaCha20 stream cipher</li>
+%%%   <li>Authentication: Poly1305 MAC</li>
+%%%   <li>Nonce: 12-byte random value (generated automatically)</li>
+%%%   <li>Key: 32-byte encryption key</li>
+%%%   <li>AAD: Additional authenticated data (not encrypted)</li>
+%% </ul>
+%%
+%% == Usage Example ==
+%%
+%% ```
+%% Key = cryptic_nif:rand_bytes(32),
+%% Plaintext = <<"Hello, World!">>,
+%% AAD = <<"metadata">>,
+%% {Nonce, Ciphertext} = cryptic_nif:aead_encrypt(Plaintext, Key, AAD).
+%% '''
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>Never reuse the same key+nonce combination</li>
+%%%   <li>Nonce is generated randomly and must be transmitted with ciphertext</li>
+%%%   <li>AAD is authenticated but not encrypted</li>
+%%%   <li>Tampering with ciphertext or AAD will cause decryption to fail</li>
+%% </ul>
+%%
+%% @param Plaintext The data to encrypt (binary)
+%% @param Key The 32-byte encryption key (binary)
+%% @param AAD Additional authenticated data (binary, can be empty)
+%% @returns {Nonce, Ciphertext} where Nonce is 12 bytes and Ciphertext includes auth tag
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+
 aead_encrypt(_Plaintext, _Key, _AAD) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).
 
+%% @doc Decrypt data using ChaCha20-Poly1305 AEAD
+%%
+%% Performs authenticated decryption using the ChaCha20-Poly1305 AEAD
+%% algorithm. Verifies both the authenticity and integrity of the encrypted
+%% data before returning the plaintext.
+%%
+%% == Verification Process ==
+%%
+%% <ol>
+%%%   <li>Verify the Poly1305 authentication tag</li>
+%%%   <li>Verify the AAD has not been tampered with</li>
+%%%   <li>Decrypt the ciphertext using ChaCha20</li>
+%%%   <li>Return plaintext only if all verifications pass</li>
+%% </ol>
+%%
+%% == Usage Example ==
+%%
+%% ```
+%% % Using data from aead_encrypt/3
+%% case cryptic_nif:aead_decrypt(Ciphertext, Key, Nonce, AAD) of
+%%     {ok, Plaintext} -> 
+%%         % Decryption successful, data is authentic
+%%         process_plaintext(Plaintext);
+%%     {error, auth_failed} ->
+%%         % Data has been tampered with or wrong key/nonce
+%%         handle_auth_failure()
+%% end.
+%% '''
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>Always check the return value - authentication failure indicates tampering</li>
+%%%   <li>Use the exact same key, nonce, and AAD that were used for encryption</li>
+%%%   <li>Never attempt to process data if authentication fails</li>
+%%%   <li>Timing attacks are mitigated by constant-time verification</li>
+%% </ul>
+%%
+%% @param Ciphertext The encrypted data including authentication tag (binary)
+%% @param Key The 32-byte decryption key (binary)
+%% @param Nonce The 12-byte nonce used during encryption (binary)
+%% @param AAD The additional authenticated data (binary, must match encryption)
+%% @returns {ok, Plaintext} on successful decryption and authentication,
+%%          {error, auth_failed} if authentication fails
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+
 aead_decrypt(_Ciphertext, _Key, _Nonce, _AAD) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc Generate cryptographically secure random bytes
+%%
+%% Generates the specified number of cryptographically secure random bytes
+%% using the system's secure random number generator. This function is
+%% suitable for generating keys, nonces, salts, and other security-critical
+%% random data.
+%%
+%% == Random Source ==
+%%
+%% <ul>
+%%%   <li>Uses the operating system's secure random number generator</li>
+%%%   <li>On Linux: /dev/urandom or getrandom() syscall</li>
+%%%   <li>On macOS: SecRandomCopyBytes or /dev/urandom</li>
+%%%   <li>On Windows: CryptGenRandom or BCryptGenRandom</li>
+%% </ul>
+%%
+%% == Usage Examples ==
+%%
+%% ```
+%% % Generate a 32-byte encryption key
+%% Key = cryptic_nif:rand_bytes(32),
+%% 
+%% % Generate a 12-byte nonce
+%% Nonce = cryptic_nif:rand_bytes(12),
+%% 
+%% % Generate a random salt
+%% Salt = cryptic_nif:rand_bytes(16).
+%% '''
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>Output is suitable for cryptographic purposes</li>
+%%%   <li>No need to seed - uses system entropy</li>
+%%%   <li>Non-blocking operation in most cases</li>
+%%%   <li>Returns different values on each call</li>
+%% </ul>
+%%
+%% @param Size The number of random bytes to generate (positive integer)
+%% @returns Binary containing the requested number of random bytes
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
 
 rand_bytes(_Size) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).

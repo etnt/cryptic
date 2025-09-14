@@ -1,3 +1,60 @@
+%%% @doc Cryptic Server
+%%%
+%%% This module implements the main server for the Cryptic chat application
+%%% using the gen_server behavior. It provides server lifecycle management,
+%%% WebSocket mTLS server initialization, and ETS table management for
+%%% user connections, prekeys, and message storage.
+%%%
+%%% == Features ==
+%%%
+%%% <ul>
+%%%   <li>Gen_server-based server lifecycle management</li>
+%%%   <li>WebSocket mTLS server startup and configuration</li>
+%%%   <li>ETS table creation and cleanup for data storage</li>
+%%%   <li>Environment-based configuration management</li>
+%%%   <li>SSL certificate path resolution</li>
+%%%   <li>Cowboy HTTP/WebSocket server management</li>
+%%%   <li>Event management system integration</li>
+%%% </ul>
+%%%
+%%% == Configuration ==
+%%%
+%%% The server supports configuration through application environment variables:
+%%% <ul>
+%%%   <li>`websocket_mtls_enabled' - Enable/disable WebSocket mTLS server</li>
+%%%   <li>`websocket_mtls_port' - Port for WebSocket server (default: 8443)</li>
+%%% </ul>
+%%%
+%%% SSL certificate paths can be configured via environment variables:
+%%% <ul>
+%%%   <li>`CRYPTIC_SERVER_CERT' - Server certificate file path</li>
+%%%   <li>`CRYPTIC_SERVER_KEY' - Server private key file path</li>
+%%%   <li>`CRYPTIC_CA_CERT' - Certificate Authority certificate file path</li>
+%%% </ul>
+%%%
+%%% == ETS Tables ==
+%%%
+%%% The server manages several ETS tables for runtime data:
+%%% <ul>
+%%%   <li>`user_connections' - Active WebSocket connections (set, public)</li>
+%%%   <li>`prekeys' - User public keys for encryption (set, public)</li>
+%%%   <li>`blobs' - Stored messages and data (bag, public)</li>
+%%% </ul>
+%%%
+%%% == WebSocket Server ==
+%%%
+%%% When enabled, starts a Cowboy-based WebSocket server with:
+%%% <ul>
+%%%   <li>Mutual TLS (mTLS) client certificate authentication</li>
+%%%   <li>WebSocket upgrade endpoint at `/ws'</li>
+%%%   <li>Static file serving for web interface</li>
+%%%   <li>Configurable timeouts and frame size limits</li>
+%%% </ul>
+%%%
+%%% @author Cryptic Team
+%%% @version 1.0.0
+%%% @since 2025-09-14
+
 -module(cryptic_server).
 
 -behaviour(gen_server).
@@ -23,12 +80,61 @@
 %%%===================================================================
 
 %% @doc Starts the server
+%%
+%% Starts the Cryptic server as a gen_server process registered locally
+%% under the module name. This function is typically called by a supervisor
+%% as part of the application startup sequence.
+%%
+%% @returns {ok, Pid} if successful, {error, Reason} if startup fails
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-%% @doc Start WebSocket mTLS server
+%% @doc Start WebSocket mTLS server with default configuration
+%%
+%% Convenience function to start the WebSocket server with default
+%% settings. Equivalent to calling start_websocket_mtls(#{}).
+%%
+%% @returns {ok, started} if successful, {error, Reason} if startup fails
+%% @see start_websocket_mtls/1
 start_websocket_mtls() ->
     start_websocket_mtls(#{}).
+
+%% @doc Start WebSocket mTLS server with custom configuration
+%%
+%% Starts a Cowboy-based WebSocket server with mutual TLS authentication.
+%% The server supports client certificate authentication and provides
+%% WebSocket endpoints for real-time messaging. Configuration options
+%% include port settings and SSL certificate paths.
+%%
+%% == Configuration Options ==
+%%%
+%% <ul>
+%%%   <li>`port' - Server port (default: 8443)</li>
+%%%   <li>`certfile' - Server certificate file path</li>
+%%%   <li>`keyfile' - Server private key file path</li>
+%%%   <li>`cacertfile' - CA certificate file path</li>
+%% </ul>
+%%
+%% == Environment Variables ==
+%%
+%% SSL certificate paths can be overridden with environment variables:
+%% <ul>
+%%%   <li>`CRYPTIC_SERVER_CERT' - Server certificate path</li>
+%%%   <li>`CRYPTIC_SERVER_KEY' - Server private key path</li>
+%%%   <li>`CRYPTIC_CA_CERT' - CA certificate path</li>
+%% </ul>
+%%
+%% == ETS Tables ==
+%%
+%% Creates and manages ETS tables for runtime data storage:
+%% <ul>
+%%%   <li>`user_connections' - WebSocket connection tracking</li>
+%%%   <li>`prekeys' - User public key storage</li>
+%%%   <li>`blobs' - Message and data blob storage</li>
+%% </ul>
+%%
+%% @param Config Configuration map with optional settings
+%% @returns {ok, started} if successful, {error, Reason} if startup fails
 
 start_websocket_mtls(Config) ->
     application:ensure_all_started(cowboy),
@@ -103,10 +209,25 @@ start_websocket_mtls(Config) ->
 %%%===================================================================
 
 %% @doc Initializes the server
+%%
+%% Called by gen_server when the server process is started. Sets up
+%% process flags for proper termination handling and schedules
+%% continuation for server startup logic.
+%%
+%% @param Args Initialization arguments (empty list)
+%% @returns {ok, State, {continue, start_server}} to continue initialization
 init([]) ->
      process_flag(trap_exit, true),
     {ok, #{}, {continue, start_server}}.
 
+%% @doc Handle continuation after initialization
+%%
+%% Called after init/1 to complete server startup. Sets up event
+%% handlers and proceeds with the main server configuration.
+%%
+%% @param start_server Continuation atom indicating startup phase
+%% @param CfgMap Current configuration map
+%% @returns {noreply, State, {continue, continue}} to proceed with startup
 handle_continue(start_server, CfgMap) ->
     %% Setup event handlers for Cryptic events with server configuration
     cryptic_event_manager:setup_event_handlers(#{log_type => server, log_dir => "logs"}),
@@ -115,10 +236,40 @@ handle_continue(start_server, CfgMap) ->
 
     continue(CfgMap).
 
+%% @doc Internal sleep function
+%%
+%% Simple sleep implementation using selective receive with timeout.
+%% Used for timing delays during server initialization.
+%%
+%% @param T Sleep time in milliseconds
+%% @returns ok
+
 sleep(T) ->
     receive
     after T -> ok
     end.
+
+%% @doc Continue server initialization
+%%
+%% Completes the server startup process by creating ETS tables,
+%% checking configuration, and optionally starting the WebSocket
+%% mTLS server based on application environment settings.
+%%
+%% == ETS Tables Created ==
+%%
+%% <ul>
+%%%   <li>`prekeys' - Named table for user public key storage</li>
+%%%   <li>`blobs' - Named bag table for message storage</li>
+%% </ul>
+%%
+%% == WebSocket Server Startup ==
+%%
+%% Checks application environment for `websocket_mtls_enabled' setting
+%% and starts the WebSocket server if enabled. Port configuration
+%% is read from `websocket_mtls_port' (default: 8443).
+%%
+%% @param CfgMap Configuration map
+%% @returns {noreply, State} after completing initialization
 
 continue(CfgMap) ->
     %% Create ETS stores
@@ -159,21 +310,58 @@ continue(CfgMap) ->
     {noreply, CfgMap}.
 
 %% @doc Handling call messages
+%%
+%% Processes synchronous gen_server calls. Currently returns a default
+%% response as no specific call handling is implemented.
+%%
+%% @param Request The call request (ignored)
+%% @param From The caller's identifier (ignored)
+%% @param State Current server state
+%% @returns {reply, Reply, State} with ok reply
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
 %% @doc Handling cast messages
+%%
+%% Processes asynchronous gen_server casts. Currently no specific
+%% cast handling is implemented.
+%%
+%% @param Msg The cast message (ignored)
+%% @param State Current server state
+%% @returns {noreply, State}
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @doc Handling all non call/cast messages
+%%
+%% Processes other types of messages sent to the gen_server process.
+%% Currently no specific message handling is implemented.
+%%
+%% @param Info The info message (ignored)
+%% @param State Current server state
+%% @returns {noreply, State}
 handle_info(_Info, State) ->
     {noreply, State}.
 
-%% @doc This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up.
+%% @doc Server termination cleanup
+%%
+%% Called by gen_server when the server is about to terminate.
+%% Performs cleanup operations including stopping the WebSocket
+%% server and deleting ETS tables to ensure proper resource cleanup.
+%%
+%% == Cleanup Operations ==
+%%
+%% <ul>
+%%%   <li>Stop Cowboy WebSocket listener</li>
+%%%   <li>Delete user_connections ETS table</li>
+%%%   <li>Delete prekeys ETS table</li>
+%%%   <li>Delete blobs ETS table</li>
+%% </ul>
+%%
+%% @param Reason Termination reason (ignored)
+%% @param State Final server state (ignored)
+%% @returns ok
 terminate(_Reason, _State) ->
     %% Stop WebSocket mTLS server (if it was started)
     catch cowboy:stop_listener(cryptic_ws_listener),
@@ -186,6 +374,15 @@ terminate(_Reason, _State) ->
     ok.
 
 %% @doc Convert process state when code is changed
+%%
+%% Called during hot code upgrades to convert the server state
+%% from the old version to the new version. Currently performs
+%% no state transformation.
+%%
+%% @param OldVsn Previous version identifier (ignored)
+%% @param State Current server state
+%% @param Extra Additional upgrade information (ignored)
+%% @returns {ok, State} with unchanged state
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 

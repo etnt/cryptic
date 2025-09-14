@@ -127,7 +127,7 @@ gen_keypair() ->
 %% @param PrivateKey 32-byte private key for scalar multiplication
 %% @param PublicKey 32-byte public key point to multiply
 %% @returns 32-byte shared secret binary
-%% @throws `badarg' if key sizes are incorrect or keys are invalid
+%% @throws badarg
 scalarmult(Priv, Pub) ->
     %% X25519 scalar multiplication via our NIF
     cryptic_nif:scalarmult(Priv, Pub).
@@ -157,7 +157,7 @@ scalarmult(Priv, Pub) ->
 %% @param Key 32-byte ChaCha20 encryption key
 %% @param AAD Additional authenticated data (can be empty binary)
 %% @returns `{Ciphertext, Nonce}' where Nonce is 12 bytes for ChaCha20-Poly1305-IETF
-%% @throws `badarg' if key size is incorrect
+%% @throws badarg
 aead_encrypt(Plain, Key, AAD) ->
     %% Use ChaCha20-Poly1305 IETF via our NIF
     %% NIF generates nonce internally and returns {Cipher, Nonce}
@@ -188,7 +188,7 @@ aead_encrypt(Plain, Key, AAD) ->
 %% @param Nonce 12-byte nonce used during encryption
 %% @param AAD Additional authenticated data (must match encryption AAD)
 %% @returns Decrypted plaintext binary
-%% @throws `decrypt_failed' if authentication fails or inputs are invalid
+%% @throws error
 aead_decrypt(Cipher, Key, Nonce, AAD) ->
     %% ChaCha20-Poly1305 IETF decryption via our NIF
     cryptic_nif:aead_decrypt(Cipher, Key, Nonce, AAD).
@@ -216,7 +216,7 @@ aead_decrypt(Cipher, Key, Nonce, AAD) ->
 %%
 %% @param N Number of random bytes to generate
 %% @returns Binary containing N cryptographically secure random bytes
-%% @throws `badarg' if N is negative
+%% @throws badarg
 rand_bytes(N) ->
     %% Generate cryptographically secure random bytes via our NIF
     cryptic_nif:rand_bytes(N).

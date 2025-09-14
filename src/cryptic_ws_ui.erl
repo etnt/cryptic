@@ -76,20 +76,10 @@
     keypair
 }).
 
-%% @doc WebSocket chat state record containing connection and user information.
+%% WebSocket chat state record containing connection and user information.
 %%
 %% This record maintains the core state for WebSocket mTLS operations including
 %% certificate configuration, server connection details, and message monitoring.
-%%
-%% @type ws_chat_state() = #ws_chat_state{
-%%   server_host :: string(),
-%%   server_port :: pos_integer(),
-%%   username :: string() | undefined,
-%%   cert_config :: #{atom() => string()},
-%%   ws_client_state :: term() | undefined,
-%%   keypair :: {binary(), binary()} | undefined,
-%%   connection_status :: connected | disconnected | connecting
-%% }.
 -record(ws_chat_state, {
     server_host = "localhost" :: string(),
     server_port = 8443 :: pos_integer(),
@@ -101,26 +91,10 @@
     pending_operation :: map() | undefined
 }).
 
-%% @doc UI state record containing screen layout and interaction state.
+%% UI state record containing screen layout and interaction state.
 %%
 %% This record manages all UI-specific state including screen dimensions,
 %% message display, input handling, and WebSocket communication.
-%%
-%% @type ui_state() = #ui_state{
-%%   ws_chat_state :: #ws_chat_state{},
-%%   screen_height :: integer(),
-%%   screen_width :: integer(),
-%%   message_history :: [{string(), string(), string()}],
-%%   scroll_position :: integer(),
-%%   command_history :: [string()],
-%%   current_input :: string(),
-%%   cursor_position :: integer(),
-%%   history_position :: integer(),
-%%   input_pid :: pid(),
-%%   status_pid :: pid(),
-%%   chat_mode :: boolean(),
-%%   chat_target :: string() | undefined
-%% }.
 -record(ui_state, {
     ws_chat_state :: #ws_chat_state{},
     screen_height :: integer(),
@@ -196,7 +170,7 @@ start(Username) ->
 %% @param Username The username whose certificate to use
 %% @param ServerHost Hostname of the WebSocket mTLS server
 %% @returns `ok' when the UI exits normally.
-%% @throws Any exception that occurs during initialization or operation.
+%% @throws any()
 -spec start(string(), string()) -> ok.
 start(Username, ServerHost) ->
     %% Start cecho first (handles ncurses initialization)
