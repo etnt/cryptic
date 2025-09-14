@@ -38,7 +38,11 @@ $ ./scripts/start-client.sh bob
 - **`connect`** - Connect to WebSocket server with certificate authentication
 - **`send <user> <message>`** - Send encrypted message to user
 - **`chat <user>`** - Enter real-time chat mode with automatic message polling
-- **`inbox`** - View all received encrypted messages with timestamps
+- **`inbox`** - View message counts by sender (inbox summary)
+- **`inbox <user>`** - View all messages from specific user with timestamps
+- **`auto_display on`** - Enable automatic message display (default)
+- **`auto_display off`** - Disable automatic display; messages stored in inbox
+- **`auto_display`** - Show current auto-display status
 - **`list_users`** - Show all users registered on the server
 - **`quit`** - Exit the application
 

@@ -136,7 +136,11 @@
     
     %% Inbox for encrypted messages
     inbox = [] :: [{string(), string(), integer()}], % {From, Message, Timestamp}
-    message_count = 0 :: integer()                % Number of messages in inbox
+    message_count = 0 :: integer(),               % Number of messages in inbox
+    
+    %% Auto-display control
+    auto_display = true :: boolean(),             % Whether to auto-display incoming messages
+    pending_messages = #{} :: #{string() => integer()} % Count of pending messages per user
 }).
 
 %% Color pairs
@@ -147,6 +151,7 @@
 -define(COLOR_SYSTEM_MESSAGE, 5).
 -define(COLOR_TIMESTAMP, 6).
 -define(COLOR_INPUT, 7).
+-define(COLOR_SENT_MESSAGE, 8).
 
 %%%===================================================================
 %%% Public API
@@ -453,7 +458,7 @@ draw_status_bar(UIState) ->
         disconnected -> " | Disconnected"
     end,
     
-    %% Get chat mode status
+    %% Get chat mode status and message count
     ChatModeStr = case UIState#ui_state.chat_mode of
         false -> "";
         true -> 
@@ -463,10 +468,17 @@ draw_status_bar(UIState) ->
             end
     end,
     
+    %% Get pending message count
+    PendingCount = maps:fold(fun(_, Count, Acc) -> Acc + Count end, 0, UIState#ui_state.pending_messages),
+    MessageCountStr = case PendingCount of
+        0 -> "";
+        N -> " | Msgs: " ++ integer_to_list(N)
+    end,
+    
     %% Create status line
     ServerStr = WSChatState#ws_chat_state.server_host ++ ":8443",
-    StatusLine = io_lib:format("CRYPTIC WS mTLS | ~s | ~s~s~s | ~s", 
-                              [ServerStr, UserStr, ConnStatusStr, ChatModeStr, TimeStr]),
+    StatusLine = io_lib:format("CRYPTIC WS mTLS | ~s | ~s~s~s~s | ~s", 
+                              [ServerStr, UserStr, ConnStatusStr, ChatModeStr, MessageCountStr, TimeStr]),
     
     %% Truncate or pad to screen width
     StatusLineFmt = format_line(lists:flatten(StatusLine), Width),
@@ -535,7 +547,12 @@ draw_messages([{From, Message, Timestamp} | Rest], Line, Width, UIState) ->
     ColorPair = case From of
         "SYSTEM" -> ?COLOR_SYSTEM_MESSAGE;
         CurrentUser -> ?COLOR_OWN_MESSAGE;
-        _ -> ?COLOR_OTHER_MESSAGE
+        _ -> 
+            %% Check if this is a sent message (starts with "You -> ")
+            case string:prefix(From, "You -> ") of
+                nomatch -> ?COLOR_OTHER_MESSAGE;
+                _ -> ?COLOR_SENT_MESSAGE
+            end
     end,
     
     %% Draw message
@@ -740,11 +757,13 @@ process_command("help", UIState) ->
             HelpState2 = add_system_message("send <user> <message> - Send encrypted message", HelpState),
             HelpState3 = add_system_message("chat <user> - Enter chat mode with user", HelpState2),
             HelpState4 = add_system_message("list_users - List all registered users", HelpState3),
-            HelpState5 = add_system_message("inbox - Show received encrypted messages", HelpState4),
-            HelpState6 = add_system_message("disconnect - Close WebSocket connection", HelpState5),
-            HelpState7 = add_system_message("quit - Exit application", HelpState6),
-            HelpState8 = add_system_message("In chat mode: :exit to leave, :help for commands", HelpState7),
-            HelpState8;
+            HelpState5 = add_system_message("inbox - Show message counts by sender", HelpState4),
+            HelpState6 = add_system_message("inbox <user> - Show messages from specific user", HelpState5),
+            HelpState7 = add_system_message("auto_display on/off - Control message display", HelpState6),
+            HelpState8 = add_system_message("disconnect - Close WebSocket connection", HelpState7),
+            HelpState9 = add_system_message("quit - Exit application", HelpState8),
+            HelpState10 = add_system_message("In chat mode: :exit to leave, :help for commands", HelpState9),
+            HelpState10;
         connecting ->
             add_system_message("Please wait for connection to complete...", UIState)
     end;
@@ -892,8 +911,7 @@ process_command("send " ++ Rest, UIState) ->
                             TrimmedMessage = string:trim(Message),
                             
                             %% Start the secure send process: get prekey, then encrypt and send
-                            StatusMsg = io_lib:format("Initiating secure send to ~s...", [TrimmedToUser]),
-                            TempState = add_system_message(lists:flatten(StatusMsg), UIState),
+                            %% Don't show status message, will show "You -> user: message" on success
                             
                             %% First, get the recipient's prekey
                             case cryptic_ws_client:send_command(ClientState#client_state.ws_client_pid, #{
@@ -911,10 +929,10 @@ process_command("send " ++ Rest, UIState) ->
                                     NewWSChatState = WSChatState#ws_chat_state{
                                         pending_operation = PendingMsg
                                     },
-                                    TempState#ui_state{ws_chat_state = NewWSChatState};
+                                    UIState#ui_state{ws_chat_state = NewWSChatState};
                                 {error, Reason} ->
                                     ErrMsg = io_lib:format("Failed to get prekey for ~s: ~p", [TrimmedToUser, Reason]),
-                                    add_system_message(lists:flatten(ErrMsg), TempState)
+                                    add_system_message(lists:flatten(ErrMsg), UIState)
                             end;
                         _ ->
                             add_system_message("WebSocket client not available", UIState)
@@ -945,18 +963,101 @@ process_command("chat " ++ Username, UIState) ->
         _ ->
             add_system_message("Not connected. Use 'connect' first.", UIState)
     end;
-process_command("inbox", UIState) ->
-    %% Show inbox of encrypted messages
-    case UIState#ui_state.inbox of
+process_command("auto_display on", UIState) ->
+    NewState = UIState#ui_state{auto_display = true},
+    StatusState = add_system_message("Auto-display enabled: messages will appear immediately", NewState),
+    
+    %% Check if there are any pending messages to display
+    case UIState#ui_state.pending_messages of
+        Empty when Empty =:= #{} ->
+            %% No pending messages
+            StatusState;
+        PendingMessages ->
+            %% Show all pending messages and clear the pending counts
+            TotalPending = maps:fold(fun(_, Count, Acc) -> Acc + Count end, 0, PendingMessages),
+            case TotalPending > 0 of
+                true ->
+                    %% Show pending messages notification
+                    NotifyState = add_system_message("=== DISPLAYING PENDING MESSAGES ===", StatusState),
+                    
+                    %% Display messages from inbox for each sender with pending count > 0
+                    FinalState = maps:fold(fun(From, Count, AccState) ->
+                        case Count > 0 of
+                            true ->
+                                %% Get messages from this sender
+                                SenderMessages = [Msg || {MsgFrom, _, _} = Msg <- UIState#ui_state.inbox, MsgFrom =:= From],
+                                %% Display the most recent messages up to the pending count
+                                RecentMessages = lists:sublist(lists:reverse(SenderMessages), Count),
+                                lists:foldl(fun({MsgFrom, Message, _Timestamp}, State) ->
+                                    add_message(MsgFrom, Message, State)
+                                end, AccState, lists:reverse(RecentMessages));
+                            false ->
+                                AccState
+                        end
+                    end, NotifyState, PendingMessages),
+                    
+                    %% Clear all pending message counts
+                    FinalState#ui_state{pending_messages = #{}};
+                false ->
+                    StatusState
+            end
+    end;
+process_command("auto_display off", UIState) ->
+    NewState = UIState#ui_state{auto_display = false},
+    add_system_message("Auto-display disabled: messages stored in inbox", NewState);
+process_command("auto_display", UIState) ->
+    Status = case UIState#ui_state.auto_display of
+        true -> "enabled";
+        false -> "disabled"
+    end,
+    add_system_message("Auto-display is currently " ++ Status, UIState);
+process_command("inbox" ++ Rest, UIState) ->
+    case string:trim(Rest) of
         [] ->
-            add_system_message("Inbox is empty", UIState);
-        Messages ->
-            InboxState = add_system_message("=== INBOX ===", UIState),
-            lists:foldl(fun({From, Message, Timestamp}, AccState) ->
-                TimeStr = format_timestamp(Timestamp),
-                MsgText = io_lib:format("[~s] ~s: ~s", [TimeStr, From, Message]),
-                add_system_message(lists:flatten(MsgText), AccState)
-            end, InboxState, Messages)
+            %% Show inbox summary with message counts by sender
+            case UIState#ui_state.pending_messages of
+                Empty when Empty =:= #{} ->
+                    add_system_message("Inbox is empty", UIState);
+                PendingMessages ->
+                    %% Filter to only show senders with messages (count > 0)
+                    PendingWithMessages = maps:filter(fun(_, Count) -> Count > 0 end, PendingMessages),
+                    case maps:size(PendingWithMessages) of
+                        0 ->
+                            add_system_message("Inbox is empty", UIState);
+                        _ ->
+                            InboxState = add_system_message("=== INBOX SUMMARY ===", UIState),
+                            InboxState2 = add_system_message("From                 Messages", InboxState),
+                            InboxState3 = add_system_message("----                 --------", InboxState2),
+                            FinalState = lists:foldl(fun({From, Count}, AccState) ->
+                                Line = io_lib:format("~-20s ~w", [From, Count]),
+                                add_system_message(lists:flatten(Line), AccState)
+                            end, InboxState3, lists:sort(maps:to_list(PendingWithMessages))),
+                            %% Don't clear pending counts - only clear when actually reading messages
+                            FinalState
+                    end
+            end;
+        Sender ->
+            %% Show messages from specific sender
+            case UIState#ui_state.inbox of
+                [] ->
+                    add_system_message("No messages from " ++ Sender, UIState);
+                Messages ->
+                    SenderMessages = [Msg || {From, _, _} = Msg <- Messages, From =:= Sender],
+                    case SenderMessages of
+                        [] ->
+                            add_system_message("No messages from " ++ Sender, UIState);
+                        _ ->
+                            InboxState = add_system_message("=== MESSAGES FROM " ++ string:uppercase(Sender) ++ " ===", UIState),
+                            FinalState = lists:foldl(fun({_From, Message, Timestamp}, AccState) ->
+                                TimeStr = format_timestamp(Timestamp),
+                                MsgText = io_lib:format("[~s] ~s", [TimeStr, Message]),
+                                add_system_message(lists:flatten(MsgText), AccState)
+                            end, InboxState, SenderMessages),
+                            %% Clear pending message count for this sender
+                            UpdatedPendingMessages = maps:put(Sender, 0, UIState#ui_state.pending_messages),
+                            FinalState#ui_state{pending_messages = UpdatedPendingMessages}
+                    end
+            end
     end;
 process_command(Command, UIState) ->
     %% Check if we're in chat mode
@@ -1020,8 +1121,7 @@ process_chat_command(Message, UIState) ->
                     TrimmedMessage = string:trim(Message),
                     
                     %% Start the secure send process: get prekey, then encrypt and send
-                    StatusMsg = io_lib:format("Sending to ~s...", [ToUser]),
-                    TempState = add_system_message(lists:flatten(StatusMsg), UIState),
+                    %% Don't show status message, will show "You -> user: message" on success
                     
                     %% First, get the recipient's prekey
                     case cryptic_ws_client:send_command(ClientState#client_state.ws_client_pid, #{
@@ -1039,7 +1139,7 @@ process_chat_command(Message, UIState) ->
                             NewWSChatState = WSChatState#ws_chat_state{
                                 pending_operation = PendingMsg
                             },
-                            TempState#ui_state{ws_chat_state = NewWSChatState};
+                            UIState#ui_state{ws_chat_state = NewWSChatState};
                         queued ->
                             %% Prekey request queued
                             PendingMsg = #{
@@ -1055,7 +1155,7 @@ process_chat_command(Message, UIState) ->
                             QueuedState#ui_state{ws_chat_state = NewWSChatState};
                         {error, Reason} ->
                             ErrMsg = io_lib:format("Failed to get prekey for ~s: ~p", [ToUser, Reason]),
-                            add_system_message(lists:flatten(ErrMsg), TempState)
+                            add_system_message(lists:flatten(ErrMsg), UIState)
                     end;
                 _ ->
                     add_system_message("WebSocket client not available", UIState)
@@ -1164,8 +1264,8 @@ handle_prekey_response(Data, UIState) ->
                                                     pending_operation = undefined
                                                 },
                                                 ClearUIState = UIState#ui_state{ws_chat_state = ClearWSChatState},
-                                                MsgText = io_lib:format("Encrypted message sent to ~s: ~s", [ToUser, Message]),
-                                                add_system_message(lists:flatten(MsgText), ClearUIState);
+                                                SenderText = io_lib:format("You -> ~s", [ToUser]),
+                                                add_message(lists:flatten(SenderText), Message, ClearUIState);
                                             {error, Reason} ->
                                                 SendErrMsg = io_lib:format("Failed to send encrypted message: ~p", [Reason]),
                                                 add_system_message(lists:flatten(SendErrMsg), UIState)
@@ -1225,8 +1325,8 @@ handle_prekey_received(User, PrekeyB64, UIState) ->
                                             pending_operation = undefined
                                         },
                                         ClearUIState = UIState#ui_state{ws_chat_state = ClearWSChatState},
-                                        MsgText = io_lib:format("Encrypted message sent to ~s: ~s", [ToUser, Message]),
-                                        add_system_message(lists:flatten(MsgText), ClearUIState);
+                                        SenderText = io_lib:format("You -> ~s", [ToUser]),
+                                        add_message(lists:flatten(SenderText), Message, ClearUIState);
                                     queued ->
                                         %% Message queued, clear pending operation
                                         ClearWSChatState = WSChatState#ws_chat_state{
@@ -1320,12 +1420,29 @@ handle_encrypted_message_received(Message, UIState) ->
                                             %% Add to inbox and update message count
                                             NewInbox = UIState#ui_state.inbox ++ [{From, PlainText, Timestamp}],
                                             MessageCount = length(NewInbox),
-                                            NewUIState = UIState#ui_state{
+                                            
+                                            %% Update pending message count for sender
+                                            PendingMessages = UIState#ui_state.pending_messages,
+                                            CurrentCount = maps:get(From, PendingMessages, 0),
+                                            NewPendingMessages = maps:put(From, CurrentCount + 1, PendingMessages),
+                                            
+                                            TempUIState = UIState#ui_state{
                                                 inbox = NewInbox,
-                                                message_count = MessageCount
+                                                message_count = MessageCount,
+                                                pending_messages = NewPendingMessages
                                             },
-                                            %% Show decrypted message
-                                            add_message(From, PlainText, NewUIState)
+                                            
+                                            %% Check auto_display setting
+                                            case UIState#ui_state.auto_display of
+                                                true ->
+                                                    %% Show message immediately and clear pending count
+                                                    ClearedPendingMessages = maps:put(From, 0, NewPendingMessages),
+                                                    NewUIState = TempUIState#ui_state{pending_messages = ClearedPendingMessages},
+                                                    add_message(From, PlainText, NewUIState);
+                                                false ->
+                                                    %% Just store in inbox, no notification needed
+                                                    TempUIState
+                                            end
                                     end
                                 catch
                                     error:CryptoReason ->
@@ -1448,7 +1565,8 @@ init_colors() ->
     cecho:init_pair(?COLOR_OTHER_MESSAGE, ?ceCOLOR_CYAN, ?ceCOLOR_BLACK),
     cecho:init_pair(?COLOR_SYSTEM_MESSAGE, ?ceCOLOR_YELLOW, ?ceCOLOR_BLACK),
     cecho:init_pair(?COLOR_TIMESTAMP, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK),
-    cecho:init_pair(?COLOR_INPUT, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK).
+    cecho:init_pair(?COLOR_INPUT, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK),
+    cecho:init_pair(?COLOR_SENT_MESSAGE, ?ceCOLOR_MAGENTA, ?ceCOLOR_BLACK).
 
 %% @private
 %% @doc Format a line to fit screen width with padding or truncation.

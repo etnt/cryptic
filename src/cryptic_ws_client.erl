@@ -264,7 +264,7 @@ handle_server_message(<<"users">>, Message, State) ->
 
 handle_server_message(<<"message">>, Message, State) ->
     From = maps:get(<<"from">>, Message),
-    ?info("Message from ~s: ~p", [From, Message]),
+    ?info("Message from ~s", [From]),
     %% Forward encrypted message to UI for decryption and display
     case State#state.ui_pid of
         undefined ->
