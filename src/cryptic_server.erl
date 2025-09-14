@@ -90,7 +90,10 @@ start_websocket_mtls(Config) ->
     
     {ok, _} = cowboy:start_tls(cryptic_ws_listener, 
                                [{port, Port}] ++ TLSOptions, 
-                               #{env => #{dispatch => Dispatch}}),
+                               #{env => #{dispatch => Dispatch},
+                                 websocket_timeout => 300000,  % 5 minute WebSocket timeout
+                                 websocket_max_frame_size => 65536  % 64KB max frame
+                               }),
     
     io:format("Cryptic WebSocket server with mTLS started on port ~p~n", [Port]),
     {ok, started}.

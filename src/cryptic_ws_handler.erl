@@ -62,6 +62,16 @@ websocket_handle({binary, _Data}, State) ->
     %% Handle binary data if needed
     {[], State};
 
+%% Handle WebSocket ping frames
+websocket_handle(ping, State) ->
+    %% Respond with pong
+    {[pong], State};
+
+%% Handle WebSocket pong frames
+websocket_handle(pong, State) ->
+    %% Just acknowledge, no response needed
+    {[], State};
+
 websocket_handle(_Data, State) ->
     {[], State}.
 

@@ -1,15 +1,15 @@
 -module(cryptic_ws_client).
 -behaviour(gen_server).
 
--include("cryptic.hrl").
-
 -export([start_link/2, start_link/3, send_command/2, stop/1, set_ui_pid/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3, handle_continue/2]).
+
+-include("cryptic.hrl").
 
 -record(state, {
     username,
     server_host,
-    server_port,
+    server_port = 8443,
     conn_pid,
     stream_ref,
     cert_file,
@@ -17,7 +17,8 @@
     ca_file,
     connected = false,
     pending_commands = [],
-    ui_pid
+    ui_pid,
+    ping_timer_ref
 }).
 
 %% API
@@ -69,13 +70,8 @@ init({Username, ServerHost, Config}) ->
                 key_file = Key,
                 ca_file = CA
             },
-            {ok, State, {continue, setup_events}}
+        {ok, State, {continue, connect}}
     end.
-
-handle_continue(setup_events, State) ->
-    %% Set up event handlers for client with client configuration
-    cryptic_event_manager:setup_event_handlers(#{log_type => client, log_dir => "logs"}),
-    {noreply, State, {continue, connect}};
 
 handle_continue(connect, State) ->
     case connect_websocket(State) of
@@ -120,7 +116,10 @@ handle_info({gun_upgrade, ConnPid, StreamRef, [<<"websocket">>], _Headers},
         gun:ws_send(ConnPid, StreamRef, {text, JsonCommand})
     end, lists:reverse(State#state.pending_commands)),
     
-    {noreply, State#state{connected = true, pending_commands = []}};
+    %% Start ping timer to keep connection alive (ping every 30 seconds)
+    PingTimerRef = erlang:send_after(30000, self(), send_ping),
+    
+    {noreply, State#state{connected = true, pending_commands = [], ping_timer_ref = PingTimerRef}};
 
 handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
     case jsx:decode(Data, [return_maps]) of
@@ -142,12 +141,40 @@ handle_info({gun_error, _ConnPid, _StreamRef, Reason}, State) ->
 handle_info({gun_down, ConnPid, _Protocol, Reason, _KilledStreams}, 
             State = #state{conn_pid = ConnPid}) ->
                 ?warning("Connection down: ~p", [Reason]),
-    {noreply, State#state{connected = false}};
+    %% Cancel ping timer if connection is down
+    case State#state.ping_timer_ref of
+        undefined -> ok;
+        TimerRef -> erlang:cancel_timer(TimerRef)
+    end,
+    {noreply, State#state{connected = false, ping_timer_ref = undefined}};
+
+%% Handle ping timer - send ping to keep connection alive
+handle_info(send_ping, State = #state{connected = true, conn_pid = ConnPid, stream_ref = StreamRef}) ->
+    %% Send WebSocket ping frame
+    gun:ws_send(ConnPid, StreamRef, ping),
+    ?dbg("Sent WebSocket ping", []),
+    %% Schedule next ping in 30 seconds
+    PingTimerRef = erlang:send_after(30000, self(), send_ping),
+    {noreply, State#state{ping_timer_ref = PingTimerRef}};
+
+handle_info(send_ping, State = #state{connected = false}) ->
+    %% Don't send ping if not connected
+    {noreply, State};
+
+%% Handle pong response from server
+handle_info({gun_ws, _ConnPid, _StreamRef, pong}, State) ->
+    ?dbg("Received WebSocket pong", []),
+    {noreply, State};
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{conn_pid = ConnPid}) when ConnPid =/= undefined ->
+terminate(_Reason, #state{conn_pid = ConnPid, ping_timer_ref = TimerRef}) when ConnPid =/= undefined ->
+    %% Cancel ping timer
+    case TimerRef of
+        undefined -> ok;
+        _ -> erlang:cancel_timer(TimerRef)
+    end,
     gun:close(ConnPid);
 terminate(_Reason, _State) ->
     ok.
