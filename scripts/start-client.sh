@@ -1,15 +1,16 @@
 #!/bin/bash
 
-# Start Cryptic WebSockeecho "🚀 Starting Cryptic WebSocket mTLS Client UI..."
-echo "   Username: $USERNAME"
-echo "   Server: ${SERVER:-localhost}"
-echo ""
-erl -pa _build/default/lib/*/ebin -noshell -eval "cryptic_ws_ui:start("$USERNAME", "${SERVER:-localhost}")."ent using environment variables
+# Start Cryptic WebSocket mTLS Client using environment variables
 
 cd "$(dirname "$0")/.."
 
 # Default username
 USERNAME="${1:-alice}"
+
+echo "🚀 Starting Cryptic WebSocket mTLS Client UI..."
+echo "   Username: $USERNAME"
+echo "   Server: ${SERVER:-localhost}"
+echo ""
 
 # Set default certificate paths if not already set
 export CRYPTIC_CLIENT_CERT="${CRYPTIC_CLIENT_CERT:-CA/client_keys/${USERNAME}.crt}"
