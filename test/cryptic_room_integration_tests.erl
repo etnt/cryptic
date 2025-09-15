@@ -28,6 +28,11 @@
 setup() ->
     % Start necessary applications
     application:start(crypto),
+    
+    % Start event manager for room handlers
+    {ok, _} = gen_event:start_link({local, cryptic_event_manager}),
+    gen_event:add_handler(cryptic_event_manager, cryptic_console_logger, []),
+    
     % Initialize ETS tables as they would be in the actual server
     ets:new(rooms, [named_table, set, public, {keypos, 2}]),
     ets:new(room_messages, [named_table, bag, public, {keypos, 3}]),  % Match server config
@@ -46,12 +51,15 @@ setup() ->
 
 cleanup(_) ->
     % Clean up ETS tables
-    ets:delete(rooms),
-    ets:delete(room_messages),
-    ets:delete(user_rooms),
-    ets:delete(users),
-    ets:delete(connections),
-    ets:delete(user_connections),
+    catch ets:delete(rooms),
+    catch ets:delete(room_messages),
+    catch ets:delete(user_rooms),
+    catch ets:delete(users),
+    catch ets:delete(connections),
+    catch ets:delete(user_connections),
+    
+    % Stop event manager
+    catch gen_event:stop(cryptic_event_manager),
     ok.
 
 %% Integration test: Complete room workflow with WebSocket command handling
@@ -143,6 +151,11 @@ complete_room_workflow_test_() ->
              
              % Test 4: Leave room functionality
              ?_test(begin
+                 % Clear any existing test data
+                 ets:delete_all_objects(rooms),
+                 ets:delete_all_objects(room_messages),
+                 ets:delete_all_objects(user_rooms),
+                 
                  % Create room and join
                  CreateCommand = #{
                      <<"type">> => <<"create_room">>,

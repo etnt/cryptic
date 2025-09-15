@@ -29,21 +29,24 @@
     handle_room_command/3
 ]).
 
--import(cryptic_room_manager,
-    [ room_id/1
-    , room_name/1
-    , room_description/1
-    , room_type/1
-    , room_owner/1
-    , room_created_at/1
-    , room_members/1
-    , room_message_id/1
-    , room_message_from/1
-    , room_message_timestamp/1
-    , room_message_recipients/1
-    ]).
+-import(
+    cryptic_room_manager,
+    [
+        room_id/1,
+        room_name/1,
+        room_description/1,
+        room_type/1,
+        room_owner/1,
+        room_created_at/1,
+        room_members/1,
+        room_message_id/1,
+        room_message_from/1,
+        room_message_timestamp/1,
+        room_message_recipients/1
+    ]
+).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic.hrl").
 
 %%% @doc Handle room-related WebSocket commands
 %%%
@@ -62,16 +65,17 @@ handle_room_command(create_room, Params, Username) ->
     Name = maps:get(<<"name">>, Params, <<"Unnamed Room">>),
     Description = maps:get(<<"description">>, Params, <<"">>),
     TypeBin = maps:get(<<"room_type">>, Params, <<"public">>),
-    
-    Type = case TypeBin of
-        <<"public">> -> public;
-        <<"private">> -> private;
-        _ -> public
-    end,
-    
+
+    Type =
+        case TypeBin of
+            <<"public">> -> public;
+            <<"private">> -> private;
+            _ -> public
+        end,
+
     case cryptic_room_manager:create_room(Name, Description, Type, Username) of
         {ok, RoomId} ->
-            ?LOG_INFO("User ~s created room ~s (~s)", [Username, Name, RoomId]),
+            ?info("User ~s created room ~s (~s)", [Username, Name, RoomId]),
             #{
                 type => <<"room_created">>,
                 success => true,
@@ -81,23 +85,26 @@ handle_room_command(create_room, Params, Username) ->
                 room_type => TypeBin
             };
         {error, Reason} ->
-            ?LOG_WARNING("Failed to create room ~s for user ~s: ~p", [Name, Username, Reason]),
+            ?warning("Failed to create room ~s for user ~s: ~p", [
+                Name, Username, Reason
+            ]),
             #{
                 type => <<"error">>,
                 success => false,
-                message => iolist_to_binary(io_lib:format("Failed to create room: ~p", [Reason]))
+                message => iolist_to_binary(
+                    io_lib:format("Failed to create room: ~p", [Reason])
+                )
             }
     end;
-
 %% Join an existing room
 handle_room_command(join_room, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
     Password = maps:get(<<"password">>, Params, undefined),
-    
+
     case cryptic_room_manager:join_room(RoomId, Username, Password) of
         ok ->
-            ?LOG_INFO("User ~s joined room ~s", [Username, RoomId]),
-            
+            ?info("User ~s joined room ~s", [Username, RoomId]),
+
             % Get room info to return to client
             {ok, Room} = cryptic_room_manager:get_room_info(RoomId),
             #{
@@ -108,70 +115,76 @@ handle_room_command(join_room, Params, Username) ->
                 members => room_members(Room)
             };
         {error, Reason} ->
-            ?LOG_WARNING("User ~s failed to join room ~s: ~p", [Username, RoomId, Reason]),
+            ?warning("User ~s failed to join room ~s: ~p", [
+                Username, RoomId, Reason
+            ]),
             #{
                 type => <<"error">>,
                 success => false,
                 message => format_error_message(Reason)
             }
     end;
-
 %% Leave a room
 handle_room_command(leave_room, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
-    
+
     case cryptic_room_manager:leave_room(RoomId, Username) of
         ok ->
-            ?LOG_INFO("User ~s left room ~s", [Username, RoomId]),
+            ?info("User ~s left room ~s", [Username, RoomId]),
             #{
                 type => <<"room_left">>,
                 success => true,
                 room_id => RoomId
             };
         {error, Reason} ->
-            ?LOG_WARNING("User ~s failed to leave room ~s: ~p", [Username, RoomId, Reason]),
+            ?warning("User ~s failed to leave room ~s: ~p", [
+                Username, RoomId, Reason
+            ]),
             #{
                 type => <<"error">>,
                 success => false,
                 message => format_error_message(Reason)
             }
     end;
-
 %% List available rooms
 handle_room_command(list_rooms, Params, Username) ->
     FilterBin = maps:get(<<"filter">>, Params, <<"public">>),
-    
-    Filter = case FilterBin of
-        <<"all">> -> all;
-        <<"public">> -> public;
-        <<"private">> -> private;
-        <<"joined">> -> {user, Username}
-    end,
-    
+
+    Filter =
+        case FilterBin of
+            <<"all">> -> all;
+            <<"public">> -> public;
+            <<"private">> -> private;
+            <<"joined">> -> {user, Username}
+        end,
+
     Rooms = cryptic_room_manager:list_rooms(Filter),
     RoomList = lists:map(fun format_room_summary/1, Rooms),
-    
-    ?LOG_DEBUG("User ~s listed ~b rooms with filter ~s", [Username, length(Rooms), FilterBin]),
+
+    ?dbg("User ~s listed ~b rooms with filter ~s", [
+        Username, length(Rooms), FilterBin
+    ]),
     #{
         type => <<"rooms_list">>,
         success => true,
         filter => FilterBin,
         rooms => RoomList
     };
-
 %% Send message to room
 handle_room_command(send_room_message, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
     Message = maps:get(<<"message">>, Params),
-    
+
     case cryptic_room_manager:send_room_message(RoomId, Username, Message) of
         {ok, MessageId} ->
-            ?LOG_DEBUG("User ~s sent message to room ~s", [Username, RoomId]),
-            
+            ?dbg("User ~s sent message to room ~s", [Username, RoomId]),
+
             % Get room members to broadcast message
             {ok, Members} = cryptic_room_manager:get_room_members(RoomId),
-            broadcast_room_message(RoomId, Username, Message, MessageId, Members),
-            
+            broadcast_room_message(
+                RoomId, Username, Message, MessageId, Members
+            ),
+
             #{
                 type => <<"room_message_sent">>,
                 success => true,
@@ -179,25 +192,28 @@ handle_room_command(send_room_message, Params, Username) ->
                 message_id => MessageId
             };
         {error, Reason} ->
-            ?LOG_WARNING("User ~s failed to send message to room ~s: ~p", [Username, RoomId, Reason]),
+            ?warning("User ~s failed to send message to room ~s: ~p", [
+                Username, RoomId, Reason
+            ]),
             #{
                 type => <<"error">>,
                 success => false,
                 message => format_error_message(Reason)
             }
     end;
-
 %% Get room message history
 handle_room_command(get_room_messages, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
     Since = maps:get(<<"since">>, Params, 0),
-    
+
     % Check if user is member of the room
     case cryptic_room_manager:is_room_member(Username, RoomId) of
         true ->
             Messages = cryptic_room_manager:get_room_messages(RoomId, Since),
-            MessageList = lists:map(fun(Msg) -> format_room_message(Msg, Username) end, Messages),
-            
+            MessageList = lists:map(
+                fun(Msg) -> format_room_message(Msg, Username) end, Messages
+            ),
+
             #{
                 type => <<"room_messages">>,
                 success => true,
@@ -211,16 +227,15 @@ handle_room_command(get_room_messages, Params, Username) ->
                 message => <<"Not a member of this room">>
             }
     end;
-
 %% Get room members
 handle_room_command(get_room_members, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
-    
+
     case cryptic_room_manager:is_room_member(Username, RoomId) of
         true ->
             {ok, Members} = cryptic_room_manager:get_room_members(RoomId),
             {ok, Room} = cryptic_room_manager:get_room_info(RoomId),
-            
+
             #{
                 type => <<"room_members">>,
                 success => true,
@@ -235,10 +250,9 @@ handle_room_command(get_room_members, Params, Username) ->
                 message => <<"Not a member of this room">>
             }
     end;
-
 %% Unknown command
 handle_room_command(Command, _Params, Username) ->
-    ?LOG_WARNING("User ~s sent unknown room command: ~p", [Username, Command]),
+    ?warning("User ~s sent unknown room command: ~p", [Username, Command]),
     #{
         type => <<"error">>,
         success => false,
@@ -263,17 +277,24 @@ format_room_summary(Room) ->
 format_room_message(Message, RequestingUser) ->
     % Find the encrypted message for this user
     Recipients = room_message_recipients(Message),
-    DecryptedMessage = case lists:keyfind(RequestingUser, 1, Recipients) of
-        {RequestingUser, EphemeralPublic, Ciphertext} ->
-            % Decrypt the message for this user
-            case cryptic_room_manager:decrypt_message_for_user(Ciphertext, EphemeralPublic, binary_to_list(RequestingUser)) of
-                {ok, Plaintext} -> Plaintext;
-                {error, _Reason} -> <<"[Failed to decrypt message]">>
-            end;
-        false ->
-            <<"[Message not available]">>
-    end,
-    
+    DecryptedMessage =
+        case lists:keyfind(RequestingUser, 1, Recipients) of
+            {RequestingUser, EphemeralPublic, Ciphertext} ->
+                % Decrypt the message for this user
+                case
+                    cryptic_room_manager:decrypt_message_for_user(
+                        Ciphertext,
+                        EphemeralPublic,
+                        binary_to_list(RequestingUser)
+                    )
+                of
+                    {ok, Plaintext} -> Plaintext;
+                    {error, _Reason} -> <<"[Failed to decrypt message]">>
+                end;
+            false ->
+                <<"[Message not available]">>
+        end,
+
     #{
         id => room_message_id(Message),
         from => room_message_from(Message),
@@ -282,50 +303,124 @@ format_room_message(Message, RequestingUser) ->
     }.
 
 %% Broadcast message to all room members
-broadcast_room_message(RoomId, FromUsername, Message, MessageId, Members) ->
-    % Get all connected users who are room members
-    ConnectedMembers = lists:filter(fun(Member) ->
-        case ets:lookup(user_connections, Member) of
-            [{Member, _Pid}] -> true;
-            [] -> false
-        end
-    end, Members),
-    
-    % Send message to each connected member
-    lists:foreach(fun(Member) ->
-        if Member =/= FromUsername ->  % Don't send to sender
-            case ets:lookup(user_connections, Member) of
-                [{Member, Pid}] ->
-                    Notification = #{
-                        type => <<"room_message">>,
-                        room_id => RoomId,
-                        from => FromUsername,
-                        message => Message,  % TODO: Decrypt for this specific user
-                        message_id => MessageId,
-                        timestamp => erlang:system_time(second)
-                    },
-                    Pid ! {send_json, Notification};
+broadcast_room_message(
+    RoomId, FromUsername, _PlaintextMessage, MessageId, Members
+) ->
+    % Retrieve the stored room message with encrypted recipients
+    % Since room_messages ETS table is keyed by room_id, get all messages for this room
+    case ets:lookup(room_messages, RoomId) of
+        Messages when Messages =/= [] ->
+            % Find the specific message by ID using the accessor function
+            case
+                lists:filter(
+                    fun(M) -> room_message_id(M) =:= MessageId end, Messages
+                )
+            of
+                [RoomMessage] ->
+                    % Get the encrypted recipients data
+                    Recipients = room_message_recipients(RoomMessage),
+
+                    % Get all connected users who are room members
+                    ConnectedMembers = lists:filter(
+                        fun(Member) ->
+                            case ets:lookup(user_connections, Member) of
+                                [{Member, _Pid}] -> true;
+                                [] -> false
+                            end
+                        end,
+                        Members
+                    ),
+
+                    % Send individually encrypted message to each connected member
+                    lists:foreach(
+                        fun(Member) ->
+                            % Don't send to sender
+                            if
+                                Member =/= FromUsername ->
+                                    case
+                                        find_encrypted_message_for_user(
+                                            Recipients, Member
+                                        )
+                                    of
+                                        {ok, EphemeralKey, EncryptedData} ->
+                                            case
+                                                ets:lookup(
+                                                    user_connections, Member
+                                                )
+                                            of
+                                                [{Member, Pid}] ->
+                                                    Notification = #{
+                                                        type =>
+                                                            <<"room_message">>,
+                                                        room_id => RoomId,
+                                                        from => FromUsername,
+                                                        message_id => MessageId,
+                                                        timestamp => room_message_timestamp(
+                                                            RoomMessage
+                                                        ),
+                                                        ephemeral => base64:encode(
+                                                            EphemeralKey
+                                                        ),
+                                                        encrypted_data => base64:encode(
+                                                            EncryptedData
+                                                        )
+                                                    },
+                                                    Pid !
+                                                        {send_json,
+                                                            Notification};
+                                                [] ->
+                                                    ok
+                                            end;
+                                        {error, not_found} ->
+                                            ?warning(
+                                                "No encrypted message found for user ~s in room message ~s",
+                                                [Member, MessageId]
+                                            )
+                                    end;
+                                true ->
+                                    ok
+                            end
+                        end,
+                        ConnectedMembers
+                    );
                 [] ->
-                    ok
+                    ?error("Could not find room message ~s in room ~s", [
+                        MessageId, RoomId
+                    ]);
+                _ ->
+                    ?error(
+                        "Multiple messages found with ID ~s in room ~s", [
+                            MessageId, RoomId
+                        ]
+                    )
             end;
-        true ->
-            ok
-        end
-    end, ConnectedMembers).
+        [] ->
+            ?error("No messages found for room ~s", [RoomId])
+    end.
+
+%% Find encrypted message data for a specific user from recipients list
+find_encrypted_message_for_user(Recipients, Username) ->
+    case lists:keyfind(Username, 1, Recipients) of
+        {Username, EphemeralKey, EncryptedData} ->
+            {ok, EphemeralKey, EncryptedData};
+        false ->
+            {error, not_found}
+    end.
 
 %% Format error messages for client consumption
-format_error_message(room_not_found) -> <<"Room not found">>;
-format_error_message(already_member) -> <<"Already a member of this room">>;
-format_error_message(not_member) -> <<"Not a member of this room">>;
-format_error_message(not_owner) -> <<"Only room owner can perform this action">>;
-format_error_message(Reason) -> 
+format_error_message(room_not_found) ->
+    <<"Room not found">>;
+format_error_message(already_member) ->
+    <<"Already a member of this room">>;
+format_error_message(not_member) ->
+    <<"Not a member of this room">>;
+format_error_message(not_owner) ->
+    <<"Only room owner can perform this action">>;
+format_error_message(Reason) ->
     iolist_to_binary(io_lib:format("Error: ~p", [Reason])).
-
 
 room_type_binary(Room) ->
     case room_type(Room) of
         public -> <<"public">>;
         private -> <<"private">>
     end.
-
-

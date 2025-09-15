@@ -194,181 +194,181 @@ test_derive_aead_key_modes() ->
     ?assertNotEqual(Key6, Key7), % Should be different due to random salt
     ?assertNotEqual(Salt1, Salt2).
 
-%% Test HTTP API endpoints
-http_api_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
-         ?_test(test_prekey_upload_and_retrieval()),
-         ?_test(test_message_send_and_receive()),
-         ?_test(test_nonexistent_user()),
-         ?_test(test_invalid_json())
-     ]}.
+%% Test HTTP API endpoints (DISABLED - HTTP handlers removed in favor of WebSocket)
+%% http_api_test_() ->
+%%     {setup,
+%%      fun setup/0,
+%%      fun cleanup/1,
+%%      [
+%%          ?_test(test_prekey_upload_and_retrieval()),
+%%          ?_test(test_message_send_and_receive()),
+%%          ?_test(test_nonexistent_user()),
+%%          ?_test(test_invalid_json())
+%%      ]}.
 
-test_prekey_upload_and_retrieval() ->
-    {PubKey, _PrivKey} = cryptic_lib:gen_keypair(),
-    PubKeyB64 = base64:encode(PubKey),
+%% test_prekey_upload_and_retrieval() ->
+%%     {PubKey, _PrivKey} = cryptic_lib:gen_keypair(),
+%%     PubKeyB64 = base64:encode(PubKey),
+%% 
+%%     %% Upload prekey
+%%     PostData = io_lib:format("{\"prekey\":\"~s\"}", [PubKeyB64]),
+%%     {ok, {_, _, _}} = httpc:request(
+%%         post,
+%%         {"http://localhost:8081/upload_prekey/testuser", [], "application/json", PostData},
+%%         [],
+%%         []
+%%     ),
+%% 
+%%     %% Retrieve prekey
+%%     {ok, {_, _, RespData}} = httpc:request(
+%%         get, {"http://localhost:8081/get_prekey/testuser", []}, [], []
+%%     ),
+%% 
+%%     %% Parse and verify response
+%%     {match, [ReturnedPubKeyB64]} = re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
+%%         {capture, [1], list}
+%%     ]),
+%% 
+%%     ?assertEqual(binary_to_list(PubKeyB64), ReturnedPubKeyB64).
 
-    %% Upload prekey
-    PostData = io_lib:format("{\"prekey\":\"~s\"}", [PubKeyB64]),
-    {ok, {_, _, _}} = httpc:request(
-        post,
-        {"http://localhost:8081/upload_prekey/testuser", [], "application/json", PostData},
-        [],
-        []
-    ),
+%% test_message_send_and_receive() ->
+%%     %% Send a message
+%%     EphPub = base64:encode(cryptic_lib:rand_bytes(32)),
+%%     Nonce = base64:encode(cryptic_lib:rand_bytes(12)),
+%%     Cipher = base64:encode(cryptic_lib:rand_bytes(26)),
+%% 
+%%     BlobData = io_lib:format(
+%%         "{\"from\":\"alice\",\"to\":\"bob\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}",
+%%         [EphPub, Nonce, Cipher]
+%%     ),
+%% 
+%%     {ok, {_, _, _}} = httpc:request(
+%%         post,
+%%         {"http://localhost:8081/send_blob", [], "application/json", BlobData},
+%%         [],
+%%         []
+%%     ),
+%% 
+%%     %% Receive messages
+%%     {ok, {_, _, RespStr}} = httpc:request(
+%%         get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
+%%     ),
+%% 
+%%     %% Verify message was received
+%%     ?assert(string:find(RespStr, EphPub) =/= nomatch),
+%%     ?assert(string:find(RespStr, Nonce) =/= nomatch),
+%%     ?assert(string:find(RespStr, Cipher) =/= nomatch).
 
-    %% Retrieve prekey
-    {ok, {_, _, RespData}} = httpc:request(
-        get, {"http://localhost:8081/get_prekey/testuser", []}, [], []
-    ),
+%% test_nonexistent_user() ->
+%%     {ok, {_, _, _}} = httpc:request(
+%%         get, {"http://localhost:8081/get_prekey/nonexistent", []}, [], []
+%%     ),
+%%     %% Should return 404 but we don't check status codes in this simple test
+%%     ok.
+%% 
+%% test_invalid_json() ->
+%%     %% Send invalid JSON
+%%     {ok, {_, _, _}} = httpc:request(
+%%         post,
+%%         {"http://localhost:8081/upload_prekey/testuser", [], "application/json", "invalid json"},
+%%         [],
+%%         []
+%%     ),
+%%     %% Should return 400 but we don't check status codes in this simple test
+%%     ok.
 
-    %% Parse and verify response
-    {match, [ReturnedPubKeyB64]} = re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
-        {capture, [1], list}
-    ]),
+%% Test complete E2E flow (DISABLED - HTTP handlers removed in favor of WebSocket)
+%% e2e_flow_test_() ->
+%%     {setup,
+%%      fun setup/0,
+%%      fun cleanup/1,
+%%      ?_test(test_complete_e2e_flow())}.
 
-    ?assertEqual(binary_to_list(PubKeyB64), ReturnedPubKeyB64).
-
-test_message_send_and_receive() ->
-    %% Send a message
-    EphPub = base64:encode(cryptic_lib:rand_bytes(32)),
-    Nonce = base64:encode(cryptic_lib:rand_bytes(12)),
-    Cipher = base64:encode(cryptic_lib:rand_bytes(26)),
-
-    BlobData = io_lib:format(
-        "{\"from\":\"alice\",\"to\":\"bob\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}",
-        [EphPub, Nonce, Cipher]
-    ),
-
-    {ok, {_, _, _}} = httpc:request(
-        post,
-        {"http://localhost:8081/send_blob", [], "application/json", BlobData},
-        [],
-        []
-    ),
-
-    %% Receive messages
-    {ok, {_, _, RespStr}} = httpc:request(
-        get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
-    ),
-
-    %% Verify message was received
-    ?assert(string:find(RespStr, EphPub) =/= nomatch),
-    ?assert(string:find(RespStr, Nonce) =/= nomatch),
-    ?assert(string:find(RespStr, Cipher) =/= nomatch).
-
-test_nonexistent_user() ->
-    {ok, {_, _, _}} = httpc:request(
-        get, {"http://localhost:8081/get_prekey/nonexistent", []}, [], []
-    ),
-    %% Should return 404 but we don't check status codes in this simple test
-    ok.
-
-test_invalid_json() ->
-    %% Send invalid JSON
-    {ok, {_, _, _}} = httpc:request(
-        post,
-        {"http://localhost:8081/upload_prekey/testuser", [], "application/json", "invalid json"},
-        [],
-        []
-    ),
-    %% Should return 400 but we don't check status codes in this simple test
-    ok.
-
-%% Test complete E2E flow
-e2e_flow_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     ?_test(test_complete_e2e_flow())}.
-
-test_complete_e2e_flow() ->
-    %% Generate Alice and Bob keypairs
-    {_AlicePub, _AlicePriv} = cryptic_lib:gen_keypair(),
-    {BobPub, BobPriv} = cryptic_lib:gen_keypair(),
-
-    %% Bob uploads his prekey
-    BobPubB64 = base64:encode(BobPub),
-    PostData = io_lib:format("{\"prekey\":\"~s\"}", [BobPubB64]),
-    {ok, {_, _, _}} = httpc:request(
-        post,
-        {"http://localhost:8081/upload_prekey/bob", [], "application/json", PostData},
-        [],
-        []
-    ),
-
-    %% Alice gets Bob's prekey
-    {ok, {_, _, RespData}} = httpc:request(
-        get, {"http://localhost:8081/get_prekey/bob", []}, [], []
-    ),
-    {match, [BobPubB64Resp]} = re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
-        {capture, [1], list}
-    ]),
-    BobPubRecv = base64:decode(BobPubB64Resp),
-    ?assertEqual(BobPub, BobPubRecv),
-
-    %% Alice generates ephemeral keypair and encrypts message
-    {EphPub, EphPriv} = cryptic_lib:gen_keypair(),
-    SharedSecret = cryptic_lib:scalarmult(EphPriv, BobPubRecv),
-    AeadKey = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphPub),
-
-    Message = <<"Hello Bob from test!">>,
-    {Cipher, Nonce} = cryptic_lib:aead_encrypt(Message, AeadKey, <<>>),
-
-    %% Alice sends encrypted blob
-    EphPubB64 = base64:encode(EphPub),
-    NonceB64 = base64:encode(Nonce),
-    CipherB64 = base64:encode(Cipher),
-    BlobData = io_lib:format(
-        "{\"from\":\"alice\",\"to\":\"bob\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}",
-        [EphPubB64, NonceB64, CipherB64]
-    ),
-    {ok, {_, _, _}} = httpc:request(
-        post,
-        {"http://localhost:8081/send_blob", [], "application/json", BlobData},
-        [],
-        []
-    ),
-
-    %% Bob receives and decrypts message
-    {ok, {_, _, RespStr}} = httpc:request(
-        get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
-    ),
-
-    %% Parse received message
-    {match, [EphPubB64Recv]} = re:run(RespStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [
-        {capture, [1], list}
-    ]),
-    {match, [NonceB64Recv]} = re:run(RespStr, "\"nonce\"\\s*:\\s*\"([^\"]+)\"", [
-        {capture, [1], list}
-    ]),
-    {match, [CipherB64Recv]} = re:run(RespStr, "\"cipher\"\\s*:\\s*\"([^\"]+)\"", [
-        {capture, [1], list}
-    ]),
-
-    EphPubRecv = base64:decode(EphPubB64Recv),
-    NonceRecv = base64:decode(NonceB64Recv),
-    CipherRecv = base64:decode(CipherB64Recv),
-
-    %% Bob computes shared secret and decrypts
-    SharedSecretBob = cryptic_lib:scalarmult(BobPriv, EphPubRecv),
-    AeadKeyBob = cryptic_lib:derive_aead_key_ephemeral(SharedSecretBob, EphPubRecv),
-
-    %% Verify Alice and Bob computed the same keys
-    ?assertEqual(SharedSecret, SharedSecretBob),
-    ?assertEqual(AeadKey, AeadKeyBob),
-
-    %% Decrypt and verify message
-    DecryptedMessage = cryptic_lib:aead_decrypt(CipherRecv, AeadKeyBob, NonceRecv, <<>>),
-    ?assertEqual(Message, DecryptedMessage),
-
-    %% Verify messages are consumed (second request should return empty)
-    {ok, {_, _, EmptyResp}} = httpc:request(
-        get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
-    ),
-    ?assertEqual("[]", EmptyResp).
+%% test_complete_e2e_flow() ->
+%%     %% Generate Alice and Bob keypairs
+%%     {_AlicePub, _AlicePriv} = cryptic_lib:gen_keypair(),
+%%     {BobPub, BobPriv} = cryptic_lib:gen_keypair(),
+%% 
+%%     %% Bob uploads his prekey
+%%     BobPubB64 = base64:encode(BobPub),
+%%     PostData = io_lib:format("{\"prekey\":\"~s\"}", [BobPubB64]),
+%%     {ok, {_, _, _}} = httpc:request(
+%%         post,
+%%         {"http://localhost:8081/upload_prekey/bob", [], "application/json", PostData},
+%%         [],
+%%         []
+%%     ),
+%% 
+%%     %% Alice gets Bob's prekey
+%%     {ok, {_, _, RespData}} = httpc:request(
+%%         get, {"http://localhost:8081/get_prekey/bob", []}, [], []
+%%     ),
+%%     {match, [BobPubB64Resp]} = re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
+%%         {capture, [1], list}
+%%     ]),
+%%     BobPubRecv = base64:decode(BobPubB64Resp),
+%%     ?assertEqual(BobPub, BobPubRecv),
+%% 
+%%     %% Alice generates ephemeral keypair and encrypts message
+%%     {EphPub, EphPriv} = cryptic_lib:gen_keypair(),
+%%     SharedSecret = cryptic_lib:scalarmult(EphPriv, BobPubRecv),
+%%     AeadKey = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphPub),
+%% 
+%%     Message = <<"Hello Bob from test!">>,
+%%     {Cipher, Nonce} = cryptic_lib:aead_encrypt(Message, AeadKey, <<>>),
+%% 
+%%     %% Alice sends encrypted blob
+%%     EphPubB64 = base64:encode(EphPub),
+%%     NonceB64 = base64:encode(Nonce),
+%%     CipherB64 = base64:encode(Cipher),
+%%     BlobData = io_lib:format(
+%%         "{\"from\":\"alice\",\"to\":\"bob\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}",
+%%         [EphPubB64, NonceB64, CipherB64]
+%%     ),
+%%     {ok, {_, _, _}} = httpc:request(
+%%         post,
+%%         {"http://localhost:8081/send_blob", [], "application/json", BlobData},
+%%         [],
+%%         []
+%%     ),
+%% 
+%%     %% Bob receives and decrypts message
+%%     {ok, {_, _, RespStr}} = httpc:request(
+%%         get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
+%%     ),
+%% 
+%%     %% Parse received message
+%%     {match, [EphPubB64Recv]} = re:run(RespStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [
+%%         {capture, [1], list}
+%%     ]),
+%%     {match, [NonceB64Recv]} = re:run(RespStr, "\"nonce\"\\s*:\\s*\"([^\"]+)\"", [
+%%         {capture, [1], list}
+%%     ]),
+%%     {match, [CipherB64Recv]} = re:run(RespStr, "\"cipher\"\\s*:\\s*\"([^\"]+)\"", [
+%%         {capture, [1], list}
+%%     ]),
+%% 
+%%     EphPubRecv = base64:decode(EphPubB64Recv),
+%%     NonceRecv = base64:decode(NonceB64Recv),
+%%     CipherRecv = base64:decode(CipherB64Recv),
+%% 
+%%     %% Bob computes shared secret and decrypts
+%%     SharedSecretBob = cryptic_lib:scalarmult(BobPriv, EphPubRecv),
+%%     AeadKeyBob = cryptic_lib:derive_aead_key_ephemeral(SharedSecretBob, EphPubRecv),
+%% 
+%%     %% Verify Alice and Bob computed the same keys
+%%     ?assertEqual(SharedSecret, SharedSecretBob),
+%%     ?assertEqual(AeadKey, AeadKeyBob),
+%% 
+%%     %% Decrypt and verify message
+%%     DecryptedMessage = cryptic_lib:aead_decrypt(CipherRecv, AeadKeyBob, NonceRecv, <<>>),
+%%     ?assertEqual(Message, DecryptedMessage),
+%% 
+%%     %% Verify messages are consumed (second request should return empty)
+%%     {ok, {_, _, EmptyResp}} = httpc:request(
+%%         get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
+%%     ),
+%%     ?assertEqual("[]", EmptyResp).
 
 %% Test multiple key derivation approaches produce different results
 key_derivation_uniqueness_test_() ->
