@@ -18,14 +18,15 @@ setup() ->
     application:ensure_all_started(crypto),
     application:ensure_all_started(ranch),
     application:ensure_all_started(cowboy),
-    
+
     %% Start event manager for server handlers
     {ok, _} = gen_event:start_link({local, cryptic_event_manager}),
     cryptic_event_manager:setup_event_handlers(),
-    
+
     %% Start test server
     ServerPid = start_test_server(),
-    timer:sleep(100), % Give server time to start
+    % Give server time to start
+    timer:sleep(100),
     {ok, ServerPid}.
 
 cleanup({ok, ServerPid}) ->
@@ -56,7 +57,8 @@ start_test_server() ->
     ]),
     {ok, Pid} = cowboy:start_clear(
         test_http_listener,
-        [{port, 8081}], % Use different port for testing
+        % Use different port for testing
+        [{port, 8081}],
         #{env => #{dispatch => Dispatch}}
     ),
     Pid.
@@ -73,15 +75,12 @@ stop_test_server(_Pid) ->
 
 %% Test basic NIF functions
 cryptic_nif_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
-         ?_test(test_keypair_generation()),
-         ?_test(test_scalar_multiplication()),
-         ?_test(test_aead_encryption()),
-         ?_test(test_random_bytes())
-     ]}.
+    {setup, fun setup/0, fun cleanup/1, [
+        ?_test(test_keypair_generation()),
+        ?_test(test_scalar_multiplication()),
+        ?_test(test_aead_encryption()),
+        ?_test(test_random_bytes())
+    ]}.
 
 test_keypair_generation() ->
     {PubKey, PrivKey} = cryptic_lib:gen_keypair(),
@@ -112,7 +111,8 @@ test_aead_encryption() ->
 
     {Ciphertext, Nonce} = cryptic_lib:aead_encrypt(Plaintext, Key, AAD),
     ?assertEqual(12, byte_size(Nonce)),
-    ?assert(byte_size(Ciphertext) > byte_size(Plaintext)), % Should include auth tag
+    % Should include auth tag
+    ?assert(byte_size(Ciphertext) > byte_size(Plaintext)),
 
     %% Test decryption
     DecryptedText = cryptic_lib:aead_decrypt(Ciphertext, Key, Nonce, AAD),
@@ -128,14 +128,11 @@ test_random_bytes() ->
 
 %% Test HKDF key derivation functions
 hkdf_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     [
-         ?_test(test_hkdf_basic()),
-         ?_test(test_hkdf_with_salt()),
-         ?_test(test_derive_aead_key_modes())
-     ]}.
+    {setup, fun setup/0, fun cleanup/1, [
+        ?_test(test_hkdf_basic()),
+        ?_test(test_hkdf_with_salt()),
+        ?_test(test_derive_aead_key_modes())
+    ]}.
 
 test_hkdf_basic() ->
     IKM = cryptic_lib:rand_bytes(32),
@@ -145,7 +142,8 @@ test_hkdf_basic() ->
     Key2 = cryptic_lib:hkdf_sha256(IKM, Info, 32),
 
     ?assertEqual(32, byte_size(Key1)),
-    ?assertEqual(Key1, Key2), % Should be deterministic
+    % Should be deterministic
+    ?assertEqual(Key1, Key2),
 
     %% Different info should produce different keys
     Key3 = cryptic_lib:hkdf_sha256(IKM, <<"different-info">>, 32),
@@ -159,7 +157,8 @@ test_hkdf_with_salt() ->
     Key1 = cryptic_lib:hkdf_sha256(IKM, Salt, Info, 32),
     Key2 = cryptic_lib:hkdf_sha256(IKM, Salt, Info, 32),
 
-    ?assertEqual(Key1, Key2), % Should be deterministic
+    % Should be deterministic
+    ?assertEqual(Key1, Key2),
 
     %% Different salt should produce different keys
     DifferentSalt = cryptic_lib:rand_bytes(16),
@@ -173,25 +172,30 @@ test_derive_aead_key_modes() ->
     %% Test simple derivation
     Key1 = cryptic_lib:derive_aead_key_simple(SharedSecret),
     Key2 = cryptic_lib:derive_aead_key_simple(SharedSecret),
-    ?assertEqual(Key1, Key2), % Should be deterministic
+    % Should be deterministic
+    ?assertEqual(Key1, Key2),
 
     %% Test ephemeral-based derivation
     Key3 = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphemeralPubKey),
     Key4 = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphemeralPubKey),
-    ?assertEqual(Key3, Key4), % Should be deterministic
+    % Should be deterministic
+    ?assertEqual(Key3, Key4),
 
     %% Simple and ephemeral should produce different keys
     ?assertNotEqual(Key1, Key3),
 
     %% Different ephemeral keys should produce different AEAD keys
     DifferentEphemeral = cryptic_lib:rand_bytes(32),
-    Key5 = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, DifferentEphemeral),
+    Key5 = cryptic_lib:derive_aead_key_ephemeral(
+        SharedSecret, DifferentEphemeral
+    ),
     ?assertNotEqual(Key3, Key5),
 
     %% Test random salt derivation
     {Key6, Salt1} = cryptic_lib:derive_aead_key_random(SharedSecret),
     {Key7, Salt2} = cryptic_lib:derive_aead_key_random(SharedSecret),
-    ?assertNotEqual(Key6, Key7), % Should be different due to random salt
+    % Should be different due to random salt
+    ?assertNotEqual(Key6, Key7),
     ?assertNotEqual(Salt1, Salt2).
 
 %% Test HTTP API endpoints (DISABLED - HTTP handlers removed in favor of WebSocket)
@@ -209,7 +213,7 @@ test_derive_aead_key_modes() ->
 %% test_prekey_upload_and_retrieval() ->
 %%     {PubKey, _PrivKey} = cryptic_lib:gen_keypair(),
 %%     PubKeyB64 = base64:encode(PubKey),
-%% 
+%%
 %%     %% Upload prekey
 %%     PostData = io_lib:format("{\"prekey\":\"~s\"}", [PubKeyB64]),
 %%     {ok, {_, _, _}} = httpc:request(
@@ -218,17 +222,17 @@ test_derive_aead_key_modes() ->
 %%         [],
 %%         []
 %%     ),
-%% 
+%%
 %%     %% Retrieve prekey
 %%     {ok, {_, _, RespData}} = httpc:request(
 %%         get, {"http://localhost:8081/get_prekey/testuser", []}, [], []
 %%     ),
-%% 
+%%
 %%     %% Parse and verify response
 %%     {match, [ReturnedPubKeyB64]} = re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
 %%         {capture, [1], list}
 %%     ]),
-%% 
+%%
 %%     ?assertEqual(binary_to_list(PubKeyB64), ReturnedPubKeyB64).
 
 %% test_message_send_and_receive() ->
@@ -236,24 +240,24 @@ test_derive_aead_key_modes() ->
 %%     EphPub = base64:encode(cryptic_lib:rand_bytes(32)),
 %%     Nonce = base64:encode(cryptic_lib:rand_bytes(12)),
 %%     Cipher = base64:encode(cryptic_lib:rand_bytes(26)),
-%% 
+%%
 %%     BlobData = io_lib:format(
 %%         "{\"from\":\"alice\",\"to\":\"bob\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}",
 %%         [EphPub, Nonce, Cipher]
 %%     ),
-%% 
+%%
 %%     {ok, {_, _, _}} = httpc:request(
 %%         post,
 %%         {"http://localhost:8081/send_blob", [], "application/json", BlobData},
 %%         [],
 %%         []
 %%     ),
-%% 
+%%
 %%     %% Receive messages
 %%     {ok, {_, _, RespStr}} = httpc:request(
 %%         get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
 %%     ),
-%% 
+%%
 %%     %% Verify message was received
 %%     ?assert(string:find(RespStr, EphPub) =/= nomatch),
 %%     ?assert(string:find(RespStr, Nonce) =/= nomatch),
@@ -265,7 +269,7 @@ test_derive_aead_key_modes() ->
 %%     ),
 %%     %% Should return 404 but we don't check status codes in this simple test
 %%     ok.
-%% 
+%%
 %% test_invalid_json() ->
 %%     %% Send invalid JSON
 %%     {ok, {_, _, _}} = httpc:request(
@@ -288,7 +292,7 @@ test_derive_aead_key_modes() ->
 %%     %% Generate Alice and Bob keypairs
 %%     {_AlicePub, _AlicePriv} = cryptic_lib:gen_keypair(),
 %%     {BobPub, BobPriv} = cryptic_lib:gen_keypair(),
-%% 
+%%
 %%     %% Bob uploads his prekey
 %%     BobPubB64 = base64:encode(BobPub),
 %%     PostData = io_lib:format("{\"prekey\":\"~s\"}", [BobPubB64]),
@@ -298,7 +302,7 @@ test_derive_aead_key_modes() ->
 %%         [],
 %%         []
 %%     ),
-%% 
+%%
 %%     %% Alice gets Bob's prekey
 %%     {ok, {_, _, RespData}} = httpc:request(
 %%         get, {"http://localhost:8081/get_prekey/bob", []}, [], []
@@ -308,15 +312,15 @@ test_derive_aead_key_modes() ->
 %%     ]),
 %%     BobPubRecv = base64:decode(BobPubB64Resp),
 %%     ?assertEqual(BobPub, BobPubRecv),
-%% 
+%%
 %%     %% Alice generates ephemeral keypair and encrypts message
 %%     {EphPub, EphPriv} = cryptic_lib:gen_keypair(),
 %%     SharedSecret = cryptic_lib:scalarmult(EphPriv, BobPubRecv),
 %%     AeadKey = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphPub),
-%% 
+%%
 %%     Message = <<"Hello Bob from test!">>,
 %%     {Cipher, Nonce} = cryptic_lib:aead_encrypt(Message, AeadKey, <<>>),
-%% 
+%%
 %%     %% Alice sends encrypted blob
 %%     EphPubB64 = base64:encode(EphPub),
 %%     NonceB64 = base64:encode(Nonce),
@@ -331,12 +335,12 @@ test_derive_aead_key_modes() ->
 %%         [],
 %%         []
 %%     ),
-%% 
+%%
 %%     %% Bob receives and decrypts message
 %%     {ok, {_, _, RespStr}} = httpc:request(
 %%         get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
 %%     ),
-%% 
+%%
 %%     %% Parse received message
 %%     {match, [EphPubB64Recv]} = re:run(RespStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [
 %%         {capture, [1], list}
@@ -347,23 +351,23 @@ test_derive_aead_key_modes() ->
 %%     {match, [CipherB64Recv]} = re:run(RespStr, "\"cipher\"\\s*:\\s*\"([^\"]+)\"", [
 %%         {capture, [1], list}
 %%     ]),
-%% 
+%%
 %%     EphPubRecv = base64:decode(EphPubB64Recv),
 %%     NonceRecv = base64:decode(NonceB64Recv),
 %%     CipherRecv = base64:decode(CipherB64Recv),
-%% 
+%%
 %%     %% Bob computes shared secret and decrypts
 %%     SharedSecretBob = cryptic_lib:scalarmult(BobPriv, EphPubRecv),
 %%     AeadKeyBob = cryptic_lib:derive_aead_key_ephemeral(SharedSecretBob, EphPubRecv),
-%% 
+%%
 %%     %% Verify Alice and Bob computed the same keys
 %%     ?assertEqual(SharedSecret, SharedSecretBob),
 %%     ?assertEqual(AeadKey, AeadKeyBob),
-%% 
+%%
 %%     %% Decrypt and verify message
 %%     DecryptedMessage = cryptic_lib:aead_decrypt(CipherRecv, AeadKeyBob, NonceRecv, <<>>),
 %%     ?assertEqual(Message, DecryptedMessage),
-%% 
+%%
 %%     %% Verify messages are consumed (second request should return empty)
 %%     {ok, {_, _, EmptyResp}} = httpc:request(
 %%         get, {"http://localhost:8081/recv_blobs/bob", []}, [], []
@@ -372,10 +376,8 @@ test_derive_aead_key_modes() ->
 
 %% Test multiple key derivation approaches produce different results
 key_derivation_uniqueness_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     ?_test(test_key_derivation_uniqueness())}.
+    {setup, fun setup/0, fun cleanup/1,
+        ?_test(test_key_derivation_uniqueness())}.
 
 test_key_derivation_uniqueness() ->
     SharedSecret = cryptic_lib:rand_bytes(32),
@@ -389,7 +391,9 @@ test_key_derivation_uniqueness() ->
 
     %% Ephemeral-based should be consistent for same ephemeral key
     KeyEph1 = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphPub1),
-    KeyEph1_repeat = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphPub1),
+    KeyEph1_repeat = cryptic_lib:derive_aead_key_ephemeral(
+        SharedSecret, EphPub1
+    ),
     ?assertEqual(KeyEph1, KeyEph1_repeat),
 
     %% Different ephemeral keys should produce different AEAD keys

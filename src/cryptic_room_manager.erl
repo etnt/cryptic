@@ -379,7 +379,7 @@ encrypt_for_room_members(PlaintextMessage, Members, FromUsername) ->
         fun(Username) ->
             case
                 encrypt_message_for_user(
-                    PlaintextMessage, binary_to_list(Username)
+                    PlaintextMessage, Username
                 )
             of
                 {ok, Nonce, Ciphertext} ->

@@ -53,7 +53,9 @@
 -include("cryptic.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
--export([init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
+-export([
+    init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3
+]).
 
 %% @doc HTTP to WebSocket upgrade handler
 %%
@@ -74,7 +76,11 @@ init(Req, State) ->
             {cowboy_websocket, Req, #{username => Username}};
         {error, Reason} ->
             ?error("Client certificate authentication failed: ~p", [Reason]),
-            {ok, cowboy_req:reply(401, #{}, <<"Client certificate required">>, Req), State}
+            {ok,
+                cowboy_req:reply(
+                    401, #{}, <<"Client certificate required">>, Req
+                ),
+                State}
     end.
 
 %% @doc WebSocket connection initialization
@@ -88,7 +94,7 @@ init(Req, State) ->
 websocket_init(State = #{username := Username}) ->
     %% Register this connection for the user
     register_user_connection(Username, self()),
-    
+
     %% Send welcome message
     WelcomeMsg = #{
         type => <<"welcome">>,
@@ -111,7 +117,8 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
         Command = jsx:decode(Msg, [return_maps]),
         case handle_command(Command, Username, State) of
             {reply, Response} ->
-                {[{text, jsx:encode(Response)}], State};
+                ResponseJson = jsx:encode(Response),
+                {[{text, ResponseJson}], State};
             {reply, Response, NewState} ->
                 {[{text, jsx:encode(Response)}], NewState};
             {noreply, NewState} ->
@@ -124,28 +131,24 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                 {[{text, jsx:encode(ErrorResp)}], State}
         end
     catch
-        _:_Error ->
+        _Error:_Reason ->
             ErrorResponse = #{
                 type => <<"error">>,
                 message => <<"Invalid JSON format">>
             },
             {[{text, jsx:encode(ErrorResponse)}], State}
     end;
-
 websocket_handle({binary, _Data}, State) ->
     %% Handle binary data if needed
     {[], State};
-
 %% Handle WebSocket ping frames
 websocket_handle(ping, State) ->
     %% Respond with pong
     {[pong], State};
-
 %% Handle WebSocket pong frames
 websocket_handle(pong, State) ->
     %% Just acknowledge, no response needed
     {[], State};
-
 websocket_handle(_Data, State) ->
     {[], State}.
 
@@ -167,7 +170,6 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
         message => Message
     },
     {[{text, jsx:encode(Response)}], State};
-
 websocket_info(_Info, State) ->
     {[], State}.
 
@@ -184,12 +186,18 @@ websocket_info(_Info, State) ->
 %%          {reply, Response, NewState} for response with state change,
 %%          {noreply, NewState} for state change without response,
 %%          {error, ErrorMsg} for error responses
-handle_command(#{<<"type">> := <<"upload_prekey">>, <<"prekey">> := PrekeyB64}, Username, _State) ->
+handle_command(
+    #{<<"type">> := <<"upload_prekey">>, <<"prekey">> := PrekeyB64},
+    Username,
+    _State
+) ->
     try
         Prekey = base64:decode(PrekeyB64),
         case cryptic_lib:store_prekey(Username, Prekey) of
             ok ->
-                {reply, #{type => <<"success">>, message => <<"Prekey uploaded">>}};
+                {reply, #{
+                    type => <<"success">>, message => <<"Prekey uploaded">>
+                }};
             {error, Reason} ->
                 {error, io_lib:format("Failed to store prekey: ~p", [Reason])}
         end
@@ -197,8 +205,9 @@ handle_command(#{<<"type">> := <<"upload_prekey">>, <<"prekey">> := PrekeyB64}, 
         _:_ ->
             {error, "Invalid prekey format"}
     end;
-
-handle_command(#{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State) ->
+handle_command(
+    #{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State
+) ->
     User = binary_to_list(UserB),
     %% First check if the user is currently connected
     case find_user_connection(User) of
@@ -225,12 +234,19 @@ handle_command(#{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username
             },
             {reply, Response}
     end;
-
-handle_command(#{<<"type">> := <<"send_message">>, <<"to">> := ToUserB, 
-                 <<"ephemeral">> := EphB64, <<"nonce">> := NonceB64, 
-                 <<"cipher">> := CipherB64}, Username, _State) ->
+handle_command(
+    #{
+        <<"type">> := <<"send_message">>,
+        <<"to">> := ToUserB,
+        <<"ephemeral">> := EphB64,
+        <<"nonce">> := NonceB64,
+        <<"cipher">> := CipherB64
+    },
+    Username,
+    _State
+) ->
     ToUser = binary_to_list(ToUserB),
-    
+
     %% Create message blob
     MessageBlob = #{
         from => Username,
@@ -240,20 +256,20 @@ handle_command(#{<<"type">> := <<"send_message">>, <<"to">> := ToUserB,
         cipher => CipherB64,
         timestamp => erlang:system_time(second)
     },
-    
+
     %% Store message
     cryptic_lib:store_message(ToUser, MessageBlob),
-    
+
     %% Try to deliver immediately if user is online
     case find_user_connection(ToUser) of
         {ok, Pid} ->
             Pid ! {message, Username, MessageBlob};
         not_found ->
-            ok  % Message stored for later retrieval
+            % Message stored for later retrieval
+            ok
     end,
-    
-    {reply, #{type => <<"success">>, message => <<"Message sent">>}};
 
+    {reply, #{type => <<"success">>, message => <<"Message sent">>}};
 handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
     Messages = cryptic_lib:get_messages(Username),
     Response = #{
@@ -261,7 +277,6 @@ handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
         messages => Messages
     },
     {reply, Response};
-
 handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
     Users = cryptic_lib:list_users(),
     Response = #{
@@ -269,36 +284,59 @@ handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
         users => [list_to_binary(U) || U <- Users]
     },
     {reply, Response};
-
 %% Room management commands
 handle_command(#{<<"type">> := <<"create_room">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(create_room, Command, Username),
+    Response = cryptic_room_handlers:handle_room_command(
+        create_room, Command, Username
+    ),
     {reply, Response};
-
 handle_command(#{<<"type">> := <<"join_room">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(join_room, Command, Username),
+    Response = cryptic_room_handlers:handle_room_command(
+        join_room, Command, Username
+    ),
     {reply, Response};
-
 handle_command(#{<<"type">> := <<"leave_room">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(leave_room, Command, Username),
+    Response = cryptic_room_handlers:handle_room_command(
+        leave_room, Command, Username
+    ),
     {reply, Response};
-
 handle_command(#{<<"type">> := <<"list_rooms">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(list_rooms, Command, Username),
+    Response = cryptic_room_handlers:handle_room_command(
+        list_rooms, Command, Username
+    ),
     {reply, Response};
-
-handle_command(#{<<"type">> := <<"send_room_message">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(send_room_message, Command, Username),
+handle_command(
+    #{<<"type">> := <<"send_room_message">>} = Command, Username, _State
+) ->
+    io:format("DEBUG WS HANDLER: Calling room handler for send_room_message~n"),
+    try
+        Response = cryptic_room_handlers:handle_room_command(
+            send_room_message, Command, Username
+        ),
+        io:format("DEBUG WS HANDLER: Room handler returned: ~p~n", [Response]),
+        {reply, Response}
+    catch
+        Error:Reason:Stack ->
+            io:format("DEBUG WS HANDLER: Room handler error: ~p:~p~n", [
+                Error, Reason
+            ]),
+            io:format("DEBUG WS HANDLER: Stack trace: ~p~n", [Stack]),
+            {error, "Room message failed"}
+    end;
+handle_command(
+    #{<<"type">> := <<"get_room_messages">>} = Command, Username, _State
+) ->
+    Response = cryptic_room_handlers:handle_room_command(
+        get_room_messages, Command, Username
+    ),
     {reply, Response};
-
-handle_command(#{<<"type">> := <<"get_room_messages">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(get_room_messages, Command, Username),
+handle_command(
+    #{<<"type">> := <<"get_room_members">>} = Command, Username, _State
+) ->
+    Response = cryptic_room_handlers:handle_room_command(
+        get_room_members, Command, Username
+    ),
     {reply, Response};
-
-handle_command(#{<<"type">> := <<"get_room_members">>} = Command, Username, _State) ->
-    Response = cryptic_room_handlers:handle_room_command(get_room_members, Command, Username),
-    {reply, Response};
-
 handle_command(Command, Username, _State) ->
     io:format("Unknown command from ~s: ~p~n", [Username, Command]),
     {error, "Unknown command"}.
@@ -382,8 +420,13 @@ extract_cn_from_sequence([RDN | Rest]) ->
 
 extract_cn_from_rdn([]) ->
     error;
-extract_cn_from_rdn([#'AttributeTypeAndValue'{type = ?'id-at-commonName', 
-                                             value = Value} | _]) ->
+extract_cn_from_rdn([
+    #'AttributeTypeAndValue'{
+        type = ?'id-at-commonName',
+        value = Value
+    }
+    | _
+]) ->
     case Value of
         {utf8String, CN} -> {ok, binary_to_list(CN)};
         {printableString, CN} -> {ok, CN};

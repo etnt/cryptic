@@ -185,12 +185,14 @@ handle_room_command(send_room_message, Params, Username) ->
                 RoomId, Username, Message, MessageId, Members
             ),
 
-            #{
+            Response = #{
                 type => <<"room_message_sent">>,
                 success => true,
                 room_id => RoomId,
                 message_id => MessageId
-            };
+            },
+            io:format("DEBUG ROOM HANDLER: Sending response: ~p~n", [Response]),
+            Response;
         {error, Reason} ->
             ?warning("User ~s failed to send message to room ~s: ~p", [
                 Username, RoomId, Reason
