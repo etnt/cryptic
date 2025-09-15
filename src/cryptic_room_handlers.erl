@@ -29,6 +29,20 @@
     handle_room_command/3
 ]).
 
+-import(cryptic_room_manager,
+    [ room_id/1
+    , room_name/1
+    , room_description/1
+    , room_type/1
+    , room_owner/1
+    , room_created_at/1
+    , room_members/1
+    , room_message_id/1
+    , room_message_from/1
+    , room_message_timestamp/1
+    , room_message_recipients/1
+    ]).
+
 -include_lib("kernel/include/logger.hrl").
 
 %%% @doc Handle room-related WebSocket commands
@@ -307,15 +321,6 @@ format_error_message(not_owner) -> <<"Only room owner can perform this action">>
 format_error_message(Reason) -> 
     iolist_to_binary(io_lib:format("Error: ~p", [Reason])).
 
-%%% Record accessor functions (to handle record access safely)
-
-room_id({room, Id, _, _, _, _, _, _, _}) -> Id.
-room_name({room, _, Name, _, _, _, _, _, _}) -> Name.
-room_description({room, _, _, Description, _, _, _, _, _}) -> Description.
-room_type({room, _, _, _, Type, _, _, _, _}) -> Type.
-room_owner({room, _, _, _, _, Owner, _, _, _}) -> Owner.
-room_created_at({room, _, _, _, _, _, CreatedAt, _, _}) -> CreatedAt.
-room_members({room, _, _, _, _, _, _, Members, _}) -> Members.
 
 room_type_binary(Room) ->
     case room_type(Room) of
@@ -323,7 +328,4 @@ room_type_binary(Room) ->
         private -> <<"private">>
     end.
 
-room_message_id({room_message, Id, _, _, _, _}) -> Id.
-room_message_from({room_message, _, _, From, _, _}) -> From.
-room_message_timestamp({room_message, _, _, _, Timestamp, _}) -> Timestamp.
-room_message_recipients({room_message, _, _, _, _, Recipients}) -> Recipients.
+
