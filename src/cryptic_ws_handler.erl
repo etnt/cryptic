@@ -114,7 +114,9 @@ websocket_init(State = #{username := Username}) ->
 %% @returns {Replies, State} or {Replies, NewState} with optional response frames
 websocket_handle({text, Msg}, State = #{username := Username}) ->
     try
+        ?dbg("Received message from ~s: ~s", [Username, Msg]),
         Command = jsx:decode(Msg, [return_maps]),
+        ?dbg("Decoded command: ~p", [Command]),
         case handle_command(Command, Username, State) of
             {reply, Response} ->
                 ResponseJson = jsx:encode(Response),
@@ -170,6 +172,12 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
         message => Message
     },
     {[{text, jsx:encode(Response)}], State};
+websocket_info({room_notification, Notification}, State) ->
+    %% Incoming room message notification
+    ?dbg("DEBUG WS: Received room_notification: ~p", [Notification]),
+    JsonResponse = jsx:encode(Notification),
+    ?dbg("DEBUG WS: Sending JSON: ~p", [JsonResponse]),
+    {[{text, JsonResponse}], State};
 websocket_info(_Info, State) ->
     {[], State}.
 
@@ -308,19 +316,17 @@ handle_command(#{<<"type">> := <<"list_rooms">>} = Command, Username, _State) ->
 handle_command(
     #{<<"type">> := <<"send_room_message">>} = Command, Username, _State
 ) ->
-    io:format("DEBUG WS HANDLER: Calling room handler for send_room_message~n"),
     try
         Response = cryptic_room_handlers:handle_room_command(
             send_room_message, Command, Username
         ),
-        io:format("DEBUG WS HANDLER: Room handler returned: ~p~n", [Response]),
         {reply, Response}
     catch
         Error:Reason:Stack ->
-            io:format("DEBUG WS HANDLER: Room handler error: ~p:~p~n", [
+            ?error("DEBUG WS HANDLER: Room handler error: ~p:~p~n", [
                 Error, Reason
             ]),
-            io:format("DEBUG WS HANDLER: Stack trace: ~p~n", [Stack]),
+            ?error("DEBUG WS HANDLER: Stack trace: ~p~n", [Stack]),
             {error, "Room message failed"}
     end;
 handle_command(

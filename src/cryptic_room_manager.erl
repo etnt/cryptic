@@ -65,9 +65,7 @@
 
 %% Room record definition
 -record(room, {
-    % Unique room identifier (UUID)
-    id :: binary(),
-    % Human-readable room name
+    % Human-readable room name (now the primary key)
     name :: binary(),
     % Room description
     description :: binary(),
@@ -99,7 +97,8 @@
 
 %%% Record accessor functions (to handle record access safely)
 
-room_id(#room{id = Id}) -> Id.
+% For backward compatibility, return name as "id"
+room_id(#room{name = Name}) -> Name.
 room_name(#room{name = Name}) -> Name.
 room_description(#room{description = Description}) -> Description.
 room_type(#room{type = Type}) -> Type.
@@ -126,11 +125,9 @@ room_message_recipients(#room_message{recipients = Recipients}) -> Recipients.
 -spec create_room(binary(), binary(), public | private, binary()) ->
     {ok, binary()} | {error, term()}.
 create_room(Name, Description, Type, Owner) ->
-    RoomId = generate_room_id(),
     Now = erlang:system_time(second),
 
     Room = #room{
-        id = RoomId,
         name = Name,
         description = Description,
         type = Type,
@@ -142,8 +139,8 @@ create_room(Name, Description, Type, Owner) ->
 
     try
         true = ets:insert(rooms, Room),
-        true = ets:insert(user_rooms, {Owner, RoomId}),
-        {ok, RoomId}
+        true = ets:insert(user_rooms, {Owner, Name}),
+        {ok, Name}
     catch
         error:Reason ->
             {error, Reason}
@@ -187,59 +184,53 @@ delete_room(RoomId, Username) ->
 %%% For public rooms, anyone can join. For private rooms, password verification
 %%% is required (not implemented in Phase 1).
 %%%
-%%% @param RoomId The unique room identifier
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
+%%%
+%%% @param RoomIdOrName The unique room identifier (UUID) or room name
 %%% @param Username The username attempting to join
 %%% @param Password Optional password for private rooms (unused in Phase 1)
 %%% @returns `ok' on success, `{error, Reason}' on failure
 -spec join_room(binary(), binary(), binary() | undefined) ->
     ok | {error, term()}.
-join_room(RoomId, Username, _Password) ->
-    case ets:lookup(rooms, RoomId) of
-        [#room{members = Members} = Room] ->
-            case lists:member(Username, Members) of
-                true ->
-                    {error, already_member};
-                false ->
-                    % Add user to room
-                    UpdatedMembers = [Username | Members],
-                    UpdatedRoom = Room#room{members = UpdatedMembers},
-
-                    true = ets:insert(rooms, UpdatedRoom),
-                    true = ets:insert(user_rooms, {Username, RoomId}),
-                    ok
-            end;
+join_room(RoomIdOrName, Username, _Password) ->
+    % First try to lookup by ID
+    case ets:lookup(rooms, RoomIdOrName) of
+        [Room] ->
+            join_room_with_room(Room, Username);
         [] ->
-            {error, room_not_found}
+            % If not found by ID, try to find by name
+            case find_room_by_name(RoomIdOrName) of
+                {ok, Room} ->
+                    join_room_with_room(Room, Username);
+                {error, not_found} ->
+                    {error, room_not_found}
+            end
     end.
 
 %%% @doc Leave a room
 %%%
 %%% Removes a user from a room. If the room owner leaves, the room is deleted.
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
 %%%
-%%% @param RoomId The unique room identifier
+%%% @param RoomIdOrName The unique room identifier (UUID) or room name
 %%% @param Username The username attempting to leave
 %%% @returns `ok' on success, `{error, Reason}' on failure
 -spec leave_room(binary(), binary()) -> ok | {error, term()}.
-leave_room(RoomId, Username) ->
-    case ets:lookup(rooms, RoomId) of
-        [#room{owner = Username}] ->
-            % Room owner leaving - delete the room
-            delete_room(RoomId, Username);
-        [#room{members = Members} = Room] ->
-            case lists:member(Username, Members) of
-                true ->
-                    % Remove user from room
-                    UpdatedMembers = lists:delete(Username, Members),
-                    UpdatedRoom = Room#room{members = UpdatedMembers},
-
-                    true = ets:insert(rooms, UpdatedRoom),
-                    true = ets:delete_object(user_rooms, {Username, RoomId}),
-                    ok;
-                false ->
-                    {error, not_member}
-            end;
+leave_room(RoomIdOrName, Username) ->
+    % First try to lookup by ID
+    case ets:lookup(rooms, RoomIdOrName) of
+        [Room] ->
+            leave_room_with_room(Room, Username);
         [] ->
-            {error, room_not_found}
+            % If not found by ID, try to find by name
+            case find_room_by_name(RoomIdOrName) of
+                {ok, Room} ->
+                    leave_room_with_room(Room, Username);
+                {error, not_found} ->
+                    {error, room_not_found}
+            end
     end.
 
 %%% @doc List rooms based on filter criteria
@@ -270,27 +261,45 @@ list_rooms({user, Username}) ->
 %%% @doc Get detailed room information
 %%%
 %%% Returns complete information about a specific room.
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
 %%%
-%%% @param RoomId The unique room identifier
+%%% @param RoomIdOrName The unique room identifier (UUID) or room name
 %%% @returns `{ok, Room}' if found, `{error, not_found}' otherwise
 -spec get_room_info(binary()) -> {ok, #room{}} | {error, not_found}.
-get_room_info(RoomId) ->
-    case ets:lookup(rooms, RoomId) of
-        [Room] -> {ok, Room};
-        [] -> {error, not_found}
+get_room_info(RoomIdOrName) ->
+    % First try to lookup by ID
+    case ets:lookup(rooms, RoomIdOrName) of
+        [Room] ->
+            {ok, Room};
+        [] ->
+            % If not found by ID, try to find by name
+            case find_room_by_name(RoomIdOrName) of
+                {ok, Room} -> {ok, Room};
+                {error, not_found} -> {error, not_found}
+            end
     end.
 
 %%% @doc Get list of room members
 %%%
 %%% Returns the list of usernames for all members of a room.
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
 %%%
-%%% @param RoomId The unique room identifier
+%%% @param RoomIdOrName The unique room identifier (UUID) or room name
 %%% @returns `{ok, Members}' if room exists, `{error, not_found}' otherwise
 -spec get_room_members(binary()) -> {ok, [binary()]} | {error, not_found}.
-get_room_members(RoomId) ->
-    case ets:lookup(rooms, RoomId) of
-        [#room{members = Members}] -> {ok, Members};
-        [] -> {error, not_found}
+get_room_members(RoomIdOrName) ->
+    % First try to lookup by ID
+    case ets:lookup(rooms, RoomIdOrName) of
+        [#room{members = Members}] ->
+            {ok, Members};
+        [] ->
+            % If not found by ID, try to find by name
+            case find_room_by_name(RoomIdOrName) of
+                {ok, #room{members = Members}} -> {ok, Members};
+                {error, not_found} -> {error, not_found}
+            end
     end.
 
 %%% @doc Send a message to a room (Phase 1 simplified encryption)
@@ -298,16 +307,19 @@ get_room_members(RoomId) ->
 %%% Encrypts the message individually for each room member using the existing
 %%% 1-to-1 encryption pattern. The message is stored with encrypted copies
 %%% for each recipient.
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
 %%%
-%%% @param RoomId The target room identifier
+%%% @param RoomIdOrName The target room identifier (UUID) or room name
 %%% @param FromUsername The sender's username
 %%% @param PlaintextMessage The message content
 %%% @returns `{ok, MessageId}' on success, `{error, Reason}' on failure
 -spec send_room_message(binary(), binary(), binary()) ->
     {ok, binary()} | {error, term()}.
-send_room_message(RoomId, FromUsername, PlaintextMessage) ->
-    case get_room_members(RoomId) of
-        {ok, Members} ->
+send_room_message(RoomNameOrId, FromUsername, PlaintextMessage) ->
+    % First get the room record to ensure we have the actual room name
+    case get_room_info(RoomNameOrId) of
+        {ok, #room{name = RoomName, members = Members}} ->
             case lists:member(FromUsername, Members) of
                 true ->
                     MessageId = generate_message_id(),
@@ -320,7 +332,8 @@ send_room_message(RoomId, FromUsername, PlaintextMessage) ->
 
                     Message = #room_message{
                         id = MessageId,
-                        room_id = RoomId,
+                        % Use room name as room_id
+                        room_id = RoomName,
                         from = FromUsername,
                         timestamp = Now,
                         recipients = Recipients
@@ -331,32 +344,54 @@ send_room_message(RoomId, FromUsername, PlaintextMessage) ->
                 false ->
                     {error, not_member}
             end;
-        {error, Reason} ->
-            {error, Reason}
+        {error, not_found} ->
+            {error, room_not_found}
     end.
 
 %%% @doc Get room message history
 %%%
 %%% Returns messages for a room since a specified timestamp.
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
 %%%
-%%% @param RoomId The room identifier
+%%% @param RoomIdOrName The room identifier (UUID) or room name
 %%% @param Since Unix timestamp to filter messages from
 %%% @returns List of room messages
 -spec get_room_messages(binary(), integer()) -> [#room_message{}].
-get_room_messages(RoomId, Since) ->
-    AllMessages = ets:lookup(room_messages, RoomId),
-    [Msg || Msg <- AllMessages, Msg#room_message.timestamp >= Since].
+get_room_messages(RoomNameOrId, Since) ->
+    % First try to get the actual room name
+    case get_room_info(RoomNameOrId) of
+        {ok, #room{name = RoomName}} ->
+            AllMessages = ets:lookup(room_messages, RoomName),
+            [Msg || Msg <- AllMessages, Msg#room_message.timestamp >= Since];
+        {error, not_found} ->
+            % Room not found, return empty list
+            []
+    end.
 
 %%% @doc Check if a user is a member of a room
 %%%
+%%% The function first attempts to find the room by ID. If no room is found,
+%%% it will try to find a room with the matching name as a fallback.
+%%%
 %%% @param Username The username to check
-%%% @param RoomId The room identifier
+%%% @param RoomIdOrName The room identifier (UUID) or room name
 %%% @returns `true' if user is a member, `false' otherwise
 -spec is_room_member(binary(), binary()) -> boolean().
-is_room_member(Username, RoomId) ->
-    case ets:lookup(user_rooms, Username) of
-        [] -> false;
-        UserRooms -> lists:any(fun({_, Id}) -> Id =:= RoomId end, UserRooms)
+is_room_member(Username, RoomIdOrName) ->
+    % First try to get the actual room name
+    case get_room_info(RoomIdOrName) of
+        {ok, #room{name = RoomName}} ->
+            case ets:lookup(user_rooms, Username) of
+                [] ->
+                    false;
+                UserRooms ->
+                    lists:any(
+                        fun({_, Name}) -> Name =:= RoomName end, UserRooms
+                    )
+            end;
+        {error, not_found} ->
+            false
     end.
 
 %%% @doc Get all rooms a user belongs to
@@ -536,11 +571,55 @@ get_user_private_key(Username) ->
 
 %%% Internal Functions
 
-%% Generate a unique room ID
--spec generate_room_id() -> binary().
-generate_room_id() ->
-    UUID = uuid:get_v4(),
-    uuid:uuid_to_string(UUID, binary_standard).
+%% Helper function to complete joining a room with the found room record
+-spec join_room_with_room(#room{}, binary()) -> ok | {error, term()}.
+join_room_with_room(#room{name = RoomName, members = Members} = Room, Username) ->
+    case lists:member(Username, Members) of
+        true ->
+            {error, already_member};
+        false ->
+            % Add user to room
+            UpdatedMembers = [Username | Members],
+            UpdatedRoom = Room#room{members = UpdatedMembers},
+
+            true = ets:insert(rooms, UpdatedRoom),
+            true = ets:insert(user_rooms, {Username, RoomName}),
+            ok
+    end.
+
+%% Helper function to complete leaving a room with the found room record
+-spec leave_room_with_room(#room{}, binary()) -> ok | {error, term()}.
+leave_room_with_room(
+    #room{name = RoomName, owner = Owner, members = Members} = Room, Username
+) ->
+    case Owner of
+        Username ->
+            % Room owner leaving - delete the room
+            delete_room(RoomName, Username);
+        _ ->
+            case lists:member(Username, Members) of
+                true ->
+                    % Remove user from room
+                    UpdatedMembers = lists:delete(Username, Members),
+                    UpdatedRoom = Room#room{members = UpdatedMembers},
+
+                    true = ets:insert(rooms, UpdatedRoom),
+                    true = ets:delete_object(user_rooms, {Username, RoomName}),
+                    ok;
+                false ->
+                    {error, not_member}
+            end
+    end.
+
+%% Helper function to find a room by name
+-spec find_room_by_name(binary()) -> {ok, #room{}} | {error, not_found}.
+find_room_by_name(RoomName) ->
+    case ets:match_object(rooms, #room{name = RoomName, _ = '_'}) of
+        [Room] -> {ok, Room};
+        [] -> {error, not_found};
+        % If multiple rooms with same name, return first
+        [Room | _] -> {ok, Room}
+    end.
 
 %% Generate a unique message ID
 -spec generate_message_id() -> binary().

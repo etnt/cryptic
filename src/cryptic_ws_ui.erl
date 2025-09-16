@@ -1634,6 +1634,9 @@ handle_websocket_message(Message, UIState) ->
                     <<"room_message">> ->
                         %% Incoming room message
                         handle_room_message(Data, UIState);
+                    <<"room_message_sent">> ->
+                        %% Room message sent confirmation
+                        handle_room_message_sent_response(Data, UIState);
                     _ ->
                         %% Unknown message type
                         add_system_message(
@@ -2450,7 +2453,7 @@ handle_rooms_list_response(Data, UIState) ->
                         UIState
                     ),
                     %% Build room cache and display rooms
-                    {FinalState, _Cache} = lists:foldl(
+                    {FinalState, Cache} = lists:foldl(
                         fun(Room, {AccState, RoomCache}) ->
                             RoomName = binary_to_list(
                                 maps:get(<<"name">>, Room, <<"unnamed">>)
@@ -2499,7 +2502,7 @@ handle_rooms_list_response(Data, UIState) ->
                         Rooms
                     ),
                     %% Update UI state with new room cache
-                    FinalState#ui_state{room_cache = _Cache}
+                    FinalState#ui_state{room_cache = Cache}
             end;
         false ->
             ErrorMsg = binary_to_list(
@@ -2685,11 +2688,98 @@ handle_room_messages_response(Data, UIState) ->
 handle_room_message(Data, UIState) ->
     RoomName = binary_to_list(maps:get(<<"room_name">>, Data, <<"unknown">>)),
     From = binary_to_list(maps:get(<<"from">>, Data, <<"unknown">>)),
-    Content = binary_to_list(maps:get(<<"message">>, Data, <<"">>)),
 
-    %% Format as room message
-    SenderText = io_lib:format("~s@~s", [From, RoomName]),
-    add_message(lists:flatten(SenderText), Content, UIState).
+    %% Check if this is an encrypted room message
+    case
+        {
+            maps:get(<<"ephemeral">>, Data, undefined),
+            maps:get(<<"encrypted_data">>, Data, undefined)
+        }
+    of
+        {undefined, undefined} ->
+            %% Plain text message (legacy)
+            Content = binary_to_list(maps:get(<<"message">>, Data, <<"">>)),
+            SenderText = io_lib:format("~s@~s", [From, RoomName]),
+            add_message(lists:flatten(SenderText), Content, UIState);
+        {EphemeralB64, EncryptedDataB64} ->
+            %% Encrypted room message - decrypt it
+            WSChatState = UIState#ui_state.ws_chat_state,
+            case WSChatState#ws_chat_state.keypair of
+                undefined ->
+                    ErrMsg = "No keypair available for room message decryption",
+                    add_system_message(ErrMsg, UIState);
+                {PrivateKey, _PublicKey} ->
+                    %% Decode base64 data
+                    EphemeralPub = base64:decode(EphemeralB64),
+                    EncryptedData = base64:decode(EncryptedDataB64),
+
+                    %% Parse encrypted data (assuming format: Nonce || Ciphertext)
+
+                    % AES-GCM nonce size
+                    NonceSize = 12,
+                    <<Nonce:NonceSize/binary, Cipher/binary>> = EncryptedData,
+
+                    %% Derive shared secret
+                    SharedSecret = cryptic_lib:derive_shared_secret(
+                        PrivateKey, EphemeralPub
+                    ),
+
+                    %% Derive AEAD key using ephemeral public key as salt
+                    AeadKey = cryptic_lib:derive_aead_key_ephemeral(
+                        SharedSecret, EphemeralPub
+                    ),
+
+                    %% Decrypt message
+                    case
+                        cryptic_lib:aead_decrypt(Cipher, AeadKey, Nonce, <<>>)
+                    of
+                        error ->
+                            CryptoErrMsg = io_lib:format(
+                                "Failed to decrypt room message from ~s@~s: decryption_failed",
+                                [From, RoomName]
+                            ),
+                            add_system_message(
+                                lists:flatten(CryptoErrMsg), UIState
+                            );
+                        PlainBin ->
+                            %% Convert back to string
+                            PlainText =
+                                case unicode:characters_to_list(PlainBin) of
+                                    {error, _, _} ->
+                                        binary_to_list(PlainBin);
+                                    {incomplete, _, _} ->
+                                        binary_to_list(PlainBin);
+                                    ValidText ->
+                                        ValidText
+                                end,
+                            SenderText = io_lib:format("~s@~s", [From, RoomName]),
+                            add_message(
+                                lists:flatten(SenderText), PlainText, UIState
+                            )
+                    end
+            end
+    end.
+
+%% @private
+%% @doc Handle room message sent confirmation.
+handle_room_message_sent_response(Data, UIState) ->
+    case maps:get(<<"success">>, Data, false) of
+        true ->
+            MessageId = maps:get(<<"message_id">>, Data, <<"unknown">>),
+            RoomId = maps:get(<<"room_id">>, Data, <<"unknown">>),
+            ConfirmationMsg = io_lib:format(
+                "Message sent to room (ID: ~s, MsgID: ~s)",
+                [binary_to_list(RoomId), binary_to_list(MessageId)]
+            ),
+            add_system_message(lists:flatten(ConfirmationMsg), UIState);
+        false ->
+            ErrorMsg = binary_to_list(
+                maps:get(<<"message">>, Data, <<"Failed to send room message">>)
+            ),
+            add_system_message(
+                "Failed to send room message: " ++ ErrorMsg, UIState
+            )
+    end.
 
 %%% Room Command Handlers
 

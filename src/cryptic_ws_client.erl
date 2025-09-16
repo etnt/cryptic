@@ -637,6 +637,15 @@ handle_server_message(<<"room_message">>, Message, State) ->
             UIPid ! {websocket_message, {text, jsx:encode(Message)}}
     end,
     {noreply, State};
+handle_server_message(<<"room_message_sent">>, Message, State) ->
+    %% Forward room message sent confirmation to UI
+    case State#state.ui_pid of
+        undefined ->
+            ?warning("No UI PID set, cannot forward room_message_sent", []);
+        UIPid ->
+            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
+    end,
+    {noreply, State};
 handle_server_message(Type, Message, State) ->
     ?warning("Unknown message type ~s: ~p", [Type, Message]),
     {noreply, State}.

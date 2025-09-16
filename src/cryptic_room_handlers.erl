@@ -99,6 +99,7 @@ handle_room_command(create_room, Params, Username) ->
 %% Join an existing room
 handle_room_command(join_room, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
+    ?dbg("DEBUG ROOM HANDLER: User ~s joining room ~s~n", [Username, RoomId]),
     Password = maps:get(<<"password">>, Params, undefined),
 
     case cryptic_room_manager:join_room(RoomId, Username, Password) of
@@ -308,10 +309,24 @@ format_room_message(Message, RequestingUser) ->
 broadcast_room_message(
     RoomId, FromUsername, _PlaintextMessage, MessageId, Members
 ) ->
+    ?dbg("DEBUG BROADCAST: RoomId=~p, MessageId=~p, Members=~p~n", [
+        RoomId, MessageId, Members
+    ]),
+
+    % Get room information for room name
+    {ok, Room} = cryptic_room_manager:get_room_info(RoomId),
+    RoomName = room_name(Room),
+
     % Retrieve the stored room message with encrypted recipients
-    % Since room_messages ETS table is keyed by room_id, get all messages for this room
-    case ets:lookup(room_messages, RoomId) of
+    % Since room_messages ETS table is keyed by 'from' field (position 3),
+    % we need to find messages by room_id field (position 2) using match
+    % Pattern: {room_message, ID, RoomId, From, Timestamp, Recipients}
+    Pattern = {'_', '_', RoomId, '_', '_', '_'},
+    case ets:match_object(room_messages, Pattern) of
         Messages when Messages =/= [] ->
+            ?dbg("DEBUG BROADCAST: Found ~p messages for room ~p~n", [
+                length(Messages), RoomId
+            ]),
             % Find the specific message by ID using the accessor function
             case
                 lists:filter(
@@ -319,6 +334,9 @@ broadcast_room_message(
                 )
             of
                 [RoomMessage] ->
+                    ?dbg("DEBUG BROADCAST: Found specific message ~p~n", [
+                        MessageId
+                    ]),
                     % Get the encrypted recipients data
                     Recipients = room_message_recipients(RoomMessage),
 
@@ -332,56 +350,21 @@ broadcast_room_message(
                         end,
                         Members
                     ),
-
+                    ?dbg("DEBUG BROADCAST: Connected members: ~p~n", [
+                        ConnectedMembers
+                    ]),
                     % Send individually encrypted message to each connected member
                     lists:foreach(
                         fun(Member) ->
-                            % Don't send to sender
-                            if
-                                Member =/= FromUsername ->
-                                    case
-                                        find_encrypted_message_for_user(
-                                            Recipients, Member
-                                        )
-                                    of
-                                        {ok, EphemeralKey, EncryptedData} ->
-                                            case
-                                                ets:lookup(
-                                                    user_connections, Member
-                                                )
-                                            of
-                                                [{Member, Pid}] ->
-                                                    Notification = #{
-                                                        type =>
-                                                            <<"room_message">>,
-                                                        room_id => RoomId,
-                                                        from => FromUsername,
-                                                        message_id => MessageId,
-                                                        timestamp => room_message_timestamp(
-                                                            RoomMessage
-                                                        ),
-                                                        ephemeral => base64:encode(
-                                                            EphemeralKey
-                                                        ),
-                                                        encrypted_data => base64:encode(
-                                                            EncryptedData
-                                                        )
-                                                    },
-                                                    Pid !
-                                                        {send_json,
-                                                            Notification};
-                                                [] ->
-                                                    ok
-                                            end;
-                                        {error, not_found} ->
-                                            ?warning(
-                                                "No encrypted message found for user ~s in room message ~s",
-                                                [Member, MessageId]
-                                            )
-                                    end;
-                                true ->
-                                    ok
-                            end
+                            send_room_notification_to_member(
+                                Member,
+                                FromUsername,
+                                RoomId,
+                                RoomName,
+                                MessageId,
+                                RoomMessage,
+                                Recipients
+                            )
                         end,
                         ConnectedMembers
                     );
@@ -397,6 +380,9 @@ broadcast_room_message(
                     )
             end;
         [] ->
+            io:format("DEBUG BROADCAST: No messages found for room ~p~n", [
+                RoomId
+            ]),
             ?error("No messages found for room ~s", [RoomId])
     end.
 
@@ -407,6 +393,50 @@ find_encrypted_message_for_user(Recipients, Username) ->
             {ok, EphemeralKey, EncryptedData};
         false ->
             {error, not_found}
+    end.
+
+%% Send room message notification to a specific member
+send_room_notification_to_member(
+    Member, FromUsername, RoomId, RoomName, MessageId, RoomMessage, Recipients
+) ->
+    % Don't send to sender
+    if
+        Member =/= FromUsername ->
+            case find_encrypted_message_for_user(Recipients, Member) of
+                {ok, EphemeralKey, EncryptedData} ->
+                    ?dbg("DEBUG SENDING: Found encrypted message for ~s", [
+                        Member
+                    ]),
+                    case ets:lookup(user_connections, Member) of
+                        [{Member, Pid}] ->
+                            Notification = #{
+                                type => <<"room_message">>,
+                                room_id => RoomId,
+                                room_name => RoomName,
+                                from => iolist_to_binary(FromUsername),
+                                message_id => MessageId,
+                                timestamp => room_message_timestamp(
+                                    RoomMessage
+                                ),
+                                ephemeral => base64:encode(EphemeralKey),
+                                encrypted_data => base64:encode(EncryptedData)
+                            },
+                            ?dbg("DEBUG SENDING to ~s: ~p", [
+                                Member, Notification
+                            ]),
+                            % Send as room_notification instead of send_json
+                            Pid ! {room_notification, Notification};
+                        [] ->
+                            ok
+                    end;
+                {error, not_found} ->
+                    ?warning(
+                        "No encrypted message found for user ~s in room message ~s",
+                        [Member, MessageId]
+                    )
+            end;
+        true ->
+            ok
     end.
 
 %% Format error messages for client consumption
