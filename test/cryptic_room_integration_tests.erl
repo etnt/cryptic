@@ -3,7 +3,6 @@
 
 %% Room records
 -record(room, {
-    id :: binary(),
     name :: binary(),
     description :: binary(),
     type :: public | private,
@@ -43,11 +42,23 @@ setup() ->
     ets:new(connections, [named_table, set, public]),
     % Add missing table
     ets:new(user_connections, [named_table, set, public]),
+
+    % Add cryptic_lib tables for prekey storage
+    ets:new(cryptic_prekeys, [named_table, public, bag]),
+    ets:new(cryptic_messages, [named_table, public, bag]),
+    ets:new(cryptic_users, [named_table, public, bag]),
+
     % Add test users with prekeys for encryption
     TestUser1 = <<"alice">>,
     TestUser2 = <<"bob">>,
     Prekey1 = crypto:strong_rand_bytes(32),
     Prekey2 = crypto:strong_rand_bytes(32),
+
+    % Store prekeys using cryptic_lib (proper way)
+    ok = cryptic_lib:store_prekey("alice", Prekey1),
+    ok = cryptic_lib:store_prekey("bob", Prekey2),
+
+    % Also store in users table for other parts of the system
     ets:insert(users, {TestUser1, #{prekey => Prekey1}}),
     ets:insert(users, {TestUser2, #{prekey => Prekey2}}),
     {TestUser1, TestUser2, Prekey1, Prekey2}.
@@ -60,6 +71,9 @@ cleanup(_) ->
     catch ets:delete(users),
     catch ets:delete(connections),
     catch ets:delete(user_connections),
+    catch ets:delete(cryptic_prekeys),
+    catch ets:delete(cryptic_messages),
+    catch ets:delete(cryptic_users),
 
     % Stop event manager
     catch gen_event:stop(cryptic_event_manager),

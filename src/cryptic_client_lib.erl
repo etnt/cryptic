@@ -49,19 +49,25 @@
 -export([
     %% Client setup
     init_client/0,
-    
+
     %% Prekey management
     upload_prekey/3,
     get_prekey/2,
     list_users/1,
-    
+
     %% Message operations
     encrypt_message/2,
     send_message/6,
     receive_messages/2,
     decrypt_message/2,
     decrypt_message_from_json/2,
-    
+
+    %% Secure message operations (Step 1)
+    upload_key_bundle/2,
+    get_key_bundle/2,
+    send_message_secure/4,
+    receive_and_decrypt_messages_secure/3,
+
     %% Utility functions
     parse_message_json/1,
     create_message_json/5,
@@ -69,7 +75,7 @@
     parse_recv_blobs_response/1,
     parse_get_prekey_response/1,
     parse_users_list_response/1,
-    
+
     %% E2E flow helpers
     send_encrypted_message/5,
     receive_and_decrypt_messages/3,
@@ -150,14 +156,18 @@ init_client() ->
 upload_prekey(ServerUrl, UserId, PublicKey) ->
     PubKeyB64 = base64:encode(PublicKey),
     PostData = io_lib:format("{\"prekey\":\"~s\"}", [PubKeyB64]),
-    Url = lists:flatten(io_lib:format("~s/upload_prekey/~s", [ServerUrl, UserId])),
-    
-    case httpc:request(
-        post,
-        {Url, [], "application/json", PostData},
-        [],
-        []
-    ) of
+    Url = lists:flatten(
+        io_lib:format("~s/upload_prekey/~s", [ServerUrl, UserId])
+    ),
+
+    case
+        httpc:request(
+            post,
+            {Url, [], "application/json", PostData},
+            [],
+            []
+        )
+    of
         {ok, {_, _, _}} -> ok;
         {error, Reason} -> {error, Reason}
     end.
@@ -180,12 +190,14 @@ upload_prekey(ServerUrl, UserId, PublicKey) ->
 -spec get_prekey(server_url(), user_id()) -> {ok, binary()} | {error, term()}.
 get_prekey(ServerUrl, UserId) ->
     Url = lists:flatten(io_lib:format("~s/get_prekey/~s", [ServerUrl, UserId])),
-    
+
     case httpc:request(get, {Url, []}, [], []) of
         {ok, {_, _, RespData}} ->
-            case re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
-                {capture, [1], list}
-            ]) of
+            case
+                re:run(RespData, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
+                    {capture, [1], list}
+                ])
+            of
                 {match, [PubKeyB64]} ->
                     {ok, base64:decode(PubKeyB64)};
                 nomatch ->
@@ -211,7 +223,7 @@ get_prekey(ServerUrl, UserId) ->
 -spec list_users(server_url()) -> {ok, [string()]} | {error, term()}.
 list_users(ServerUrl) ->
     Url = lists:flatten(io_lib:format("~s/list_users", [ServerUrl])),
-    
+
     case httpc:request(get, {Url, []}, [], []) of
         {ok, {_, _, RespData}} ->
             case parse_users_list_response(RespData) of
@@ -252,28 +264,29 @@ list_users(ServerUrl) ->
 %% @param RecipientPubKey X25519 public key of the recipient (32 bytes)
 %% @returns `{ok, {EphemeralPubKey, Nonce, Ciphertext}}' if successful,
 %%   `{error, Reason}' if encryption fails.
--spec encrypt_message(message(), binary()) -> 
+-spec encrypt_message(message(), binary()) ->
     {ok, {binary(), binary(), binary()}} | {error, term()}.
 encrypt_message(Message, RecipientPubKey) ->
     try
         %% Convert message to binary if it's a string
-        MessageBin = case is_binary(Message) of
-            true -> Message;
-            false -> unicode:characters_to_binary(Message)
-        end,
-        
+        MessageBin =
+            case is_binary(Message) of
+                true -> Message;
+                false -> unicode:characters_to_binary(Message)
+            end,
+
         %% Generate ephemeral keypair
         {EphPub, EphPriv} = cryptic_lib:gen_keypair(),
-        
+
         %% Compute shared secret
         Shared = cryptic_lib:scalarmult(EphPriv, RecipientPubKey),
-        
+
         %% Derive AEAD key using ephemeral-based salt
         AeadKey = cryptic_lib:derive_aead_key_ephemeral(Shared, EphPub),
-        
+
         %% Encrypt message
         {Cipher, Nonce} = cryptic_lib:aead_encrypt(MessageBin, AeadKey, <<>>),
-        
+
         {ok, {EphPub, Nonce, Cipher}}
     catch
         error:Reason -> {error, Reason}
@@ -294,23 +307,27 @@ encrypt_message(Message, RecipientPubKey) ->
 %%
 %% @param ServerUrl Base URL of the Cryptic server
 %% @param FromUserId Sender's user ID
-%% @param ToUserId Recipient's user ID  
+%% @param ToUserId Recipient's user ID
 %% @param EphPub Ephemeral public key from encryption (32 bytes)
 %% @param Nonce Encryption nonce (24 bytes for XChaCha20)
 %% @param Cipher Encrypted ciphertext
 %% @returns `ok' if message is successfully sent, `{error, Reason}' if it fails.
--spec send_message(server_url(), user_id(), user_id(), binary(), binary(), binary()) -> 
+-spec send_message(
+    server_url(), user_id(), user_id(), binary(), binary(), binary()
+) ->
     ok | {error, term()}.
 send_message(ServerUrl, FromUserId, ToUserId, EphPub, Nonce, Cipher) ->
     BlobData = create_message_json(FromUserId, ToUserId, EphPub, Nonce, Cipher),
     Url = lists:flatten(io_lib:format("~s/send_blob", [ServerUrl])),
-    
-    case httpc:request(
-        post,
-        {Url, [], "application/json", BlobData},
-        [],
-        []
-    ) of
+
+    case
+        httpc:request(
+            post,
+            {Url, [], "application/json", BlobData},
+            [],
+            []
+        )
+    of
         {ok, {_, _, _}} -> ok;
         {error, Reason} -> {error, Reason}
     end.
@@ -330,11 +347,11 @@ send_message(ServerUrl, FromUserId, ToUserId, EphPub, Nonce, Cipher) ->
 %% @param UserId User ID to fetch messages for
 %% @returns `{ok, [encrypted_blob()]}' if successful (may be empty list),
 %%   `{error, Reason}' if retrieval fails.
--spec receive_messages(server_url(), user_id()) -> 
+-spec receive_messages(server_url(), user_id()) ->
     {ok, [encrypted_blob()]} | {error, term()}.
 receive_messages(ServerUrl, UserId) ->
     Url = lists:flatten(io_lib:format("~s/recv_blobs/~s", [ServerUrl, UserId])),
-    
+
     case httpc:request(get, {Url, []}, [], []) of
         {ok, {_, _, RespStr}} ->
             case RespStr of
@@ -370,27 +387,32 @@ receive_messages(ServerUrl, UserId) ->
 %% @param RecipientPrivKey X25519 private key of the recipient (32 bytes)
 %% @returns `{ok, Message}' if decryption succeeds, `{error, Reason}' if it fails.
 %%   Common error reasons include `decryption_failed' and key validation errors.
--spec decrypt_message(encrypted_blob(), binary()) -> 
+-spec decrypt_message(encrypted_blob(), binary()) ->
     {ok, message()} | {error, term()}.
 decrypt_message({Ephemeral, Nonce, Cipher}, RecipientPrivKey) ->
     %% Handle tuple format (for testing convenience)
     try
         %% Compute shared secret
         Shared = cryptic_lib:scalarmult(RecipientPrivKey, Ephemeral),
-        
+
         %% Derive AEAD key
         AeadKey = cryptic_lib:derive_aead_key_ephemeral(Shared, Ephemeral),
-        
+
         %% Decrypt message
         case cryptic_lib:aead_decrypt(Cipher, AeadKey, Nonce, <<>>) of
-            error -> {error, decryption_failed};
-            PlainBin -> 
+            error ->
+                {error, decryption_failed};
+            PlainBin ->
                 %% Convert back to string if possible
-                Plain = case unicode:characters_to_list(PlainBin) of
-                    {error, _, _} -> PlainBin;  % Keep as binary if not valid UTF-8
-                    {incomplete, _, _} -> PlainBin;  % Keep as binary if incomplete
-                    List -> List  % Convert to string
-                end,
+                Plain =
+                    case unicode:characters_to_list(PlainBin) of
+                        % Keep as binary if not valid UTF-8
+                        {error, _, _} -> PlainBin;
+                        % Keep as binary if incomplete
+                        {incomplete, _, _} -> PlainBin;
+                        % Convert to string
+                        List -> List
+                    end,
                 {ok, Plain}
         end
     catch
@@ -404,12 +426,12 @@ decrypt_message(EncryptedBlob, RecipientPrivKey) ->
             nonce := NonceB64,
             cipher := CipherB64
         } = EncryptedBlob,
-        
+
         %% Decode base64 fields
         Ephemeral = base64:decode(EphemeralB64),
         Nonce = base64:decode(NonceB64),
         Cipher = base64:decode(CipherB64),
-        
+
         %% Use the tuple version
         decrypt_message({Ephemeral, Nonce, Cipher}, RecipientPrivKey)
     catch
@@ -426,18 +448,18 @@ decrypt_message(EncryptedBlob, RecipientPrivKey) ->
 %% @param RespStr JSON string containing encrypted message fields
 %% @param RecipientPrivKey X25519 private key of the recipient
 %% @returns `{ok, Message}' if successful, `{error, Reason}' if it fails.
--spec decrypt_message_from_json(string(), binary()) -> 
+-spec decrypt_message_from_json(string(), binary()) ->
     {ok, message()} | {error, term()}.
 decrypt_message_from_json(RespStr, RecipientPrivKey) ->
     try
         {EphemeralB64, NonceB64, CipherB64} = parse_message_json(RespStr),
-        
+
         EncryptedBlob = #{
             ephemeral => EphemeralB64,
             nonce => NonceB64,
             cipher => CipherB64
         },
-        
+
         decrypt_message(EncryptedBlob, RecipientPrivKey)
     catch
         error:Reason -> {error, Reason}
@@ -463,16 +485,18 @@ decrypt_message_from_json(RespStr, RecipientPrivKey) ->
 %% @returns `{EphemeralB64, NonceB64, CipherB64}' tuple of base64-encoded strings.
 -spec parse_message_json(string()) -> {string(), string(), string()}.
 parse_message_json(RespStr) ->
-    {match, [EphemeralB64]} = re:run(RespStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [
-        {capture, [1], list}
-    ]),
+    {match, [EphemeralB64]} = re:run(
+        RespStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [
+            {capture, [1], list}
+        ]
+    ),
     {match, [NonceB64]} = re:run(RespStr, "\"nonce\"\\s*:\\s*\"([^\"]+)\"", [
         {capture, [1], list}
     ]),
     {match, [CipherB64]} = re:run(RespStr, "\"cipher\"\\s*:\\s*\"([^\"]+)\"", [
         {capture, [1], list}
     ]),
-    
+
     {EphemeralB64, NonceB64, CipherB64}.
 
 %% @doc Create JSON message blob for transmission.
@@ -484,7 +508,7 @@ parse_message_json(RespStr) ->
 %% ```
 %% {
 %%   "from": "sender_id",
-%%   "to": "recipient_id", 
+%%   "to": "recipient_id",
 %%   "ephemeral": "base64_ephemeral_key",
 %%   "nonce": "base64_nonce",
 %%   "cipher": "base64_ciphertext"
@@ -497,12 +521,13 @@ parse_message_json(RespStr) ->
 %% @param Nonce Encryption nonce (24 bytes)
 %% @param Cipher Encrypted ciphertext
 %% @returns JSON string as iolist()
--spec create_message_json(user_id(), user_id(), binary(), binary(), binary()) -> iolist().
+-spec create_message_json(user_id(), user_id(), binary(), binary(), binary()) ->
+    iolist().
 create_message_json(FromUserId, ToUserId, EphPub, Nonce, Cipher) ->
     EphPubB64 = base64:encode(EphPub),
     NonceB64 = base64:encode(Nonce),
     CipherB64 = base64:encode(Cipher),
-    
+
     io_lib:format(
         "{\"from\":\"~s\",\"to\":\"~s\",\"ephemeral\":\"~s\",\"nonce\":\"~s\",\"cipher\":\"~s\"}",
         [FromUserId, ToUserId, EphPubB64, NonceB64, CipherB64]
@@ -537,13 +562,19 @@ create_message_json(FromUserId, ToUserId, EphPub, Nonce, Cipher) ->
 %% @param Message Message to encrypt and send
 %% @param _FromPrivateKey Sender's private key (currently unused, reserved for future use)
 %% @returns `ok' if message is successfully sent, `{error, Reason}' if any step fails.
--spec send_encrypted_message(server_url(), user_id(), user_id(), message(), binary()) -> 
+-spec send_encrypted_message(
+    server_url(), user_id(), user_id(), message(), binary()
+) ->
     ok | {error, term()}.
-send_encrypted_message(ServerUrl, FromUserId, ToUserId, Message, _FromPrivateKey) ->
+send_encrypted_message(
+    ServerUrl, FromUserId, ToUserId, Message, _FromPrivateKey
+) ->
     %% Get recipient's public key first
     case get_prekey(ServerUrl, ToUserId) of
         {ok, RecipientPubKey} ->
-            send_encrypted_message_with_pubkey(ServerUrl, FromUserId, ToUserId, RecipientPubKey, Message);
+            send_encrypted_message_with_pubkey(
+                ServerUrl, FromUserId, ToUserId, RecipientPubKey, Message
+            );
         {error, Reason} ->
             {error, Reason}
     end.
@@ -567,12 +598,18 @@ send_encrypted_message(ServerUrl, FromUserId, ToUserId, Message, _FromPrivateKey
 %% @param RecipientPubKey X25519 public key of the recipient
 %% @param Message Message to encrypt and send
 %% @returns `ok' if successful, `{error, Reason}' if encryption or sending fails.
--spec send_encrypted_message_with_pubkey(server_url(), user_id(), user_id(), binary(), message()) -> 
+-spec send_encrypted_message_with_pubkey(
+    server_url(), user_id(), user_id(), binary(), message()
+) ->
     ok | {error, term()}.
-send_encrypted_message_with_pubkey(ServerUrl, FromUserId, ToUserId, RecipientPubKey, Message) ->
+send_encrypted_message_with_pubkey(
+    ServerUrl, FromUserId, ToUserId, RecipientPubKey, Message
+) ->
     case encrypt_message(Message, RecipientPubKey) of
         {ok, {EphPub, Nonce, Cipher}} ->
-            send_message(ServerUrl, FromUserId, ToUserId, EphPub, Nonce, Cipher);
+            send_message(
+                ServerUrl, FromUserId, ToUserId, EphPub, Nonce, Cipher
+            );
         {error, Reason} ->
             {error, Reason}
     end.
@@ -603,7 +640,7 @@ send_encrypted_message_with_pubkey(ServerUrl, FromUserId, ToUserId, RecipientPub
 %% @returns `{ok, [{SenderId, DecryptedMessage}]}' if successful,
 %%   `{error, Reason}' if retrieval or decryption fails.
 %%   Failed decryptions are skipped and do not cause the function to fail.
--spec receive_and_decrypt_messages(server_url(), user_id(), binary()) -> 
+-spec receive_and_decrypt_messages(server_url(), user_id(), binary()) ->
     {ok, [message()]} | {error, term()}.
 receive_and_decrypt_messages(ServerUrl, UserId, PrivateKey) ->
     case receive_messages(ServerUrl, UserId) of
@@ -612,6 +649,293 @@ receive_and_decrypt_messages(ServerUrl, UserId, PrivateKey) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+%% @doc Upload complete key bundle to server (Step 1).
+%%
+%% Uploads a complete X3DH key bundle including identity keys, signed prekeys,
+%% and one-time prekeys to the server for other users to retrieve.
+%%
+%% @param ServerUrl Base URL of the Cryptic server
+%% @param KeyBundle Complete key bundle from cryptic_lib:generate_client_keys/0
+%% @returns ok | {error, Reason}
+-spec upload_key_bundle(server_url(), map()) -> ok | {error, term()}.
+upload_key_bundle(ServerUrl, KeyBundle) ->
+    #{
+        identity_sign_public := IdentityPub,
+        signed_prekey_public := SignedPrekeyPub,
+        signed_prekey_signature := Signature,
+        one_time_prekeys := OtpkList,
+        key_id := KeyId
+    } = KeyBundle,
+
+    %% Encode one-time prekeys for JSON
+    EncodedOtpks = lists:map(
+        fun(#{id := Id, public := Pub}) ->
+            #{
+                <<"id">> => base64:encode(Id),
+                <<"public">> => base64:encode(Pub)
+            }
+        end,
+        OtpkList
+    ),
+
+    Command = #{
+        <<"type">> => <<"upload_key_bundle">>,
+        <<"identity_public">> => base64:encode(IdentityPub),
+        <<"signed_prekey_public">> => base64:encode(SignedPrekeyPub),
+        <<"signed_prekey_signature">> => base64:encode(Signature),
+        <<"one_time_prekeys">> => EncodedOtpks,
+        <<"key_id">> => base64:encode(KeyId)
+    },
+
+    case send_ws_command(ServerUrl, Command) of
+        {ok, #{<<"type">> := <<"success">>}} -> ok;
+        {ok, #{<<"error">> := Error}} -> {error, Error};
+        {error, Reason} -> {error, Reason}
+    end.
+
+%% @doc Get key bundle for another user (Step 1).
+%%
+%% Retrieves another user's key bundle for X3DH key agreement.
+%% The server will mark one OTPK as consumed during this operation.
+%%
+%% @param ServerUrl Base URL of the Cryptic server
+%% @param Username Target user's ID
+%% @returns {ok, KeyBundle} | {error, Reason}
+-spec get_key_bundle(server_url(), user_id()) -> {ok, map()} | {error, term()}.
+get_key_bundle(ServerUrl, Username) ->
+    Command = #{
+        <<"type">> => <<"get_key_bundle">>,
+        <<"user">> => list_to_binary(Username)
+    },
+
+    case send_ws_command(ServerUrl, Command) of
+        {ok, Response = #{<<"type">> := <<"key_bundle">>}} ->
+            %% Parse the response
+            #{
+                <<"identity_public">> := IdentityPubB64,
+                <<"signed_prekey_public">> := SignedPrekeyPubB64,
+                <<"signed_prekey_signature">> := SignatureB64,
+                <<"key_id">> := KeyIdB64
+            } = Response,
+
+            KeyBundle = #{
+                identity_public => base64:decode(IdentityPubB64),
+                signed_prekey_public => base64:decode(SignedPrekeyPubB64),
+                signed_prekey_signature => base64:decode(SignatureB64),
+                key_id => base64:decode(KeyIdB64),
+                one_time_prekey =>
+                    case maps:get(<<"one_time_prekey">>, Response, null) of
+                        null ->
+                            null;
+                        #{<<"id">> := IdB64, <<"public">> := PubB64} ->
+                            #{
+                                id => base64:decode(IdB64),
+                                public => base64:decode(PubB64)
+                            }
+                    end
+            },
+            {ok, KeyBundle};
+        {ok, #{<<"error">> := Error}} ->
+            {error, Error};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @doc Send secure message with metadata validation (Step 1).
+%%
+%% Sends a message using the secure format with proper signing and metadata.
+%% Automatically handles sequence numbers and timestamp generation.
+%%
+%% @param ServerUrl Base URL of the Cryptic server
+%% @param FromUser Sender's user ID
+%% @param ToUser Recipient's user ID
+%% @param Message Message to send
+%% @returns ok | {error, Reason}
+-spec send_message_secure(server_url(), user_id(), user_id(), message()) ->
+    ok | {error, term()}.
+send_message_secure(ServerUrl, FromUser, ToUser, Message) ->
+    %% First get recipient's key bundle
+    case get_key_bundle(ServerUrl, ToUser) of
+        {error, Reason} ->
+            {error, Reason};
+        {ok, KeyBundle} ->
+            %% Load sender's keys
+            case cryptic_lib:load_encrypted_keys("./config", <<"qwe123">>) of
+                {error, Reason} ->
+                    {error, Reason};
+                {ok, SenderKeys} ->
+                    %% Get recipient's public key (signed prekey for now)
+                    #{signed_prekey_public := RecipientPubKey} = KeyBundle,
+
+                    %% Create metadata
+                    SenderIDBin = list_to_binary(FromUser),
+                    RecipientIDBin = list_to_binary(ToUser),
+                    #{key_id := SenderKeyId} = SenderKeys,
+                    #{identity_sign_private := SenderSignKey} = SenderKeys,
+
+                    Timestamp = erlang:system_time(second),
+                    Sequence = cryptic_lib:get_next_sequence(
+                        SenderIDBin, RecipientIDBin
+                    ),
+
+                    Metadata = #{
+                        sender_id => SenderIDBin,
+                        recipient_id => RecipientIDBin,
+                        sender_key_id => SenderKeyId,
+                        timestamp => Timestamp,
+                        sequence => Sequence,
+                        sender_sign_key => SenderSignKey
+                    },
+
+                    %% Encrypt with secure format
+                    case
+                        cryptic_lib:encrypt_message_secure(
+                            Message, Metadata, RecipientPubKey
+                        )
+                    of
+                        {error, Reason} ->
+                            {error, Reason};
+                        {ok, {EphPub, Nonce, Cipher}} ->
+                            %% Send secure message
+                            Command = #{
+                                <<"type">> => <<"send_message_secure">>,
+                                <<"to">> => RecipientIDBin,
+                                <<"ephemeral">> => base64:encode(EphPub),
+                                <<"nonce">> => base64:encode(Nonce),
+                                <<"cipher">> => base64:encode(Cipher),
+                                <<"sender_key_id">> => base64:encode(
+                                    SenderKeyId
+                                ),
+                                <<"timestamp">> => Timestamp,
+                                <<"sequence">> => Sequence
+                            },
+
+                            case send_ws_command(ServerUrl, Command) of
+                                {ok, #{<<"type">> := <<"message_sent">>}} -> ok;
+                                {ok, #{<<"error">> := Error}} -> {error, Error};
+                                {error, Reason} -> {error, Reason}
+                            end
+                    end
+            end
+    end.
+
+%% @doc Receive and decrypt secure messages with validation (Step 1).
+%%
+%% Retrieves and decrypts messages using the secure format with signature
+%% verification and metadata validation.
+%%
+%% @param ServerUrl Base URL of the Cryptic server
+%% @param Username User ID to receive messages for
+%% @param RecipientPrivKey Recipient's private key for decryption
+%% @returns {ok, [Message]} | {error, Reason}
+-spec receive_and_decrypt_messages_secure(server_url(), user_id(), binary()) ->
+    {ok, [message()]} | {error, term()}.
+receive_and_decrypt_messages_secure(ServerUrl, Username, RecipientPrivKey) ->
+    case receive_messages(ServerUrl, Username) of
+        {error, Reason} ->
+            {error, Reason};
+        {ok, MessageBlobs} ->
+            %% Process each message
+            DecryptedMessages = lists:filtermap(
+                fun(Blob) ->
+                    case maps:get(<<"message_format">>, Blob, <<"legacy">>) of
+                        <<"secure_v1">> ->
+                            %% This is a secure message - decrypt it
+                            case
+                                decrypt_secure_message_blob(
+                                    Blob, RecipientPrivKey
+                                )
+                            of
+                                {ok, Message} -> {true, Message};
+                                %% Skip invalid messages
+                                {error, _} -> false
+                            end;
+                        _ ->
+                            %% Legacy message - skip for now
+                            false
+                    end
+                end,
+                MessageBlobs
+            ),
+            {ok, DecryptedMessages}
+    end.
+
+%% @private
+%% @doc Decrypt a secure message blob with validation.
+decrypt_secure_message_blob(Blob, RecipientPrivKey) ->
+    try
+        #{
+            <<"from">> := FromUser,
+            <<"ephemeral">> := EphB64,
+            <<"nonce">> := NonceB64,
+            <<"cipher">> := CipherB64,
+            <<"sequence">> := Sequence
+        } = Blob,
+
+        %% Decode crypto components
+        Ephemeral = base64:decode(EphB64),
+        Nonce = base64:decode(NonceB64),
+        Cipher = base64:decode(CipherB64),
+
+        %% Get sender's public key for signature verification
+        %% For now, we'll need to implement a way to get sender's identity key
+        %% This is a simplified version - in real implementation you'd have
+        %% a key store or fetch from server
+        case get_sender_identity_key(FromUser) of
+            {error, Reason} ->
+                {error, Reason};
+            {ok, SenderPubKey} ->
+                %% Decrypt and verify
+                case
+                    cryptic_lib:decrypt_message_secure(
+                        {Ephemeral, Nonce, Cipher},
+                        RecipientPrivKey,
+                        SenderPubKey
+                    )
+                of
+                    {error, Reason} ->
+                        {error, Reason};
+                    {ok, {Message, Metadata}} ->
+                        %% Validate sequence number
+                        #{
+                            sender_id := SenderID,
+                            recipient_id := RecipientID
+                        } = Metadata,
+
+                        case
+                            cryptic_lib:validate_sequence(
+                                SenderID, RecipientID, Sequence
+                            )
+                        of
+                            false ->
+                                {error, replay_attack};
+                            true ->
+                                %% Update sequence tracker
+                                cryptic_lib:update_sequence(
+                                    SenderID, RecipientID, Sequence
+                                ),
+                                {ok, Message}
+                        end
+                end
+        end
+    catch
+        _:Error -> {error, Error}
+    end.
+
+%% @private
+%% @doc Get sender's identity public key (placeholder implementation).
+get_sender_identity_key(_FromUser) ->
+    %% TODO: Implement proper key store or server lookup
+    %% For now return error to indicate this needs implementation
+    {error, sender_key_not_implemented}.
+
+%% @private
+%% @doc Send WebSocket command (placeholder implementation).
+send_ws_command(_ServerUrl, _Command) ->
+    %% TODO: Implement WebSocket command sending
+    %% For now return error to indicate this needs implementation
+    {error, ws_command_not_implemented}.
 
 %%%===================================================================
 %%% Internal Functions
@@ -662,12 +986,12 @@ extract_message_objects(RespStr) ->
 %% @returns encrypted_blob() map with sender and crypto fields
 parse_single_message(MessageStr) ->
     {EphemeralB64, NonceB64, CipherB64} = parse_message_json(MessageStr),
-    
+
     %% Extract 'from' field
     {match, [FromUser]} = re:run(MessageStr, "\"from\"\\s*:\\s*\"([^\"]+)\"", [
         {capture, [1], list}
     ]),
-    
+
     #{
         from => FromUser,
         ephemeral => EphemeralB64,
@@ -721,7 +1045,9 @@ decrypt_all_messages([EncryptedBlob | Rest], PrivateKey, Acc) ->
 %% @param Nonce Encryption nonce (24 bytes)
 %% @param Cipher Encrypted ciphertext
 %% @returns JSON string representation of the send blob request
--spec format_send_blob_request(string(), string(), binary(), binary(), binary()) -> string().
+-spec format_send_blob_request(
+    string(), string(), binary(), binary(), binary()
+) -> string().
 format_send_blob_request(From, To, Ephemeral, Nonce, Cipher) ->
     EphemeralB64 = base64:encode(Ephemeral),
     NonceB64 = base64:encode(Nonce),
@@ -746,16 +1072,21 @@ format_send_blob_request(From, To, Ephemeral, Nonce, Cipher) ->
 %% @param RespStr JSON array string from `/recv_blobs' endpoint
 %% @returns List of `{SenderId, EphemeralKey, Nonce, Cipher}' tuples with
 %%   binary data already base64-decoded.
--spec parse_recv_blobs_response(string()) -> [{string(), binary(), binary(), binary()}].
+-spec parse_recv_blobs_response(string()) ->
+    [{string(), binary(), binary(), binary()}].
 parse_recv_blobs_response(RespStr) ->
     try
         %% Very basic JSON array parsing - extract objects between braces
         case re:run(RespStr, "\\{[^}]+\\}", [global, {capture, [0], list}]) of
             {match, Matches} ->
-                lists:map(fun([BlobStr]) ->
-                    parse_blob_object(lists:flatten(BlobStr))
-                end, Matches);
-            nomatch -> []
+                lists:map(
+                    fun([BlobStr]) ->
+                        parse_blob_object(lists:flatten(BlobStr))
+                    end,
+                    Matches
+                );
+            nomatch ->
+                []
         end
     catch
         _:_ -> []
@@ -778,7 +1109,11 @@ parse_recv_blobs_response(RespStr) ->
 -spec parse_get_prekey_response(string()) -> {ok, binary()} | {error, term()}.
 parse_get_prekey_response(RespStr) ->
     try
-        case re:run(RespStr, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [{capture, [1], list}]) of
+        case
+            re:run(RespStr, "\"pub\"\\s*:\\s*\"([^\"]+)\"", [
+                {capture, [1], list}
+            ])
+        of
             {match, [PubB64]} ->
                 PubKey = base64:decode(lists:flatten(PubB64)),
                 {ok, PubKey};
@@ -812,7 +1147,11 @@ parse_users_list_response(RespStr) ->
                 {ok, []};
             _ ->
                 %% Use regex to extract all quoted strings from the JSON array
-                case re:run(RespStr, "\"([^\"]+)\"", [global, {capture, [1], list}]) of
+                case
+                    re:run(RespStr, "\"([^\"]+)\"", [
+                        global, {capture, [1], list}
+                    ])
+                of
                     {match, Matches} ->
                         Users = [lists:flatten(Match) || [Match] <- Matches],
                         {ok, Users};
@@ -841,10 +1180,13 @@ parse_users_list_response(RespStr) ->
 %% @param ServerUrl Base URL of the Cryptic server
 %% @param UserId User identifier to check messages for
 %% @returns `{ok, Count}' if successful, `{error, Reason}' if it fails.
--spec peek_message_count(server_url(), user_id()) -> {ok, non_neg_integer()} | {error, term()}.
+-spec peek_message_count(server_url(), user_id()) ->
+    {ok, non_neg_integer()} | {error, term()}.
 peek_message_count(ServerUrl, UserId) ->
-    Url = lists:flatten(io_lib:format("~s/peek_messages/~s", [ServerUrl, UserId])),
-    
+    Url = lists:flatten(
+        io_lib:format("~s/peek_messages/~s", [ServerUrl, UserId])
+    ),
+
     case httpc:request(get, {Url, []}, [], []) of
         {ok, {{_, 200, _}, _, Body}} ->
             %% Parse JSON response to extract count
@@ -886,12 +1228,22 @@ parse_peek_response(Body) ->
 %% @param BlobStr Single JSON object string
 %% @returns `{SenderId, EphemeralKey, Nonce, Cipher}' tuple with binary data
 parse_blob_object(BlobStr) ->
-    {match, [From]} = re:run(BlobStr, "\"from\"\\s*:\\s*\"([^\"]+)\"", [{capture, [1], list}]),
-    {match, [EphB64]} = re:run(BlobStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [{capture, [1], list}]),
-    {match, [NonceB64]} = re:run(BlobStr, "\"nonce\"\\s*:\\s*\"([^\"]+)\"", [{capture, [1], list}]),
-    {match, [CiphB64]} = re:run(BlobStr, "\"cipher\"\\s*:\\s*\"([^\"]+)\"", [{capture, [1], list}]),
-    
-    {lists:flatten(From),
-     base64:decode(lists:flatten(EphB64)),
-     base64:decode(lists:flatten(NonceB64)),
-     base64:decode(lists:flatten(CiphB64))}.
+    {match, [From]} = re:run(BlobStr, "\"from\"\\s*:\\s*\"([^\"]+)\"", [
+        {capture, [1], list}
+    ]),
+    {match, [EphB64]} = re:run(BlobStr, "\"ephemeral\"\\s*:\\s*\"([^\"]+)\"", [
+        {capture, [1], list}
+    ]),
+    {match, [NonceB64]} = re:run(BlobStr, "\"nonce\"\\s*:\\s*\"([^\"]+)\"", [
+        {capture, [1], list}
+    ]),
+    {match, [CiphB64]} = re:run(BlobStr, "\"cipher\"\\s*:\\s*\"([^\"]+)\"", [
+        {capture, [1], list}
+    ]),
+
+    {
+        lists:flatten(From),
+        base64:decode(lists:flatten(EphB64)),
+        base64:decode(lists:flatten(NonceB64)),
+        base64:decode(lists:flatten(CiphB64))
+    }.

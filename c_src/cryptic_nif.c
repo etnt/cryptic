@@ -26,20 +26,32 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM load_info)
 // Generate X25519 keypair
 static ERL_NIF_TERM gen_keypair(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    unsigned char pk[crypto_box_PUBLICKEYBYTES];
-    unsigned char sk[crypto_box_SECRETKEYBYTES];
+    unsigned char pk[crypto_scalarmult_BYTES];
+    unsigned char sk[crypto_scalarmult_SCALARBYTES];
 
-    crypto_box_keypair(pk, sk);
+    // Generate random private key
+    randombytes_buf(sk, crypto_scalarmult_SCALARBYTES);
+
+    // Clamp the private key for X25519 (this is crucial!)
+    sk[0] &= 248;
+    sk[31] &= 127;
+    sk[31] |= 64;
+
+    // Compute public key from private key
+    if (crypto_scalarmult_base(pk, sk) != 0)
+    {
+        return enif_make_atom(env, "error");
+    }
 
     ERL_NIF_TERM public_key, secret_key;
-    unsigned char *pk_data = enif_make_new_binary(env, crypto_box_PUBLICKEYBYTES, &public_key);
-    unsigned char *sk_data = enif_make_new_binary(env, crypto_box_SECRETKEYBYTES, &secret_key);
+    unsigned char *pk_data = enif_make_new_binary(env, crypto_scalarmult_BYTES, &public_key);
+    unsigned char *sk_data = enif_make_new_binary(env, crypto_scalarmult_SCALARBYTES, &secret_key);
 
-    memcpy(pk_data, pk, crypto_box_PUBLICKEYBYTES);
-    memcpy(sk_data, sk, crypto_box_SECRETKEYBYTES);
+    memcpy(pk_data, pk, crypto_scalarmult_BYTES);
+    memcpy(sk_data, sk, crypto_scalarmult_SCALARBYTES);
 
     // Clear sensitive data
-    sodium_memzero(sk, crypto_box_SECRETKEYBYTES);
+    sodium_memzero(sk, crypto_scalarmult_SCALARBYTES);
 
     return enif_make_tuple2(env, public_key, secret_key);
 }
@@ -208,7 +220,7 @@ static ERL_NIF_TERM ed25519_sk_to_x25519_sk(ErlNifEnv *env, int argc, const ERL_
     }
 
     ERL_NIF_TERM result;
-    unsigned char *x25519_sk = enif_make_new_binary(env, crypto_box_SECRETKEYBYTES, &result);
+    unsigned char *x25519_sk = enif_make_new_binary(env, crypto_scalarmult_SCALARBYTES, &result);
 
     if (crypto_sign_ed25519_sk_to_curve25519(x25519_sk, ed25519_sk) != 0)
     {
@@ -235,7 +247,7 @@ static ERL_NIF_TERM ed25519_pk_to_x25519_pk(ErlNifEnv *env, int argc, const ERL_
     }
 
     ERL_NIF_TERM result;
-    unsigned char *x25519_pk = enif_make_new_binary(env, crypto_box_PUBLICKEYBYTES, &result);
+    unsigned char *x25519_pk = enif_make_new_binary(env, crypto_scalarmult_BYTES, &result);
 
     if (crypto_sign_ed25519_pk_to_curve25519(x25519_pk, ed25519_pk.data) != 0)
     {

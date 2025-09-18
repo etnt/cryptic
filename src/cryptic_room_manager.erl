@@ -380,8 +380,9 @@ get_room_messages(RoomNameOrId, Since) ->
 %%% @param RoomIdOrName The room identifier (UUID) or room name
 %%% @returns `true' if user is a member, `false' otherwise
 -spec is_room_member(binary(), binary()) -> boolean().
-is_room_member(Username, RoomId)
-    when is_list(Username) andalso is_binary(RoomId) ->
+is_room_member(Username, RoomId) when
+    is_binary(Username) andalso is_binary(RoomId)
+->
     % First try to get the actual room name
     case cryptic_room_manager:get_room_members(RoomId) of
         {ok, Members} ->
@@ -425,13 +426,12 @@ encrypt_for_room_members(PlaintextMessage, Members, FromUsername) ->
 
 %% Encrypt a message for a specific user using their prekey
 %% Uses the same encryption scheme as cryptic_client_lib for compatibility
--spec encrypt_message_for_user(binary(), string()) ->
+-spec encrypt_message_for_user(binary(), binary()) ->
     {ok, binary(), binary()} | {error, term()}.
 encrypt_message_for_user(PlaintextMessage, Username) ->
-    ?dbg("SERVER ENCRYPT: Starting encryption for user=~p, message=~p", [
-        Username, PlaintextMessage
-    ]),
-    case cryptic_lib:get_prekey(Username) of
+    % Convert binary username to string for cryptic_lib compatibility
+    UsernameStr = binary_to_list(Username),
+    case cryptic_lib:get_prekey(UsernameStr) of
         {ok, RecipientPublicKey} ->
             try
                 % Use the same encryption scheme as cryptic_client_lib:encrypt_message

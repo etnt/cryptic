@@ -169,7 +169,6 @@
 start(Username) ->
     start(Username, "localhost").
 
-
 %% @doc Start the WebSocket mTLS UI with specified certificate and server.
 %%
 %% Initializes the full-screen terminal interface with WebSocket mTLS including:
@@ -236,7 +235,7 @@ start(Username, ServerHost) ->
 
     %% Set up event handlers for UI client with client configuration
     cryptic_event_manager:setup_event_handlers(#{
-        log_type => client, log_dir => "logs"
+        log_type => client, log_dir => "logs", username => Username
     }),
 
     %% Configure cecho settings

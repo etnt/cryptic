@@ -223,6 +223,73 @@ handle_command(
         _:_ ->
             {error, "Invalid prekey format"}
     end;
+%% Handle key bundle upload (Step 1 implementation)
+handle_command(
+    #{
+        <<"type">> := <<"upload_key_bundle">>,
+        <<"identity_public">> := IdentityPubB64,
+        <<"signed_prekey_public">> := SignedPrekeyPubB64,
+        <<"signed_prekey_signature">> := SignatureB64,
+        <<"one_time_prekeys">> := OtpkListB64,
+        <<"key_id">> := KeyIdB64
+    },
+    Username,
+    _State
+) ->
+    try
+        %% Decode all the key components
+        IdentityPub = base64:decode(IdentityPubB64),
+        SignedPrekeyPub = base64:decode(SignedPrekeyPubB64),
+        Signature = base64:decode(SignatureB64),
+        KeyId = base64:decode(KeyIdB64),
+
+        %% Decode one-time prekeys
+        OtpkList = lists:map(
+            fun(#{<<"id">> := IdB64, <<"public">> := PubB64}) ->
+                #{
+                    id => base64:decode(IdB64),
+                    public => base64:decode(PubB64)
+                }
+            end,
+            OtpkListB64
+        ),
+
+        %% Verify the signed prekey signature
+        case
+            cryptic_lib:verify_signature(
+                SignedPrekeyPub, Signature, IdentityPub
+            )
+        of
+            false ->
+                {error, "Invalid signed prekey signature"};
+            true ->
+                %% Create the key bundle
+                KeyBundle = #{
+                    identity_sign_public => IdentityPub,
+                    signed_prekey_public => SignedPrekeyPub,
+                    signed_prekey_signature => Signature,
+                    one_time_prekeys => OtpkList,
+                    key_id => KeyId
+                },
+
+                %% Store the key bundle
+                case cryptic_lib:store_key_bundle(Username, KeyBundle) of
+                    ok ->
+                        {reply, #{
+                            type => <<"success">>,
+                            message => <<"Key bundle uploaded successfully">>
+                        }};
+                    {error, Reason} ->
+                        {error,
+                            io_lib:format("Failed to store key bundle: ~p", [
+                                Reason
+                            ])}
+                end
+        end
+    catch
+        _:Error ->
+            {error, io_lib:format("Invalid key bundle format: ~p", [Error])}
+    end;
 handle_command(
     #{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State
 ) ->
@@ -249,6 +316,61 @@ handle_command(
                 user => UserB,
                 status => <<"offline">>,
                 message => <<"User is not currently online">>
+            },
+            {reply, Response}
+    end;
+%% Get key bundle for X3DH (Step 1 implementation)
+handle_command(
+    #{<<"type">> := <<"get_key_bundle">>, <<"user">> := UserB},
+    _Username,
+    _State
+) ->
+    User = binary_to_list(UserB),
+    case cryptic_lib:get_key_bundle(User) of
+        {error, not_found} ->
+            {error, "User key bundle not found"};
+        {ok, BundleData} ->
+            #{
+                identity_sign_public := IdentityPub,
+                signed_prekey := #{
+                    public := SignedPrekeyPub,
+                    signature := Signature
+                },
+                one_time_prekeys := OtpkList,
+                key_id := KeyId
+            } = BundleData,
+
+            %% Select and mark one OTPK as consumed (if available)
+            {SelectedOtpk, RemainingOtpks} =
+                case OtpkList of
+                    [] ->
+                        {null, []};
+                    [FirstOtpk | RestOtpks] ->
+                        %% Mark this OTPK as consumed
+                        #{id := FirstOtpkId} = FirstOtpk,
+                        cryptic_lib:mark_otpk_consumed(User, FirstOtpkId),
+                        {FirstOtpk, RestOtpks}
+                end,
+
+            %% Prepare response
+            Response = #{
+                type => <<"key_bundle">>,
+                user => UserB,
+                key_id => base64:encode(KeyId),
+                identity_public => base64:encode(IdentityPub),
+                signed_prekey_public => base64:encode(SignedPrekeyPub),
+                signed_prekey_signature => base64:encode(Signature),
+                one_time_prekey =>
+                    case SelectedOtpk of
+                        null ->
+                            null;
+                        #{id := OtpkIdResp, public := OtpkPubResp} ->
+                            #{
+                                id => base64:encode(OtpkIdResp),
+                                public => base64:encode(OtpkPubResp)
+                            }
+                    end,
+                remaining_otpks => length(RemainingOtpks)
             },
             {reply, Response}
     end;
@@ -292,6 +414,65 @@ handle_command(
         success => true,
         message => <<"Message sent">>
     }};
+%% Handle secure message format (Step 1 implementation)
+handle_command(
+    #{
+        <<"type">> := <<"send_message_secure">>,
+        <<"to">> := ToUserB,
+        <<"ephemeral">> := EphB64,
+        <<"nonce">> := NonceB64,
+        <<"cipher">> := CipherB64,
+        <<"sender_key_id">> := SenderKeyIdB64,
+        <<"timestamp">> := ClientTimestamp,
+        <<"sequence">> := Sequence
+    },
+    Username,
+    _State
+) ->
+    ToUser = binary_to_list(ToUserB),
+
+    %% Validate timestamp (reject messages older than 5 minutes or from future)
+    ServerTime = erlang:system_time(second),
+    case abs(ServerTime - ClientTimestamp) < 300 of
+        false ->
+            {reply, #{
+                type => <<"error">>,
+                error => <<"invalid_timestamp">>,
+                message => <<"Message timestamp too old or from future">>
+            }};
+        true ->
+            %% Create secure message blob with metadata
+            MessageBlob = #{
+                from => Username,
+                to => ToUser,
+                ephemeral => EphB64,
+                nonce => NonceB64,
+                cipher => CipherB64,
+                sender_key_id => SenderKeyIdB64,
+                client_timestamp => ClientTimestamp,
+                server_timestamp => ServerTime,
+                sequence => Sequence,
+                message_format => <<"secure_v1">>
+            },
+
+            %% Store message
+            cryptic_lib:store_message(ToUser, MessageBlob),
+
+            %% Try to deliver immediately if user is online
+            case find_user_connection(ToUser) of
+                {ok, Pid} ->
+                    Pid ! {message, Username, MessageBlob};
+                not_found ->
+                    % Message stored for later retrieval
+                    ok
+            end,
+
+            {reply, #{
+                type => <<"message_sent">>,
+                success => true,
+                message => <<"Secure message sent">>
+            }}
+    end;
 %% Handle encrypted room messages (proper E2EE implementation)
 %% messages to currently connected users.
 %%

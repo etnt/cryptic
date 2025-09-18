@@ -47,13 +47,18 @@ init(Args) ->
         #{log_type := Type} when Type =:= server; Type =:= client -> Type;
         _ -> server  % Default to server
     end,
+
+    Username = case Args of
+        #{username := U} -> U;
+        _ -> ""
+    end,
     
     % Ensure log directory exists
     case filelib:ensure_dir(filename:join([LogDir, "dummy"])) of
         ok ->
             LogFileName = case LogType of
                 server -> "server.log";
-                client -> "client.log"
+                client -> "client-"++Username++".log"
             end,
             LogFile = filename:join([LogDir, LogFileName]),
             case file:open(LogFile, [write, append, {encoding, utf8}]) of
