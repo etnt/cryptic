@@ -10,8 +10,16 @@ C_SRC_OUTPUT ?= $(CURDIR)/../priv/$(PROJECT).so
 
 # System specific C compiler/flags.
 UNAME_SYS := $(shell uname -s)
-UNAME_ARCH := $(shell uname -m)
+# Allow override of architecture, default to uname -m
+UNAME_ARCH ?= $(shell uname -m)
+# On macOS, prefer arm64 if we're on Apple Silicon but running under Rosetta
 ifeq ($(UNAME_SYS), Darwin)
+	# Check if we're on Apple Silicon but uname reports x86_64 (Rosetta)
+	ifeq ($(shell sysctl -n machdep.cpu.brand_string | grep -q "Apple" && echo apple),apple)
+		ifeq ($(UNAME_ARCH), x86_64)
+			UNAME_ARCH := arm64
+		endif
+	endif
 	CC ?= cc
 	CFLAGS ?= -O3 -std=c99 -arch $(UNAME_ARCH) -finline-functions -Wall -Wmissing-prototypes
 	CXXFLAGS ?= -O3 -arch $(UNAME_ARCH) -finline-functions -Wall
