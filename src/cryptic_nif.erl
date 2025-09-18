@@ -53,7 +53,9 @@
     scalarmult/2,
     aead_encrypt/3,
     aead_decrypt/4,
-    rand_bytes/1
+    rand_bytes/1,
+    ed25519_sk_to_x25519_sk/1,
+    ed25519_pk_to_x25519_pk/1
 ]).
 
 -on_load(init/0).
@@ -125,10 +127,10 @@ gen_keypair() ->
 %% ```
 %% % Alice generates her key pair
 %% {AlicePub, AlicePriv} = cryptic_nif:gen_keypair(),
-%% 
-%% % Bob generates his key pair  
+%%
+%% % Bob generates his key pair
 %% {BobPub, BobPriv} = cryptic_nif:gen_keypair(),
-%% 
+%%
 %% % Both parties compute the same shared secret
 %% SharedSecret1 = cryptic_nif:scalarmult(AlicePriv, BobPub),
 %% SharedSecret2 = cryptic_nif:scalarmult(BobPriv, AlicePub),
@@ -215,7 +217,7 @@ aead_encrypt(_Plaintext, _Key, _AAD) ->
 %% ```
 %% % Using data from aead_encrypt/3
 %% case cryptic_nif:aead_decrypt(Ciphertext, Key, Nonce, AAD) of
-%%     {ok, Plaintext} -> 
+%%     {ok, Plaintext} ->
 %%         % Decryption successful, data is authentic
 %%         process_plaintext(Plaintext);
 %%     {error, auth_failed} ->
@@ -265,10 +267,10 @@ aead_decrypt(_Ciphertext, _Key, _Nonce, _AAD) ->
 %% ```
 %% % Generate a 32-byte encryption key
 %% Key = cryptic_nif:rand_bytes(32),
-%% 
+%%
 %% % Generate a 12-byte nonce
 %% Nonce = cryptic_nif:rand_bytes(12),
-%% 
+%%
 %% % Generate a random salt
 %% Salt = cryptic_nif:rand_bytes(16).
 %% '''
@@ -287,4 +289,60 @@ aead_decrypt(_Ciphertext, _Key, _Nonce, _AAD) ->
 %% @throws {error, atom()} | {nif_not_loaded, atom()}
 
 rand_bytes(_Size) ->
+    erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc Convert Ed25519 private key to X25519 private key
+%%
+%% Performs a secure conversion from an Ed25519 signing private key to an
+%% X25519 ECDH private key using libsodium's crypto_sign_ed25519_sk_to_curve25519.
+%% This conversion is mathematically sound and preserves the cryptographic
+%% relationship between the keys.
+%%
+%% == Usage ==
+%%
+%% ```
+%% {Ed25519Pub, Ed25519Priv} = crypto:generate_key(eddsa, ed25519),
+%% X25519Priv = cryptic_nif:ed25519_sk_to_x25519_sk(Ed25519Priv).
+%% '''
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>The conversion is deterministic - same Ed25519 key produces same X25519 key</li>
+%%%   <li>The converted key is cryptographically valid for X25519 operations</li>
+%%%   <li>Both keys should be treated with equal security precautions</li>
+%% </ul>
+%%
+%% @param Ed25519SecretKey The Ed25519 private key (32-byte binary)
+%% @returns X25519 private key (32-byte binary)
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+ed25519_sk_to_x25519_sk(_Ed25519SecretKey) ->
+    erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc Convert Ed25519 public key to X25519 public key
+%%
+%% Performs a secure conversion from an Ed25519 signing public key to an
+%% X25519 ECDH public key using libsodium's crypto_sign_ed25519_pk_to_curve25519.
+%% This conversion maintains the mathematical relationship between the corresponding
+%% private keys.
+%%
+%% == Usage ==
+%%
+%% ```
+%% {Ed25519Pub, Ed25519Priv} = crypto:generate_key(eddsa, ed25519),
+%% X25519Pub = cryptic_nif:ed25519_pk_to_x25519_pk(Ed25519Pub).
+%% '''
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>The conversion is deterministic and publicly computable</li>
+%%%   <li>Both public keys can be safely shared</li>
+%%%   <li>The converted X25519 key corresponds to the converted private key</li>
+%% </ul>
+%%
+%% @param Ed25519PublicKey The Ed25519 public key (32-byte binary)
+%% @returns X25519 public key (32-byte binary)
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+ed25519_pk_to_x25519_pk(_Ed25519PublicKey) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).

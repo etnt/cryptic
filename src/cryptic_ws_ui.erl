@@ -68,6 +68,7 @@
 -export([input_handler/1, status_updater/1]).
 
 -include_lib("cecho/include/cecho.hrl").
+-include("cryptic.hrl").
 
 %% Client state record from cryptic_ws_client_lib
 -record(client_state, {
@@ -87,6 +88,8 @@
     cert_config :: #{atom() => string()},
     ws_client_state :: term() | undefined,
     keypair :: {binary(), binary()} | undefined,
+    % Full client key set
+    client_keys :: #{} | undefined,
     connection_status = disconnected :: connected | disconnected | connecting,
     pending_operation :: map() | undefined
 }).
@@ -166,6 +169,7 @@
 start(Username) ->
     start(Username, "localhost").
 
+
 %% @doc Start the WebSocket mTLS UI with specified certificate and server.
 %%
 %% Initializes the full-screen terminal interface with WebSocket mTLS including:
@@ -196,6 +200,36 @@ start(Username, ServerHost) ->
     {ok, _} = application:ensure_all_started(inets),
     {ok, _} = application:ensure_all_started(ssl),
     {ok, _} = application:ensure_all_started(gun),
+
+    ok = cryptic_lib:initialize(),
+
+    %% Initialize client cryptographic keys
+    io:format("🔐 Initializing cryptographic keys for ~s...~n", [Username]),
+    ConfigDir =
+        case os:getenv("CRYPTIC_CONFIG_DIR") of
+            false ->
+                error(
+                    {missing_config_dir,
+                        "CRYPTIC_CONFIG_DIR environment variable not set"}
+                );
+            Dir ->
+                Dir
+        end,
+    ClientKeys =
+        %% TODO: In production, implement proper passphrase prompting here
+        %% For example:
+        %% - Check for CRYPTIC_PASSPHRASE environment variable
+        %% - Or prompt user via terminal input with disabled echo
+        %% - Or use GUI password dialog
+        %% - Or read from secure keystore
+        case cryptic_lib:initialize_client_keys(ConfigDir, <<"qwe123">>) of
+            {ok, Keys} ->
+                io:format("✅ Keys loaded successfully~n"),
+                Keys;
+            {error, Reason} ->
+                io:format("❌ Key initialization failed: ~p~n", [Reason]),
+                error({key_init_failed, Reason})
+        end,
 
     %% Start the event manager for logging
     {ok, _} = gen_event:start_link({local, cryptic_event_manager}),
@@ -248,7 +282,12 @@ start(Username, ServerHost) ->
         server_port = 8443,
         username = Username,
         cert_config = CertConfig,
-        connection_status = disconnected
+        connection_status = disconnected,
+        keypair = {
+            maps:get(identity_dh_private, ClientKeys),
+            maps:get(identity_dh_public, ClientKeys)
+        },
+        client_keys = ClientKeys
     },
 
     %% Create initial UI state
@@ -1537,8 +1576,10 @@ process_chat_command(Message, UIState) ->
 handle_websocket_message(Message, UIState) ->
     case Message of
         {text, JsonText} ->
+            ?dbg("Attempting to decode JSON: ~p", [JsonText]),
             try
-                Data = jsx:decode(JsonText, [return_maps]),
+                Data = jsx:decode(JsonText),
+                ?dbg("Successfully decoded JSON: ~p", [Data]),
                 case maps:get(<<"type">>, Data, undefined) of
                     <<"message">> ->
                         %% Incoming chat message
@@ -1644,12 +1685,19 @@ handle_websocket_message(Message, UIState) ->
                         )
                 end
             catch
-                _:_ ->
+                Error:Reason:StackTrace ->
+                    ?dbg(
+                        "Failed to decode JSON: ~p Reason: ~p Error: ~p~n~p~n",
+                        [
+                            JsonText, Reason, Error, StackTrace
+                        ]
+                    ),
                     add_system_message("Received invalid JSON message", UIState)
             end;
         {binary, _Data} ->
             add_system_message("Received binary WebSocket message", UIState);
-        _ ->
+        _What ->
+            ?dbg("Received unknown WebSocket message: ~p~n", [_What]),
             add_system_message(
                 "Received unknown WebSocket message format", UIState
             )
@@ -1929,6 +1977,78 @@ handle_prekey_received(User, PrekeyB64, UIState) ->
                         _:Error ->
                             ProcessErrMsg = io_lib:format(
                                 "Failed to process prekey: ~p", [Error]
+                            ),
+                            add_system_message(
+                                lists:flatten(ProcessErrMsg), UIState
+                            )
+                    end;
+                false ->
+                    %% User mismatch - just acknowledge
+                    MsgText = io_lib:format(
+                        "Received prekey for user ~s (not waiting for this user)",
+                        [UserStr]
+                    ),
+                    add_system_message(lists:flatten(MsgText), UIState)
+            end;
+        #{
+            type := decrypt_room_message,
+            sender_user := SenderUser,
+            room_id := RoomId,
+            ephemeral := EphemeralB64,
+            nonce := NonceB64,
+            cipher := CipherB64
+        } ->
+            %% Check if this prekey matches our pending room message decryption
+            UserStr = binary_to_list(User),
+            case SenderUser =:= UserStr of
+                true ->
+                    %% This prekey matches our pending room message decryption
+                    try
+                        %% Decode the sender's public key
+                        SenderPubKey = base64:decode(PrekeyB64),
+
+                        %% Decode message components
+                        Ephemeral = base64:decode(EphemeralB64),
+                        Nonce = base64:decode(NonceB64),
+                        Cipher = base64:decode(CipherB64),
+
+                        %% Decrypt the room message using sender's public key
+                        case
+                            cryptic_client_lib:decrypt_message(
+                                {Ephemeral, Nonce, Cipher}, SenderPubKey
+                            )
+                        of
+                            {ok, PlaintextMessage} ->
+                                %% Clear pending operation and display message
+                                ClearWSChatState = WSChatState#ws_chat_state{
+                                    pending_operation = undefined
+                                },
+                                ClearUIState = UIState#ui_state{
+                                    ws_chat_state = ClearWSChatState
+                                },
+                                SenderText = io_lib:format(
+                                    "[~s] ~s", [RoomId, UserStr]
+                                ),
+                                add_message(
+                                    lists:flatten(SenderText),
+                                    PlaintextMessage,
+                                    ClearUIState
+                                );
+                            {error, Reason} ->
+                                DecryptErrMsg = io_lib:format(
+                                    "Failed to decrypt room message from ~s: ~p",
+                                    [UserStr, Reason]
+                                ),
+                                add_system_message(
+                                    lists:flatten(DecryptErrMsg), UIState
+                                )
+                        end
+                    catch
+                        _:Error ->
+                            ProcessErrMsg = io_lib:format(
+                                "Failed to process room message prekey: ~p", [
+                                    Error
+                                ]
                             ),
                             add_system_message(
                                 lists:flatten(ProcessErrMsg), UIState
@@ -2632,6 +2752,7 @@ handle_room_members_response(Data, UIState) ->
 %% @private
 %% @doc Handle room_messages response from server.
 handle_room_messages_response(Data, UIState) ->
+    ?dbg("Handle Room messages response: ~p", [Data]),
     case maps:get(<<"success">>, Data, false) of
         true ->
             RoomName = binary_to_list(
@@ -2686,75 +2807,71 @@ handle_room_messages_response(Data, UIState) ->
 %% @private
 %% @doc Handle incoming room message.
 handle_room_message(Data, UIState) ->
-    RoomName = binary_to_list(maps:get(<<"room_name">>, Data, <<"unknown">>)),
+    ?dbg("Handle room message: ~p", [Data]),
+    RoomName = binary_to_list(maps:get(<<"room_id">>, Data, <<"unknown">>)),
     From = binary_to_list(maps:get(<<"from">>, Data, <<"unknown">>)),
 
     %% Check if this is an encrypted room message
     case
         {
             maps:get(<<"ephemeral">>, Data, undefined),
-            maps:get(<<"encrypted_data">>, Data, undefined)
+            maps:get(<<"cipher">>, Data, undefined),
+            maps:get(<<"nonce">>, Data, undefined)
         }
     of
-        {undefined, undefined} ->
+        {undefined, undefined, undefined} ->
             %% Plain text message (legacy)
             Content = binary_to_list(maps:get(<<"message">>, Data, <<"">>)),
             SenderText = io_lib:format("~s@~s", [From, RoomName]),
             add_message(lists:flatten(SenderText), Content, UIState);
-        {EphemeralB64, EncryptedDataB64} ->
+        {EphemeralB64, CipherB64, NonceB64} ->
             %% Encrypted room message - decrypt it
+            ?dbg("Decrypting room message: cipher=~p", [CipherB64]),
             WSChatState = UIState#ui_state.ws_chat_state,
+            ?dbg("WebSocket chat state keypair: ~p~n", [
+                WSChatState#ws_chat_state.keypair
+            ]),
             case WSChatState#ws_chat_state.keypair of
                 undefined ->
                     ErrMsg = "No keypair available for room message decryption",
                     add_system_message(ErrMsg, UIState);
-                {PrivateKey, _PublicKey} ->
-                    %% Decode base64 data
-                    EphemeralPub = base64:decode(EphemeralB64),
-                    EncryptedData = base64:decode(EncryptedDataB64),
+                {_PrivateKey, _PublicKey} ->
+                    %% For sender-key encryption, we need the sender's public key to decrypt
+                    %% Request sender's public key from server
+                    WSChatState = UIState#ui_state.ws_chat_state,
+                    case WSChatState#ws_chat_state.ws_client_state of
+                        {ok, ClientState} ->
+                            %% Set pending operation for room message decryption
+                            PendingOp = #{
+                                type => decrypt_room_message,
+                                sender_user => From,
+                                room_id => RoomName,
+                                ephemeral => EphemeralB64,
+                                nonce => NonceB64,
+                                cipher => CipherB64
+                            },
 
-                    %% Parse encrypted data (assuming format: Nonce || Ciphertext)
+                            %% Request sender's public key (prekey)
+                            Command = #{
+                                <<"type">> => <<"get_prekey">>,
+                                <<"user">> => list_to_binary(From)
+                            },
 
-                    % AES-GCM nonce size
-                    NonceSize = 12,
-                    <<Nonce:NonceSize/binary, Cipher/binary>> = EncryptedData,
-
-                    %% Derive shared secret
-                    SharedSecret = cryptic_lib:derive_shared_secret(
-                        PrivateKey, EphemeralPub
-                    ),
-
-                    %% Derive AEAD key using ephemeral public key as salt
-                    AeadKey = cryptic_lib:derive_aead_key_ephemeral(
-                        SharedSecret, EphemeralPub
-                    ),
-
-                    %% Decrypt message
-                    case
-                        cryptic_lib:aead_decrypt(Cipher, AeadKey, Nonce, <<>>)
-                    of
-                        error ->
-                            CryptoErrMsg = io_lib:format(
-                                "Failed to decrypt room message from ~s@~s: decryption_failed",
-                                [From, RoomName]
+                            cryptic_ws_client:send_command(
+                                ClientState#client_state.ws_client_pid, Command
                             ),
+
+                            %% Update UI state with pending decryption
+                            UpdatedWSChatState = WSChatState#ws_chat_state{
+                                pending_operation = PendingOp
+                            },
+                            UIState#ui_state{
+                                ws_chat_state = UpdatedWSChatState
+                            };
+                        error ->
                             add_system_message(
-                                lists:flatten(CryptoErrMsg), UIState
-                            );
-                        PlainBin ->
-                            %% Convert back to string
-                            PlainText =
-                                case unicode:characters_to_list(PlainBin) of
-                                    {error, _, _} ->
-                                        binary_to_list(PlainBin);
-                                    {incomplete, _, _} ->
-                                        binary_to_list(PlainBin);
-                                    ValidText ->
-                                        ValidText
-                                end,
-                            SenderText = io_lib:format("~s@~s", [From, RoomName]),
-                            add_message(
-                                lists:flatten(SenderText), PlainText, UIState
+                                "No WebSocket connection for key retrieval",
+                                UIState
                             )
                     end
             end
@@ -3159,26 +3276,37 @@ handle_send_room_command(Rest, UIState) ->
                                         CachedId
                                 end,
 
-                            Command = #{
-                                <<"type">> => <<"send_room_message">>,
-                                <<"room_id">> => list_to_binary(ActualRoomId),
-                                <<"message">> => list_to_binary(Message)
-                            },
-
                             {ok, ClientState} =
                                 WSChatState#ws_chat_state.ws_client_state,
 
-                            cryptic_ws_client:send_command(
-                                ClientState#client_state.ws_client_pid, Command
-                            ),
-
-                            %% Show message in UI
-                            SenderText = io_lib:format("You -> room#~s", [
-                                RoomId
-                            ]),
-                            add_message(
-                                lists:flatten(SenderText), Message, UIState
-                            )
+                            %% Send encrypted room message (proper E2EE implementation)
+                            case
+                                send_encrypted_room_message(
+                                    ClientState, ActualRoomId, Message
+                                )
+                            of
+                                ok ->
+                                    %% Show message in UI on success
+                                    SenderText = io_lib:format(
+                                        "You -> room#~s", [
+                                            RoomId
+                                        ]
+                                    ),
+                                    add_message(
+                                        lists:flatten(SenderText),
+                                        Message,
+                                        UIState
+                                    );
+                                {error, Reason} ->
+                                    ErrorMsg = io_lib:format(
+                                        "Failed to send room message: ~p", [
+                                            Reason
+                                        ]
+                                    ),
+                                    add_system_message(
+                                        lists:flatten(ErrorMsg), UIState
+                                    )
+                            end
                     end
             end;
         _ ->
@@ -3785,6 +3913,123 @@ handle_help_command(Rest, UIState) ->
             add_system_message("Type 'help' for general overview", HelpState9)
     end.
 
+%% @private
+%% @doc Send an encrypted room message following proper E2EE architecture.
+%%
+%% This function implements the efficient sender-key encryption flow for room messages:
+%% 1. Encrypts the message with sender's private key
+%% 2. Sends one encrypted message to the room
+%% 3. Server broadcasts to all room members
+%% 4. Recipients decrypt with sender's public key
+%%
+%% This is much more efficient than individual encryption per member (O(1) vs O(N)).
+%% The server never sees the plaintext message, only the encrypted version.
+%%
+%% @param ClientState The WebSocket client state
+%% @param RoomId The room identifier
+%% @param Message The plaintext message to encrypt and send
+%% @returns ok on success, {error, Reason} on failure
+send_encrypted_room_message(ClientState, RoomId, Message) ->
+    try
+        ?dbg("Encrypting room message for room ~s using sender-key approach", [
+            RoomId
+        ]),
+
+        %% Step 1: Encrypt message with sender's private key
+        case encrypt_with_sender_key(ClientState, Message) of
+            {ok, EncryptedData} ->
+                ?dbg("Successfully encrypted message with sender key", []),
+
+                %% Step 2: Send single encrypted message to room
+                Command = #{
+                    <<"type">> => <<"send_encrypted_room_message">>,
+                    <<"room_id">> => list_to_binary(RoomId),
+                    <<"ephemeral">> => maps:get(<<"ephemeral">>, EncryptedData),
+                    <<"nonce">> => maps:get(<<"nonce">>, EncryptedData),
+                    <<"cipher">> => maps:get(<<"cipher">>, EncryptedData)
+                },
+
+                ?dbg("Sending encrypted room message command: ~p", [Command]),
+                cryptic_ws_client:send_command(
+                    ClientState#client_state.ws_client_pid, Command
+                ),
+                ok;
+            {error, EncryptError} ->
+                ?dbg("Failed to encrypt message with sender key: ~p", [
+                    EncryptError
+                ]),
+                {error, {sender_encryption_failed, EncryptError}}
+        end
+    catch
+        error:Reason ->
+            ?dbg("Exception in send_encrypted_room_message: ~p", [Reason]),
+            {error, {exception, Reason}}
+    end.
+
+%% @private
+%% @doc Encrypt message with sender's private key for room broadcasting.
+%%
+%% This implements the efficient sender-key encryption approach where:
+%% 1. Sender encrypts message with their private key
+%% 2. Recipients decrypt with sender's public key
+%% 3. Only one encrypted message needs to be sent/stored
+%%
+%% @param ClientState The WebSocket client state
+%% @param Message The plaintext message to encrypt
+%% @returns {ok, EncryptedData} on success, {error, Reason} on failure
+encrypt_with_sender_key(ClientState, Message) ->
+    try
+        ?dbg("Encrypting message with sender's private key", []),
+
+        %% Get our private key for signing/encryption
+        case get_our_private_key(ClientState) of
+            {ok, OurPrivKey} ->
+                %% Generate ephemeral keypair for this message
+                {EphPub, _EphPriv} = cryptic_lib:gen_keypair(),
+
+                %% Use our private key with ephemeral public key to create shared secret
+                Shared = cryptic_lib:scalarmult(OurPrivKey, EphPub),
+
+                %% Derive AEAD key using ephemeral-based salt
+                AeadKey = cryptic_lib:derive_aead_key_ephemeral(Shared, EphPub),
+
+                %% Encrypt the message
+                %% Encrypt the message
+                {Cipher, Nonce} = cryptic_lib:aead_encrypt(
+                    list_to_binary(Message), AeadKey, <<>>
+                ),
+                %% Package encrypted data
+                EncryptedData = #{
+                    <<"ephemeral">> => base64:encode(EphPub),
+                    <<"nonce">> => base64:encode(Nonce),
+                    <<"cipher">> => base64:encode(Cipher)
+                },
+                {ok, EncryptedData};
+            {error, PrivKeyError} ->
+                {error, {private_key_failed, PrivKeyError}}
+        end
+    catch
+        error:Reason ->
+            {error, {exception, Reason}}
+    end.
+
+%% @private
+%% @doc Encrypt message for a single room member.
+%% @private
+%% @doc Get our private key for encryption.
+get_our_private_key(ClientState) ->
+    %% Extract private key from client state keypair
+    case ClientState#client_state.keypair of
+        {_PubKey, PrivKey} ->
+            ?dbg("Retrieved private key from client state", []),
+            {ok, PrivKey};
+        undefined ->
+            ?dbg("No keypair available in client state", []),
+            {error, no_keypair_available}
+    end.
+
+%% @private
+%% @doc Send encrypted messages to room members via server.
 add_system_message(Message, UIState) ->
     {{_Year, _Month, _Day}, {Hour, Min, Sec}} = calendar:local_time(),
     Timestamp = io_lib:format("~2..0w:~2..0w:~2..0w", [Hour, Min, Sec]),

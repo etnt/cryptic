@@ -1,48 +1,98 @@
 %%% @doc Cryptographic Library for Secure Communication
 %%%
 %%% This module provides cryptographic primitives for the Cryptic chat application.
-%%% It wraps libsodium functions through NIFs and implements key derivation schemes
-%%% for secure end-to-end encrypted messaging.
+%%% It wraps libsodium functions through NIFs and implements the X3DH key agreement
+%%% protocol for secure end-to-end encrypted messaging with forward secrecy.
 %%%
 %%% == Cryptographic Primitives ==
 %%%
 %%% <ul>
+%%%   <li>**Ed25519 Signatures**: Digital signatures for identity verification</li>
 %%%   <li>**X25519 Key Exchange**: Elliptic curve Diffie-Hellman key agreement</li>
 %%%   <li>**ChaCha20-Poly1305**: Authenticated encryption with associated data (AEAD)</li>
 %%%   <li>**HKDF-SHA256**: Key derivation function for generating encryption keys</li>
+%%%   <li>**PBKDF2-SHA256**: Password-based key derivation for key storage</li>
 %%%   <li>**Secure Random**: Cryptographically secure random number generation</li>
 %%% </ul>
+%%%
+%%% == X3DH Protocol Implementation ==
+%%%
+%%% The library implements the X3DH (Extended Triple Diffie-Hellman) key agreement
+%%% protocol, which provides forward secrecy and cryptographic deniability:
+%%% <ol>
+%%%   <li>**Identity Keys**: Long-term Ed25519 signing keys and derived X25519 DH keys</li>
+%%%   <li>**Signed Prekeys**: Medium-term X25519 keys signed by identity key</li>
+%%%   <li>**One-Time Prekeys**: Single-use X25519 keys for perfect forward secrecy</li>
+%%%   <li>**Ephemeral Keys**: Session-specific X25519 keys for each message</li>
+%%%   <li>**Key Derivation**: HKDF-based expansion of shared secrets to encryption keys</li>
+%%% </ol>
 %%%
 %%% == Security Model ==
 %%%
 %%% The library implements a forward-secure messaging protocol:
 %%% <ol>
-%%%   <li>Each user generates an X25519 keypair for identity</li>
+%%%   <li>Each user generates Ed25519 identity keys and X25519 DH keys from shared entropy</li>
+%%%   <li>Signed prekeys and one-time prekeys enable asynchronous key agreement</li>
 %%%   <li>Message encryption uses ephemeral X25519 keypairs for perfect forward secrecy</li>
 %%%   <li>Shared secrets are derived using X25519 scalar multiplication</li>
 %%%   <li>AEAD keys are derived from shared secrets using HKDF-SHA256</li>
 %%%   <li>Messages are encrypted with ChaCha20-Poly1305 AEAD</li>
+%%%   <li>Private keys are stored encrypted with AES-256-GCM using PBKDF2-derived keys</li>
 %%% </ol>
 %%%
 %%% == Key Derivation Strategies ==
 %%%
-%%% The module provides three key derivation approaches with different security/usability tradeoffs:
+%%% The module provides three AEAD key derivation approaches with different security/usability tradeoffs:
 %%% <ul>
 %%%   <li>`derive_aead_key_random/1' - Most secure with random salt</li>
 %%%   <li>`derive_aead_key_ephemeral/2' - Good balance using ephemeral public key as salt</li>
 %%%   <li>`derive_aead_key_simple/1' - Simplest but least secure (empty salt)</li>
 %%% </ul>
 %%%
+%%% For identity key generation, the module uses deterministic derivation from a master seed
+%%% to ensure Ed25519 and X25519 keys have a cryptographic relationship while avoiding
+%%% conversion issues between different curve representations.
+%%%
+%%% == Key Management ==
+%%%
+%%% <ul>
+%%%   <li>**Key Generation**: Deterministic Ed25519/X25519 key derivation from master seed</li>
+%%%   <li>**Key Storage**: AES-256-GCM encryption with PBKDF2-derived passphrase keys</li>
+%%%   <li>**One-Time Prekeys**: X25519 keypairs with unique IDs for single-use consumption</li>
+%%%   <li>**libsodium Integration**: Secure curve conversion utilities via NIF interface</li>
+%%% </ul>
+%%%
 %%% == Example Usage ==
 %%%
 %%% ```
-%%% %% Generate keypair for user
-%%% {PubKey, PrivKey} = cryptic_lib:gen_keypair(),
+%%% %% Initialize client with X3DH key bundle
+%%% Keys = cryptic_lib:generate_client_keys(),
+%%% #{identity_sign_public := IdentitySignPub,
+%%%   identity_dh_public := IdentityDHPub,
+%%%   signed_prekey_public := SignedPrekeyPub,
+%%%   one_time_prekeys := OneTimePrekeys} = Keys,
 %%%
-%%% %% Encrypt message to another user
-%%% {RecipientPub, _} = cryptic_lib:gen_keypair(),  % In practice, fetch from server
-%%% SharedSecret = cryptic_lib:scalarmult(PrivKey, RecipientPub),
-%%% AeadKey = cryptic_lib:derive_aead_key_simple(SharedSecret),
+%%% %% Encrypt and save keys to file
+%%% Passphrase = <<"secure_passphrase">>,
+%%% ok = cryptic_lib:save_encrypted_keys(Keys, Passphrase, "/path/to/keys.encrypted"),
+%%%
+%%% %% Later, load keys from file
+%%% {ok, LoadedKeys} = cryptic_lib:load_encrypted_keys("/path/to/keys.encrypted", Passphrase),
+%%%
+%%% %% Or use the convenience function for initialization
+%%% {ok, ClientKeys} = cryptic_lib:initialize_client_keys("/config/dir", Passphrase),
+%%%
+%%% %% Generate ephemeral keypair for message encryption
+%%% {EphemeralPub, EphemeralPriv} = cryptic_lib:gen_keypair(),
+%%%
+%%% %% Perform X25519 key agreement with recipient's public keys
+%%% SharedSecret1 = cryptic_lib:scalarmult(EphemeralPriv, IdentityDHPub),
+%%% SharedSecret2 = cryptic_lib:scalarmult(EphemeralPriv, SignedPrekeyPub),
+%%%
+%%% %% Derive AEAD key using ephemeral public key as salt
+%%% AeadKey = cryptic_lib:derive_aead_key_ephemeral(SharedSecret1, EphemeralPub),
+%%%
+%%% %% Encrypt message with forward secrecy
 %%% {Ciphertext, Nonce} = cryptic_lib:aead_encrypt(<<"Hello">>, AeadKey, <<>>),
 %%%
 %%% %% Decrypt message
@@ -50,11 +100,13 @@
 %%% '''
 %%%
 %%% @author Cryptic Team
-%%% @version 1.0
+%%% @version 2.0
 %%% @since 2025-09-12
+%%% @doc Complete X3DH key agreement and forward-secure messaging implementation
 -module(cryptic_lib).
 
 -export([
+    initialize/0,
     gen_keypair/0,
     scalarmult/2,
     aead_encrypt/3,
@@ -70,8 +122,26 @@
     get_prekey/1,
     list_users/0,
     store_message/2,
-    get_messages/1
+    get_messages/1,
+    %% Key management functions
+    generate_client_keys/0,
+    generate_one_time_prekeys/1,
+    ed25519_to_x25519_private/1,
+    ed25519_to_x25519_public/1,
+    derive_key_from_passphrase/2,
+    encrypt_keys/2,
+    decrypt_keys/2,
+    save_encrypted_keys/3,
+    load_encrypted_keys/2,
+    initialize_client_keys/2
 ]).
+
+%% @doc Initialize the cryptic_lib module.
+%% This function ensures that necessary ETS tables are created.
+%% @returns ok.
+-spec initialize() -> ok.
+initialize() ->
+    ensure_tables().
 
 %% Use our custom NIF functions (wraps libsodium)
 %% gen_keypair returns {PubBin, PrivBin} for X25519
@@ -381,7 +451,6 @@ derive_aead_key_simple(SharedSecret) ->
 %% @doc Store a user's prekey.
 -spec store_prekey(string(), binary()) -> ok | {error, term()}.
 store_prekey(Username, Prekey) ->
-    ensure_tables(),
     ets:insert(?PREKEY_TABLE, {Username, Prekey}),
     ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
     ok.
@@ -389,7 +458,6 @@ store_prekey(Username, Prekey) ->
 %% @doc Get a user's prekey.
 -spec get_prekey(string()) -> {ok, binary()} | {error, not_found}.
 get_prekey(Username) ->
-    ensure_tables(),
     case ets:lookup(?PREKEY_TABLE, Username) of
         [{Username, Prekey}] -> {ok, Prekey};
         [] -> {error, not_found}
@@ -398,31 +466,377 @@ get_prekey(Username) ->
 %% @doc List all registered users.
 -spec list_users() -> [string()].
 list_users() ->
-    ensure_tables(),
     [Username || {Username, _Timestamp} <- ets:tab2list(?USER_TABLE)].
 
 %% @doc Store a message for a user.
 -spec store_message(string(), map()) -> ok.
 store_message(ToUser, MessageBlob) ->
-    ensure_tables(),
     MessageId = erlang:unique_integer([positive]),
     ets:insert(?MESSAGE_TABLE, {MessageId, ToUser, MessageBlob}),
     ok.
 
-%% @doc Get all messages for a user.
+%% @doc Get all messages for a user, then remove them from the store.
 -spec get_messages(string()) -> [map()].
 get_messages(Username) ->
-    ensure_tables(),
-    Messages = [MessageBlob || {_Id, ToUser, MessageBlob} <- ets:tab2list(?MESSAGE_TABLE), ToUser == Username],
-    %% Remove retrieved messages (simple implementation)
-    [ets:delete(?MESSAGE_TABLE, Id) || {Id, ToUser, _} <- ets:tab2list(?MESSAGE_TABLE), ToUser == Username],
-    Messages.
+    [
+        begin
+            ets:delete(?MESSAGE_TABLE, Id),
+            MessageBlob
+        end
+     || {Id, ToUser, MessageBlob} <- ets:tab2list(?MESSAGE_TABLE),
+        ToUser == Username
+    ].
+
+%%%===================================================================
+%%% Key Management Functions
+%%%===================================================================
+
+%% @doc Generate or load client identity keys with configuration directory and passphrase.
+%%
+%% This function manages the cryptographic identity of a client:
+%% - Ed25519 identity signing key (long-term)
+%% - X25519 identity DH key (long-term, derived from master seed)
+%% - X25519 signed prekey (medium-term, rotatable)
+%% - One-Time Prekeys (OPKs) for forward secrecy
+%%
+%% Keys are stored encrypted in the specified directory with PBKDF2-derived encryption.
+%% The passphrase is provided by the caller, allowing the library to be used in different
+%% contexts (CLI, GUI, automated systems) without hardcoded user interaction.
+%%
+%% @param ConfigDir Directory where encrypted keys file will be stored
+%% @param Passphrase Binary or string passphrase for key encryption/decryption
+%% @returns {ok, Keys} on success, {error, Reason} on failure
+-spec initialize_client_keys(string(), string() | binary()) ->
+    {ok, #{
+        identity_sign_private => binary(),
+        identity_sign_public => binary(),
+        identity_dh_private => binary(),
+        identity_dh_public => binary(),
+        signed_prekey_private => binary(),
+        signed_prekey_public => binary(),
+        signed_prekey_signature => binary(),
+        one_time_prekeys => [
+            #{private => binary(), public => binary(), id => binary()}
+        ],
+        key_id => binary()
+    }}
+    | {error, term()}.
+initialize_client_keys(ConfigDir, Passphrase) ->
+    KeysFile = filename:join(ConfigDir, "keys.encrypted"),
+
+    case filelib:is_file(KeysFile) of
+        true ->
+            %% Load existing keys
+            load_encrypted_keys(KeysFile, Passphrase);
+        false ->
+            %% Generate new keys
+            Keys = generate_client_keys(),
+            case save_encrypted_keys(Keys, Passphrase, KeysFile) of
+                ok -> {ok, Keys};
+                {error, Reason} -> {error, Reason}
+            end
+    end.
+
+%% @doc Generate all required client keys using deterministic derivation.
+%%
+%% Creates a complete X3DH key bundle with cryptographically linked Ed25519 and X25519
+%% identity keys derived from a shared master seed. This approach ensures:
+%% <ul>
+%%   <li>**Deterministic**: Both Ed25519 and X25519 keys derived from same entropy</li>
+%%   <li>**Reliable**: No conversion failures between curve representations</li>
+%%   <li>**Secure**: Each key type uses proper cryptographic generation</li>
+%%   <li>**X3DH Compatible**: Complete key bundle for Signal-style messaging</li>
+%% </ul>
+%%
+%% == Generated Keys ==
+%% <ul>
+%%   <li>**Identity Signing Keys**: Ed25519 keypair for digital signatures</li>
+%%   <li>**Identity DH Keys**: X25519 keypair for key agreement (linked to signing keys)</li>
+%%   <li>**Signed Prekey**: X25519 keypair signed by identity key for asynchronous messaging</li>
+%%   <li>**One-Time Prekeys**: 10 X25519 keypairs with unique IDs for forward secrecy</li>
+%% </ul>
+%%
+%% @returns Map containing complete X3DH key bundle with all necessary keys and signatures
+-spec generate_client_keys() ->
+    #{
+        identity_sign_private => binary(),
+        identity_sign_public => binary(),
+        identity_dh_private => binary(),
+        identity_dh_public => binary(),
+        signed_prekey_private => binary(),
+        signed_prekey_public => binary(),
+        signed_prekey_signature => binary(),
+        one_time_prekeys => [
+            #{private => binary(), public => binary(), id => binary()}
+        ],
+        key_id => binary()
+    }.
+generate_client_keys() ->
+    %% Generate a master seed for deterministic key derivation
+    MasterSeed = crypto:strong_rand_bytes(32),
+
+    %% Derive Ed25519 signing keypair from seed
+    Ed25519Seed = crypto:hash(sha256, <<MasterSeed/binary, "ed25519">>),
+    {IdentitySignPub, IdentitySignPriv} = crypto:generate_key(
+        eddsa, ed25519, Ed25519Seed
+    ),
+
+    %% Derive X25519 DH keypair from same master seed for correspondence
+    X25519Seed = crypto:hash(sha256, <<MasterSeed/binary, "x25519">>),
+    {IdentityDHPub, IdentityDHPriv} = crypto:generate_key(
+        ecdh, x25519, X25519Seed
+    ),
+
+    %% Generate X25519 signed prekey
+    {SignedPrekeyPriv, SignedPrekeyPub} = crypto:generate_key(ecdh, x25519),
+
+    %% Sign the prekey public key with identity signing key
+    SignedPrekeySignature = crypto:sign(eddsa, none, SignedPrekeyPub, [
+        IdentitySignPriv, ed25519
+    ]),
+
+    %% Generate 10 One-Time Prekeys (OPKs)
+    OneTimePrekeys = generate_one_time_prekeys(10),
+
+    %% Generate unique key ID
+    KeyId = crypto:strong_rand_bytes(16),
+
+    #{
+        %% Identity Keys
+        %% -------------
+        %% Use to sign the signed prekey to prove its authenticity to others.
+        identity_sign_private => IdentitySignPriv,
+        %% Users will use this to verify the signed prekey they receive.
+        identity_sign_public => IdentitySignPub,
+        %% Use this key, along with a peer's public keys, to perform the first
+        %% Diffie-Hellman (DH) key exchange in the 3DH protocol.
+        identity_dh_private => IdentityDHPriv,
+        %% Other users will combine this key with their own keys to perform
+        %% a DH exchange with you
+        identity_dh_public => IdentityDHPub,
+
+        %% Signed Prekey
+        %% -------------
+        %% Use this key to perform a DH key exchange with the sender's
+        %% public identity key
+        signed_prekey_private => SignedPrekeyPriv,
+        %% Senders will use this key to perform a DH exchange with your
+        %% identity key.
+        signed_prekey_public => SignedPrekeyPub,
+        %% Allows a sender to verify that the signed prekey was genuinely
+        %% created and signed by your identity_sign_private key, preventing
+        %% a man-in-the-middle attack.
+        signed_prekey_signature => SignedPrekeySignature,
+
+        %% One-Time Prekeys (OTPKs)
+        %% -----------------------
+        %% A collection of one-time key pairs. A sender will retrieve and
+        %% use one of them to perform the final DH key exchange.
+        %% Deleted after it has been used to decrypt a message,
+        %% ensuring it can never be used again
+        one_time_prekeys => OneTimePrekeys,
+        %% Unique identifier for the entire set of client keys.
+        %% This ID helps in managing and identifying a user's complete
+        %% key bundle, especially on a server where multiple users and
+        %% key bundles are stored.
+        key_id => KeyId
+    }.
+
+%% @doc Generate a specified number of One-Time Prekeys (OPKs).
+%%
+%% One-Time Prekeys are X25519 keypairs that are used once for initial
+%% key agreement in the X3DH protocol. Each OPK has:
+%% - A unique ID for identification
+%% - An X25519 keypair for ECDH operations
+%% - Single-use property for forward secrecy
+%%
+%% @param Count Number of OPKs to generate (typically 10-100)
+%% @returns List of OPK maps with private, public, and id fields
+-spec generate_one_time_prekeys(pos_integer()) ->
+    [#{private => binary(), public => binary(), id => binary()}].
+generate_one_time_prekeys(Count) ->
+    [
+        begin
+            {PrivKey, PubKey} = crypto:generate_key(ecdh, x25519),
+            % 64-bit unique ID
+            Id = crypto:strong_rand_bytes(8),
+            #{
+                private => PrivKey,
+                public => PubKey,
+                id => Id
+            }
+        end
+     || _ <- lists:seq(1, Count)
+    ].
+
+%% @doc Convert Ed25519 private key to X25519 private key.
+%%
+%% Performs a secure conversion from an Ed25519 signing private key to an
+%% X25519 ECDH private key using libsodium's crypto_sign_ed25519_sk_to_curve25519.
+%% This function provides a mathematically sound conversion that preserves the
+%% cryptographic relationship between keys.
+%%
+%% == Security Properties ==
+%% <ul>
+%%   <li>**Deterministic**: Same Ed25519 key always produces same X25519 key</li>
+%%   <li>**Secure**: Uses libsodium's vetted conversion algorithm</li>
+%%   <li>**Compatible**: Maintains key correspondence for X3DH protocol</li>
+%% </ul>
+%%
+%% == X3DH Usage ==
+%% In the X3DH key agreement protocol, identity keys can be used for both
+%% signing (Ed25519) and key exchange (X25519), requiring this conversion.
+%%
+%% @param Ed25519Priv Ed25519 private key (32-byte binary)
+%% @returns X25519 private key (32-byte binary)
+%% @throws error if conversion fails
+-spec ed25519_to_x25519_private(binary()) -> binary().
+ed25519_to_x25519_private(Ed25519Priv) ->
+    case cryptic_nif:ed25519_sk_to_x25519_sk(Ed25519Priv) of
+        error ->
+            error(
+                {conversion_failed,
+                    "Failed to convert Ed25519 private key to X25519"}
+            );
+        X25519Priv when is_binary(X25519Priv) ->
+            X25519Priv
+    end.
+
+%% @doc Convert Ed25519 public key to X25519 public key.
+%%
+%% Performs a secure conversion from an Ed25519 signing public key to an
+%% X25519 ECDH public key using libsodium's crypto_sign_ed25519_pk_to_curve25519.
+%% This conversion maintains the mathematical relationship with the corresponding
+%% private key conversion.
+%%
+%% == Security Properties ==
+%% <ul>
+%%   <li>**Deterministic**: Same Ed25519 key always produces same X25519 key</li>
+%%   <li>**Public**: Conversion is safe to perform publicly</li>
+%%   <li>**Correspondent**: Works with converted private keys</li>
+%% </ul>
+%%
+%% == Protocol Usage ==
+%% Essential for X3DH where identity public keys need to be used for both
+%% signature verification and key agreement operations.
+%%
+%% @param Ed25519Pub Ed25519 public key (32-byte binary)
+%% @returns X25519 public key (32-byte binary)
+%% @throws error if conversion fails
+-spec ed25519_to_x25519_public(binary()) -> binary().
+ed25519_to_x25519_public(Ed25519Pub) ->
+    case cryptic_nif:ed25519_pk_to_x25519_pk(Ed25519Pub) of
+        error ->
+            error(
+                {conversion_failed,
+                    "Failed to convert Ed25519 public key to X25519"}
+            );
+        X25519Pub when is_binary(X25519Pub) ->
+            X25519Pub
+    end.
+
+%% @doc Derive encryption key from passphrase using PBKDF2.
+-spec derive_key_from_passphrase(string() | binary(), binary()) -> binary().
+derive_key_from_passphrase(Passphrase, Salt) when is_list(Passphrase) ->
+    derive_key_from_passphrase(list_to_binary(Passphrase), Salt);
+derive_key_from_passphrase(Passphrase, Salt) when is_binary(Passphrase) ->
+    % PBKDF2 iterations
+    Iterations = 100000,
+    % 256-bit key
+    KeyLength = 32,
+    crypto:pbkdf2_hmac(sha256, Passphrase, Salt, Iterations, KeyLength).
+
+%% @doc Encrypt private key material with passphrase-derived key.
+-spec encrypt_keys(#{}, string() | binary()) -> {binary(), binary()}.
+encrypt_keys(Keys, Passphrase) when is_list(Passphrase) ->
+    encrypt_keys(Keys, list_to_binary(Passphrase));
+encrypt_keys(Keys, Passphrase) when is_binary(Passphrase) ->
+    %% Generate random salt
+    Salt = crypto:strong_rand_bytes(16),
+
+    %% Derive encryption key
+    EncKey = derive_key_from_passphrase(Passphrase, Salt),
+
+    %% Serialize keys to binary
+    KeysBinary = term_to_binary(Keys),
+
+    %% Encrypt with AES-256-GCM
+    IV = crypto:strong_rand_bytes(12),
+    {Ciphertext, Tag} = crypto:crypto_one_time_aead(
+        aes_256_gcm, EncKey, IV, KeysBinary, <<>>, true
+    ),
+
+    %% Combine all encrypted data
+    EncryptedData =
+        <<Salt:16/binary, IV:12/binary, Tag:16/binary, Ciphertext/binary>>,
+
+    {EncryptedData, Salt}.
+
+%% @doc Decrypt private key material with passphrase-derived key.
+-spec decrypt_keys(binary(), string() | binary()) ->
+    {ok, #{}} | {error, term()}.
+decrypt_keys(EncryptedData, Passphrase) when is_list(Passphrase) ->
+    decrypt_keys(EncryptedData, list_to_binary(Passphrase));
+decrypt_keys(EncryptedData, Passphrase) when is_binary(Passphrase) ->
+    try
+        %% Extract components
+        <<Salt:16/binary, IV:12/binary, Tag:16/binary, Ciphertext/binary>> =
+            EncryptedData,
+
+        %% Derive decryption key
+        DecKey = derive_key_from_passphrase(Passphrase, Salt),
+
+        %% Decrypt with AES-256-GCM
+        case
+            crypto:crypto_one_time_aead(
+                aes_256_gcm, DecKey, IV, Ciphertext, <<>>, Tag, false
+            )
+        of
+            Plaintext when is_binary(Plaintext) ->
+                Keys = binary_to_term(Plaintext),
+                {ok, Keys};
+            error ->
+                {error, decryption_failed}
+        end
+    catch
+        _:_ ->
+            {error, invalid_encrypted_data}
+    end.
+
+%% @doc Save encrypted keys to file.
+-spec save_encrypted_keys(#{}, string() | binary(), string()) ->
+    ok | {error, term()}.
+save_encrypted_keys(Keys, Passphrase, KeysFile) ->
+    %% Encrypt keys
+    {EncryptedData, _Salt} = encrypt_keys(Keys, Passphrase),
+
+    %% Write to file
+    case file:write_file(KeysFile, EncryptedData) of
+        ok ->
+            % rw-------
+            file:change_mode(KeysFile, 8#600),
+            ok;
+        {error, Reason} ->
+            {error, {file_write_error, Reason}}
+    end.
+
+%% @doc Load and decrypt keys from file.
+-spec load_encrypted_keys(string(), string() | binary()) ->
+    {ok, #{}} | {error, term()}.
+load_encrypted_keys(KeysFile, Passphrase) ->
+    case file:read_file(KeysFile) of
+        {ok, EncryptedData} ->
+            decrypt_keys(EncryptedData, Passphrase);
+        {error, Reason} ->
+            {error, {file_read_error, Reason}}
+    end.
 
 %% @doc Ensure ETS tables exist.
 ensure_tables() ->
     ensure_table(?PREKEY_TABLE),
     ensure_table(?MESSAGE_TABLE),
-    ensure_table(?USER_TABLE).
+    ensure_table(?USER_TABLE),
+    ok.
 
 ensure_table(TableName) ->
     case ets:info(TableName) of

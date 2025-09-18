@@ -7,9 +7,23 @@ cd "$(dirname "$0")/.."
 # Default username
 USERNAME="${1:-alice}"
 
-echo "🚀 Starting Cryptic WebSocket mTLS Client UI..."
+# Create user-specific config directory
+CRYPTIC_CONFIG_DIR="$HOME/.cryptic/$USERNAME"
+if [ ! -d "$CRYPTIC_CONFIG_DIR" ]; then
+    echo "📁 Creating config directory: $CRYPTIC_CONFIG_DIR"
+    mkdir -p "$CRYPTIC_CONFIG_DIR"
+    chmod 700 "$CRYPTIC_CONFIG_DIR"
+else
+    echo "� Using existing config directory: $CRYPTIC_CONFIG_DIR"
+fi
+
+# Export the config directory environment variable
+export CRYPTIC_CONFIG_DIR
+
+echo "�🚀 Starting Cryptic WebSocket mTLS Client UI..."
 echo "   Username: $USERNAME"
 echo "   Server: ${SERVER:-localhost}"
+echo "   Config Dir: $CRYPTIC_CONFIG_DIR"
 echo ""
 
 # Set default certificate paths if not already set

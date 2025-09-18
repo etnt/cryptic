@@ -133,7 +133,10 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                 {[{text, jsx:encode(ErrorResp)}], State}
         end
     catch
-        _Error:_Reason ->
+        _Error:Reason ->
+            ?error("Failed to handle incoming text frame; Reason: ~p~n", [
+                Reason
+            ]),
             ErrorResponse = #{
                 type => <<"error">>,
                 message => <<"Invalid JSON format">>
@@ -142,6 +145,7 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
     end;
 websocket_handle({binary, _Data}, State) ->
     %% Handle binary data if needed
+    ?warning("Incoming binary frame, NYI!", []),
     {[], State};
 %% Handle WebSocket ping frames
 websocket_handle(ping, State) ->
@@ -177,6 +181,12 @@ websocket_info({room_notification, Notification}, State) ->
     ?dbg("DEBUG WS: Received room_notification: ~p", [Notification]),
     JsonResponse = jsx:encode(Notification),
     ?dbg("DEBUG WS: Sending JSON: ~p", [JsonResponse]),
+    {[{text, JsonResponse}], State};
+websocket_info({send_message, RoomMessage}, State) ->
+    %% Handle room message forwarding from broadcast_to_room_members
+    ?dbg("DEBUG WS: Received send_message: ~p", [RoomMessage]),
+    JsonResponse = jsx:encode(RoomMessage),
+    ?dbg("DEBUG WS: Forwarding room message: ~p", [JsonResponse]),
     {[{text, JsonResponse}], State};
 websocket_info(_Info, State) ->
     {[], State}.
@@ -277,7 +287,17 @@ handle_command(
             ok
     end,
 
-    {reply, #{type => <<"success">>, message => <<"Message sent">>}};
+    {reply, #{
+        type => <<"message_sent">>,
+        success => true,
+        message => <<"Message sent">>
+    }};
+%% Handle encrypted room messages (proper E2EE implementation)
+%% messages to currently connected users.
+%%
+%% @param Username The username to register
+%% @param Pid The WebSocket connection process PID
+
 handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
     Messages = cryptic_lib:get_messages(Username),
     Response = #{
@@ -329,6 +349,21 @@ handle_command(
             ?error("DEBUG WS HANDLER: Stack trace: ~p~n", [Stack]),
             {error, "Room message failed"}
     end;
+%% Handle encrypted room messages (proper E2EE implementation)
+handle_command(
+    #{<<"type">> := <<"send_encrypted_room_message">>} = Command,
+    Username,
+    _State
+) ->
+    try
+        Response = handle_encrypted_room_message(Command, Username),
+        {reply, Response}
+    catch
+        Error:Reason:Stack ->
+            ?error("Encrypted room message error: ~p:~p~n", [Error, Reason]),
+            ?error("Stack trace: ~p~n", [Stack]),
+            {error, "Encrypted room message failed"}
+    end;
 handle_command(
     #{<<"type">> := <<"get_room_messages">>} = Command, Username, _State
 ) ->
@@ -346,6 +381,204 @@ handle_command(
 handle_command(Command, Username, _State) ->
     io:format("Unknown command from ~s: ~p~n", [Username, Command]),
     {error, "Unknown command"}.
+
+%% @private
+%% @doc Handle encrypted room message following proper E2EE architecture.
+%%
+%% This function implements the server-side handling of encrypted room messages.
+%% The server receives an encrypted message intended for a specific recipient
+%% and forwards it directly without decryption, maintaining end-to-end encryption.
+%%
+%% @param Command The WebSocket command containing encrypted message data
+%% @param SenderUsername The username of the message sender
+%% @returns Response map for the client
+handle_encrypted_room_message(Command, SenderUsername) ->
+    try
+        RoomId = maps:get(<<"room_id">>, Command),
+        EphemeralPub = maps:get(<<"ephemeral">>, Command),
+        Nonce = maps:get(<<"nonce">>, Command),
+        Cipher = maps:get(<<"cipher">>, Command),
+
+        ?dbg(
+            "Handling encrypted room message from ~s in room ~s (sender-key approach)",
+            [SenderUsername, RoomId]
+        ),
+
+        %% Verify sender is in the room
+        case cryptic_room_manager:is_room_member(SenderUsername, RoomId) of
+            true ->
+                ?dbg("HERE 1 - Sender is in room", []),
+                %% Get all room members to broadcast to
+                case cryptic_room_manager:get_room_members(RoomId) of
+                    {ok, Members} ->
+                        ?dbg(
+                            "Broadcasting encrypted message to ~p room members",
+                            [length(Members)]
+                        ),
+
+                        %% Create the room message to broadcast
+                        RoomMessage = #{
+                            type => <<"room_message">>,
+                            room_id => RoomId,
+                            from => list_to_binary(SenderUsername),
+                            ephemeral => EphemeralPub,
+                            nonce => Nonce,
+                            cipher => Cipher,
+                            timestamp => erlang:system_time(millisecond)
+                        },
+
+                        %% Broadcast to all online room members (except sender)
+                        OnlineCount = broadcast_to_room_members(
+                            Members, SenderUsername, RoomMessage
+                        ),
+
+                        %% Store for offline members
+                        store_for_offline_room_members(
+                            Members, SenderUsername, RoomMessage
+                        ),
+
+                        #{
+                            type => <<"encrypted_room_message_sent">>,
+                            success => true,
+                            room_id => RoomId,
+                            online_recipients => OnlineCount,
+                            total_members => length(Members)
+                        };
+                    {error, MembersError} ->
+                        ?error("Failed to get room members: ~p", [MembersError]),
+                        #{
+                            type => <<"error">>,
+                            success => false,
+                            message => <<"Failed to get room members">>
+                        }
+                end;
+            false ->
+                #{
+                    type => <<"error">>,
+                    success => false,
+                    message => <<"Sender not in room">>
+                }
+        end
+    catch
+        error:{badkey, Key} ->
+            ?error("Missing required field in encrypted room message: ~p", [Key]),
+            #{
+                type => <<"error">>,
+                success => false,
+                message => <<"Missing required field">>
+            };
+        Error:Reason:StackTrace ->
+            ?error(
+                "Error handling encrypted room message: ~p:~p~nStack trace: ~p~n",
+                [
+                    Error, Reason, StackTrace
+                ]
+            ),
+            #{
+                type => <<"error">>,
+                success => false,
+                message => <<"Internal server error">>
+            }
+    end.
+
+%% @private
+%% @doc Broadcast encrypted room message to all online room members.
+%%
+%% Sends the encrypted room message to all currently connected room members
+%% except the sender. Uses the efficient sender-key approach where one
+%% encrypted message is broadcast to all recipients.
+%%
+%% @param Members List of room member usernames
+%% @param SenderUsername The username of the message sender
+%% @param RoomMessage The encrypted room message to broadcast
+%% @returns Number of online recipients the message was sent to
+-spec broadcast_to_room_members([string()], string(), map()) ->
+    non_neg_integer().
+broadcast_to_room_members(Members, SenderUsername, RoomMessage) ->
+    lists:foldl(
+        fun(Member, OnlineCount) ->
+            %% Don't send to sender
+            case Member =:= SenderUsername of
+                false ->
+                    case find_user_connection(Member) of
+                        {ok, MemberPid} ->
+                            ?dbg(
+                                "Broadcasting encrypted message to online member ~s",
+                                [Member]
+                            ),
+                            MemberPid ! {send_message, RoomMessage},
+                            OnlineCount + 1;
+                        not_found ->
+                            ?dbg(
+                                "Member ~s is offline, will store for later", [
+                                    Member
+                                ]
+                            ),
+                            OnlineCount
+                    end;
+                true ->
+                    %% Skip sender
+                    OnlineCount
+            end
+        end,
+        0,
+        Members
+    ).
+
+%% @private
+%% @doc Store encrypted room message for offline room members.
+%%
+%% Stores the encrypted room message for offline room members using the
+%% efficient sender-key approach. All members receive the same encrypted
+%% message and decrypt with sender's public key.
+%%
+%% @param Members List of room member usernames
+%% @param SenderUsername The username of the message sender
+%% @param RoomMessage The encrypted room message to store
+store_for_offline_room_members(Members, SenderUsername, RoomMessage) ->
+    lists:foreach(
+        fun(Member) ->
+            %% Don't store for sender
+            case Member =:= SenderUsername of
+                false ->
+                    case find_user_connection(Member) of
+                        not_found ->
+                            %% Member is offline, store the message
+                            store_encrypted_room_message_for_offline_member(
+                                Member, RoomMessage
+                            );
+                        {ok, _Pid} ->
+                            %% Member is online, message already sent
+                            ok
+                    end;
+                true ->
+                    %% Skip sender
+                    ok
+            end
+        end,
+        Members
+    ).
+
+%% @private
+%% @doc Store encrypted room message for a single offline member.
+store_encrypted_room_message_for_offline_member(Username, RoomMessage) ->
+    try
+        %% Create a unique message ID
+        MessageId = base64:encode(crypto:strong_rand_bytes(16)),
+
+        %% Store the complete room message for offline delivery
+        ets:insert(blobs, {Username, MessageId, RoomMessage}),
+
+        ?dbg("Stored encrypted room message for offline member ~s", [Username]),
+        ok
+    catch
+        Error:Reason ->
+            ?error(
+                "Failed to store encrypted room message for offline member ~s: ~p:~p",
+                [Username, Error, Reason]
+            ),
+            {error, storage_failed}
+    end.
 
 %% @doc Extract client identity from SSL/TLS certificate
 %%

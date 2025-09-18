@@ -139,27 +139,7 @@ start_websocket_mtls() ->
 start_websocket_mtls(Config) ->
     application:ensure_all_started(cowboy),
     application:ensure_all_started(ssl),
-    
-    %% Clean up any existing tables first
-    catch ets:delete(user_connections),
-    catch ets:delete(prekeys),
-    catch ets:delete(blobs),
-    catch ets:delete(rooms),
-    catch ets:delete(room_messages),
-    catch ets:delete(user_rooms),
-    
-    %% Create user connections ETS table
-    ets:new(user_connections, [named_table, set, public]),
-    
-    %% Create ETS stores for prekeys and blobs
-    ets:new(prekeys, [named_table, public, set]),
-    ets:new(blobs, [named_table, public, bag]),
-    
-    %% Create chat room ETS tables
-    ets:new(rooms, [named_table, set, public, {keypos, 2}]),
-    ets:new(room_messages, [named_table, bag, public, {keypos, 3}]),
-    ets:new(user_rooms, [named_table, bag, public]),
-    
+
     Port = maps:get(port, Config, 8443),
     
     %% Get certificate paths from environment variables or defaults
@@ -238,9 +218,10 @@ init([]) ->
 %% @returns {noreply, State, {continue, continue}} to proceed with startup
 handle_continue(start_server, CfgMap) ->
     %% Setup event handlers for Cryptic events with server configuration
-    cryptic_event_manager:setup_event_handlers(#{log_type => server, log_dir => "logs"}),
+    cryptic_event_manager:setup_event_handlers(#{log_type => server,
+                                                 log_dir => "logs"}),
     % Allow time for event manager setup
-    sleep(1),
+    sleep(10),
 
     continue(CfgMap).
 
@@ -280,27 +261,47 @@ sleep(T) ->
 %% @returns {noreply, State} after completing initialization
 
 continue(CfgMap) ->
-    %% Create ETS stores
+
+    %% Clean up any existing tables first
+    catch ets:delete(user_connections),
+    catch ets:delete(prekeys),
+    catch ets:delete(blobs),
+    catch ets:delete(rooms),
+    catch ets:delete(room_messages),
+    catch ets:delete(user_rooms),
+
+    %% Create user connections ETS table
+    ets:new(user_connections, [named_table, set, public]),
+
+    %% Create ETS stores for prekeys and blobs
     ets:new(prekeys, [named_table, public, set]),
     ets:new(blobs, [named_table, public, bag]),
 
+    %% Create chat room ETS tables
+    ets:new(rooms, [named_table, set, public, {keypos, 2}]),
+    ets:new(room_messages, [named_table, bag, public, {keypos, 3}]),
+    ets:new(user_rooms, [named_table, bag, public]),
+
+    %% Initialize cryptic_lib (creates its ETS tables)  
+    ok = cryptic_lib:initialize(),
+
     %% Give time for application environment to be fully available
-    timer:sleep(100),
+    sleep(100),
     
     %% Optionally start WebSocket mTLS server
     io:format("Checking WebSocket mTLS configuration...~n"),
     WSEnabled = case application:get_env(cryptic, websocket_mtls_enabled) of
         {ok, true} -> 
-            io:format("WebSocket mTLS enabled in config~n"),
+            ?info("WebSocket mTLS enabled in config~n",[]),
             true;
         {ok, false} ->
-            io:format("WebSocket mTLS explicitly disabled in config~n"),
+            ?info("WebSocket mTLS explicitly disabled in config~n",[]),
             false;
         undefined ->
-            io:format("WebSocket mTLS not configured, defaulting to disabled~n"),
+            ?info("WebSocket mTLS not configured, defaulting to disabled~n",[]),
             false;
         Other ->
-            io:format("WebSocket mTLS config value: ~p~n", [Other]),
+            ?info("WebSocket mTLS config value: ~p~n", [Other]),
             false
     end,
     case WSEnabled of
@@ -309,10 +310,10 @@ continue(CfgMap) ->
                 {ok, Port} -> Port;
                 undefined -> 8443
             end,
-            io:format("Starting WebSocket mTLS server on port ~p~n", [WSPort]),
+            ?info("Starting WebSocket mTLS server on port ~p~n", [WSPort]),
             start_websocket_mtls(#{port => WSPort});
         false ->
-            io:format("WebSocket mTLS server disabled~n")
+            ?info("WebSocket mTLS server disabled~n",[])
     end,
 
     {noreply, CfgMap}.

@@ -35,6 +35,8 @@
 
 -module(cryptic_room_manager).
 
+-include("cryptic.hrl").
+
 -export([
     create_room/4,
     delete_room/2,
@@ -378,19 +380,13 @@ get_room_messages(RoomNameOrId, Since) ->
 %%% @param RoomIdOrName The room identifier (UUID) or room name
 %%% @returns `true' if user is a member, `false' otherwise
 -spec is_room_member(binary(), binary()) -> boolean().
-is_room_member(Username, RoomIdOrName) ->
+is_room_member(Username, RoomId)
+    when is_list(Username) andalso is_binary(RoomId) ->
     % First try to get the actual room name
-    case get_room_info(RoomIdOrName) of
-        {ok, #room{name = RoomName}} ->
-            case ets:lookup(user_rooms, Username) of
-                [] ->
-                    false;
-                UserRooms ->
-                    lists:any(
-                        fun({_, Name}) -> Name =:= RoomName end, UserRooms
-                    )
-            end;
-        {error, not_found} ->
+    case cryptic_room_manager:get_room_members(RoomId) of
+        {ok, Members} ->
+            lists:member(Username, Members);
+        _ ->
             false
     end.
 
@@ -417,8 +413,8 @@ encrypt_for_room_members(PlaintextMessage, Members, FromUsername) ->
                     PlaintextMessage, Username
                 )
             of
-                {ok, Nonce, Ciphertext} ->
-                    {true, {Username, Nonce, Ciphertext}};
+                {ok, EphPub, EncryptedData} ->
+                    {true, {Username, EphPub, EncryptedData}};
                 {error, _Reason} ->
                     % Skip this recipient if encryption fails (e.g., no prekey)
                     false
@@ -428,36 +424,44 @@ encrypt_for_room_members(PlaintextMessage, Members, FromUsername) ->
     ).
 
 %% Encrypt a message for a specific user using their prekey
-%% Simplified approach for Phase 1 testing
+%% Uses the same encryption scheme as cryptic_client_lib for compatibility
 -spec encrypt_message_for_user(binary(), string()) ->
     {ok, binary(), binary()} | {error, term()}.
 encrypt_message_for_user(PlaintextMessage, Username) ->
+    ?dbg("SERVER ENCRYPT: Starting encryption for user=~p, message=~p", [
+        Username, PlaintextMessage
+    ]),
     case cryptic_lib:get_prekey(Username) of
         {ok, RecipientPublicKey} ->
             try
-                % For Phase 1, use a simplified encryption that's easy to decrypt
-                % Derive encryption key from recipient's public key + message
-                EncryptionKey = crypto:hash(
-                    sha256,
-                    <<RecipientPublicKey/binary, PlaintextMessage/binary>>
+                % Use the same encryption scheme as cryptic_client_lib:encrypt_message
+                % Generate ephemeral keypair
+                {EphPub, EphPriv} = cryptic_lib:gen_keypair(),
+
+                % Compute shared secret
+                Shared = cryptic_lib:scalarmult(EphPriv, RecipientPublicKey),
+
+                % Derive AEAD key using ephemeral-based salt
+                AeadKey = cryptic_lib:derive_aead_key_ephemeral(Shared, EphPub),
+
+                % Encrypt message
+                {Cipher, Nonce} = cryptic_lib:aead_encrypt(
+                    PlaintextMessage, AeadKey, <<>>
                 ),
 
-                % Use simple AES-GCM encryption with deterministic nonce
-                UsernameHash = crypto:hash(sha256, list_to_binary(Username)),
-                Nonce = crypto:hash(
-                    sha256, <<UsernameHash/binary, PlaintextMessage/binary>>
-                ),
-                Nonce12 = binary:part(Nonce, 0, 12),
-
-                Key256 = binary:part(EncryptionKey, 0, 32),
-                {Ciphertext, Tag} = crypto:crypto_one_time_aead(
-                    aes_256_gcm, Key256, Nonce12, PlaintextMessage, <<>>, true
+                ?dbg(
+                    "SERVER ENCRYPT: Message=~p, Nonce=~p bytes, Cipher=~p bytes",
+                    [PlaintextMessage, byte_size(Nonce), byte_size(Cipher)]
                 ),
 
-                % Return the recipient's public key as "ephemeral" and the encrypted data
-                EncryptedData =
-                    <<Nonce12/binary, Ciphertext/binary, Tag/binary>>,
-                {ok, RecipientPublicKey, EncryptedData}
+                % Format as nonce + cipher (same as regular encrypted messages)
+                EncryptedData = <<Nonce/binary, Cipher/binary>>,
+
+                ?dbg("SERVER ENCRYPT: EncryptedData=~p bytes", [
+                    byte_size(EncryptedData)
+                ]),
+
+                {ok, EphPub, EncryptedData}
             catch
                 error:Reason ->
                     {error, {encryption_failed, Reason}}
@@ -466,99 +470,55 @@ encrypt_message_for_user(PlaintextMessage, Username) ->
             {error, user_not_found}
     end.
 
-%%% @doc Decrypt a room message for a specific user (simplified approach)
+%%% @doc Decrypt a room message for a specific user (using client-side decryption)
 %%%
-%%% This function decrypts a room message using the simplified encryption scheme.
+%%% This function is primarily for testing/debugging purposes.
+%%% In normal operation, the client handles decryption using the same
+%%% cryptic_lib functions for consistency.
 %%%
-%%% @param EncryptedData The encrypted message (nonce + ciphertext + tag)
-%%% @param RecipientPublicKey The recipient's public key (stored as "ephemeral" in message)
+%%% @param EncryptedData The encrypted message (nonce + ciphertext)
+%%% @param EphemeralPublicKey The ephemeral public key used for encryption
 %%% @param Username The username of the recipient
 %%% @returns `{ok, Plaintext}' on successful decryption, `{error, Reason}' on failure
 -spec decrypt_message_for_user(binary(), binary(), string()) ->
     {ok, binary()} | {error, term()}.
-decrypt_message_for_user(EncryptedData, RecipientPublicKey, Username) ->
+decrypt_message_for_user(EncryptedData, EphemeralPublicKey, Username) ->
     case cryptic_lib:get_prekey(Username) of
-        {ok, StoredPublicKey} when StoredPublicKey =:= RecipientPublicKey ->
+        {ok, _RecipientPublicKey} ->
             try
-                % Extract nonce, ciphertext, and tag
-                NonceSize = 12,
-                TagSize = 16,
-                <<Nonce:NonceSize/binary, Rest/binary>> = EncryptedData,
-                CiphertextSize = byte_size(Rest) - TagSize,
-                <<Ciphertext:CiphertextSize/binary, Tag:TagSize/binary>> = Rest,
+                % Get recipient's private key for decryption
+                case cryptic_lib:get_private_key(Username) of
+                    {ok, RecipientPrivateKey} ->
+                        % Compute shared secret
+                        Shared = cryptic_lib:scalarmult(
+                            RecipientPrivateKey, EphemeralPublicKey
+                        ),
 
-                % We need to derive the same key that was used for encryption
-                % The challenge is we need the original plaintext to derive the key
-                % Let's try to brute-force decrypt common messages
-                decrypt_with_common_keys(
-                    Ciphertext, Tag, Nonce, RecipientPublicKey, Username
-                )
+                        % Derive AEAD key using ephemeral-based salt
+                        AeadKey = cryptic_lib:derive_aead_key_ephemeral(
+                            Shared, EphemeralPublicKey
+                        ),
+
+                        % Decrypt message (EncryptedData format: nonce + cipher)
+                        case
+                            cryptic_lib:aead_decrypt(
+                                EncryptedData, AeadKey, <<>>
+                            )
+                        of
+                            {ok, Plaintext} ->
+                                {ok, Plaintext};
+                            {error, DecryptError} ->
+                                {error, {decryption_failed, DecryptError}}
+                        end;
+                    {error, KeyError} ->
+                        {error, {private_key_not_found, KeyError}}
+                end
             catch
-                error:Reason ->
-                    {error, {decryption_failed, Reason}}
+                error:CatchReason ->
+                    {error, {decryption_failed, CatchReason}}
             end;
-        {ok, _DifferentKey} ->
-            {error, key_mismatch};
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-%% Try to decrypt by testing common message patterns
--spec decrypt_with_common_keys(
-    binary(), binary(), binary(), binary(), string()
-) ->
-    {ok, binary()} | {error, term()}.
-decrypt_with_common_keys(Ciphertext, Tag, Nonce, RecipientPublicKey, Username) ->
-    % Since our encryption key depends on the plaintext, we need to try
-    % different possible plaintexts. This is obviously not ideal but works for testing.
-    TestMessages = [
-        <<"Hello Bob, this is a secret message!">>,
-        <<"Hello Bob, can you decrypt this?">>,
-        <<"This message should be encrypted!">>,
-        <<"Hello Bob, this should work now!">>,
-        <<"Final test message!">>,
-        <<"test message">>,
-        <<"test">>
-    ],
-
-    try_decrypt_messages(
-        TestMessages, Ciphertext, Tag, Nonce, RecipientPublicKey, Username
-    ).
-
-try_decrypt_messages(
-    [], _Ciphertext, _Tag, _Nonce, _RecipientPublicKey, _Username
-) ->
-    {error, could_not_decrypt};
-try_decrypt_messages(
-    [TestMessage | Rest], Ciphertext, Tag, Nonce, RecipientPublicKey, Username
-) ->
-    try
-        % Derive the key using the test message
-        EncryptionKey = crypto:hash(
-            sha256, <<RecipientPublicKey/binary, TestMessage/binary>>
-        ),
-        Key256 = binary:part(EncryptionKey, 0, 32),
-
-        % Try to decrypt
-        Plaintext = crypto:crypto_one_time_aead(
-            aes_256_gcm, Key256, Nonce, Ciphertext, <<>>, Tag, false
-        ),
-
-        % If decryption succeeded and matches our test message, return it
-        case Plaintext of
-            TestMessage ->
-                {ok, Plaintext};
-            _ ->
-                try_decrypt_messages(
-                    Rest, Ciphertext, Tag, Nonce, RecipientPublicKey, Username
-                )
-        end
-    catch
-        error:_ ->
-            % Try next message
-            try_decrypt_messages(
-                Rest, Ciphertext, Tag, Nonce, RecipientPublicKey, Username
-            )
+        {error, PrekeyError} ->
+            {error, PrekeyError}
     end.
 
 %% Get user's private key (placeholder implementation)

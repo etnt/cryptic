@@ -186,12 +186,73 @@ static ERL_NIF_TERM rand_bytes(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
     return result;
 }
 
+// Convert Ed25519 private key to X25519 private key
+static ERL_NIF_TERM ed25519_sk_to_x25519_sk(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    ErlNifBinary ed25519_seed;
+
+    // Erlang's crypto:generate_key(eddsa, ed25519) returns 32-byte seed, not 64-byte secretkey
+    if (!enif_inspect_binary(env, argv[0], &ed25519_seed) ||
+        ed25519_seed.size != crypto_sign_SEEDBYTES)
+    {
+        return enif_make_badarg(env);
+    }
+
+    // First expand the seed to a full Ed25519 keypair
+    unsigned char ed25519_pk[crypto_sign_PUBLICKEYBYTES];
+    unsigned char ed25519_sk[crypto_sign_SECRETKEYBYTES];
+
+    if (crypto_sign_seed_keypair(ed25519_pk, ed25519_sk, ed25519_seed.data) != 0)
+    {
+        return enif_make_atom(env, "error");
+    }
+
+    ERL_NIF_TERM result;
+    unsigned char *x25519_sk = enif_make_new_binary(env, crypto_box_SECRETKEYBYTES, &result);
+
+    if (crypto_sign_ed25519_sk_to_curve25519(x25519_sk, ed25519_sk) != 0)
+    {
+        // Clear sensitive data
+        sodium_memzero(ed25519_sk, crypto_sign_SECRETKEYBYTES);
+        return enif_make_atom(env, "error");
+    }
+
+    // Clear sensitive data
+    sodium_memzero(ed25519_sk, crypto_sign_SECRETKEYBYTES);
+
+    return result;
+}
+
+// Convert Ed25519 public key to X25519 public key
+static ERL_NIF_TERM ed25519_pk_to_x25519_pk(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    ErlNifBinary ed25519_pk;
+
+    if (!enif_inspect_binary(env, argv[0], &ed25519_pk) ||
+        ed25519_pk.size != crypto_sign_PUBLICKEYBYTES)
+    {
+        return enif_make_badarg(env);
+    }
+
+    ERL_NIF_TERM result;
+    unsigned char *x25519_pk = enif_make_new_binary(env, crypto_box_PUBLICKEYBYTES, &result);
+
+    if (crypto_sign_ed25519_pk_to_curve25519(x25519_pk, ed25519_pk.data) != 0)
+    {
+        return enif_make_atom(env, "error");
+    }
+
+    return result;
+}
+
 // NIF function exports
 static ErlNifFunc nif_funcs[] = {
     {"gen_keypair", 0, gen_keypair, 0},
     {"scalarmult", 2, scalarmult, 0},
     {"aead_encrypt", 3, aead_encrypt, 0},
     {"aead_decrypt", 4, aead_decrypt, 0},
-    {"rand_bytes", 1, rand_bytes, 0}};
+    {"rand_bytes", 1, rand_bytes, 0},
+    {"ed25519_sk_to_x25519_sk", 1, ed25519_sk_to_x25519_sk, 0},
+    {"ed25519_pk_to_x25519_pk", 1, ed25519_pk_to_x25519_pk, 0}};
 
 ERL_NIF_INIT(cryptic_nif, nif_funcs, load, NULL, NULL, NULL)
