@@ -102,7 +102,6 @@
 %%% @author Cryptic Team
 %%% @version 2.0
 %%% @since 2025-09-12
-%%% @doc Complete X3DH key agreement and forward-secure messaging implementation
 -module(cryptic_lib).
 
 -export([
@@ -706,7 +705,7 @@ generate_one_time_prekeys(Count) ->
 %%
 %% @param Ed25519Priv Ed25519 private key (32-byte binary)
 %% @returns X25519 private key (32-byte binary)
-%% @throws error if conversion fails
+%% @throws error
 -spec ed25519_to_x25519_private(binary()) -> binary().
 ed25519_to_x25519_private(Ed25519Priv) ->
     case cryptic_nif:ed25519_sk_to_x25519_sk(Ed25519Priv) of
@@ -739,7 +738,7 @@ ed25519_to_x25519_private(Ed25519Priv) ->
 %%
 %% @param Ed25519Pub Ed25519 public key (32-byte binary)
 %% @returns X25519 public key (32-byte binary)
-%% @throws error if conversion fails
+%% @throws error
 -spec ed25519_to_x25519_public(binary()) -> binary().
 ed25519_to_x25519_public(Ed25519Pub) ->
     case cryptic_nif:ed25519_pk_to_x25519_pk(Ed25519Pub) of
@@ -856,7 +855,7 @@ load_encrypted_keys(KeysFile, Passphrase) ->
 %% @param Message The binary data to sign
 %% @param PrivateKey Ed25519 private key (64 bytes) for signing
 %% @returns Signature binary (64 bytes)
-%% @throws error if signing fails or keys are invalid
+%% @throws error
 -spec sign_message(binary(), binary()) -> binary().
 sign_message(Message, PrivateKey) ->
     crypto:sign(eddsa, none, Message, [PrivateKey, ed25519]).

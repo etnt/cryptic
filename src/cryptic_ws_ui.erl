@@ -340,7 +340,7 @@ start(Username, ServerHost) ->
 %%%===================================================================
 
 %% @private
-%% @doc Main UI event loop handling user interactions and background tasks.
+%% Main UI event loop handling user interactions and background tasks.
 %%
 %% This is the central event processing loop that handles:
 %% <ul>
@@ -408,7 +408,7 @@ ui_main_loop(UIState) ->
 %%%===================================================================
 
 %% @private
-%% @doc Position cursor in the input area at the end of current input.
+%% Position cursor in the input area at the end of current input.
 %%
 %% Calculates the correct cursor position based on the prompt length
 %% and current input text, then moves the terminal cursor there.
@@ -446,7 +446,7 @@ position_cursor(UIState) ->
     cecho:move(Height - 1, min(FinalCursorPos, Width - 1)).
 
 %% @private
-%% @doc Draw the complete screen layout with all UI components.
+%% Draw the complete screen layout with all UI components.
 %%
 %% Renders the full terminal interface in the correct order:
 %% <ol>
@@ -483,7 +483,7 @@ draw_screen(UIState) ->
     cecho:refresh().
 
 %% @private
-%% @doc Draw the status bar at the top showing WebSocket connection and user info.
+%% Draw the status bar at the top showing WebSocket connection and user info.
 %%
 %% The status bar displays:
 %% <ul>
@@ -576,7 +576,7 @@ draw_status_bar(UIState) ->
     cecho:attroff(?ceCOLOR_PAIR(?COLOR_STATUS_BAR)).
 
 %% @private
-%% @doc Draw the scrollable message display area.
+%% Draw the scrollable message display area.
 %%
 %% Renders the message history in the central area of the screen.
 %% Messages are displayed with color coding:
@@ -609,7 +609,7 @@ draw_message_area(UIState) ->
     draw_messages(VisibleMessages, StartLine, Width, UIState).
 
 %% @private
-%% @doc Draw individual messages with appropriate color coding.
+%% Draw individual messages with appropriate color coding.
 %%
 %% Iterates through the visible message list and renders each message
 %% with the appropriate color scheme based on the sender type.
@@ -651,7 +651,7 @@ draw_messages([{From, Message, Timestamp} | Rest], Line, Width, UIState) ->
     draw_messages(Rest, Line + 1, Width, UIState).
 
 %% @private
-%% @doc Draw the context-sensitive help bar.
+%% Draw the context-sensitive help bar.
 %%
 %% Displays different help text based on the current mode and connection status:
 %% <ul>
@@ -691,7 +691,7 @@ draw_help_bar(UIState) ->
     cecho:attroff(?ceCOLOR_PAIR(?COLOR_HELP_BAR)).
 
 %% @private
-%% @doc Draw the input line with prompt and current user text.
+%% Draw the input line with prompt and current user text.
 %%
 %% Renders the bottom input line where users type their commands or messages.
 %% The line includes:
@@ -750,7 +750,7 @@ draw_input_line(UIState) ->
 %%%===================================================================
 
 %% @private
-%% @doc Handle user input events from the input handler process.
+%% Handle user input events from the input handler process.
 %%
 %% Processes different types of input with enhanced editing capabilities:
 %% <ul>
@@ -922,7 +922,7 @@ handle_input(Input, UIState) ->
     end.
 
 %% @private
-%% @doc Process a user command and return updated UI state.
+%% Process a user command and return updated UI state.
 %%
 %% This is the main command dispatcher that handles all user commands for
 %% WebSocket mTLS operations:
@@ -1440,7 +1440,7 @@ process_command(Command, UIState) ->
     end.
 
 %% @private
-%% @doc Process commands while in chat mode via WebSocket.
+%% Process commands while in chat mode via WebSocket.
 %%
 %% Chat mode provides a streamlined interface for real-time conversations
 %% over the WebSocket mTLS connection. It handles special chat commands that
@@ -1556,7 +1556,7 @@ process_chat_command(Message, UIState) ->
     end.
 
 %% @private
-%% @doc Handle incoming WebSocket messages from the server.
+%% Handle incoming WebSocket messages from the server.
 %%
 %% Processes different types of WebSocket messages:
 %% <ul>
@@ -2284,7 +2284,7 @@ format_timestamp(Timestamp) ->
 %%%===================================================================
 
 %% @private
-%% @doc Input handler process for keyboard input capture.
+%% Input handler process for keyboard input capture.
 %%
 %% This dedicated process continuously reads keyboard input using cecho
 %% and forwards it to the main UI process. It handles:
@@ -2354,7 +2354,7 @@ input_handler(MainPid) ->
     input_handler(MainPid).
 
 %% @private
-%% @doc Status updater process for periodic status bar refresh.
+%% Status updater process for periodic status bar refresh.
 %%
 %% This process sends status update messages to the main UI process
 %% every second to ensure the status bar displays current time and
@@ -2371,7 +2371,7 @@ status_updater(MainPid) ->
 %%%===================================================================
 
 %% @private
-%% @doc Initialize color pairs for the terminal display.
+%% Initialize color pairs for the terminal display.
 %%
 %% Sets up color combinations used throughout the interface:
 %% <ul>
@@ -2396,7 +2396,7 @@ init_colors() ->
     cecho:init_pair(?COLOR_SENT_MESSAGE, ?ceCOLOR_MAGENTA, ?ceCOLOR_BLACK).
 
 %% @private
-%% @doc Format a line to fit screen width with padding or truncation.
+%% Format a line to fit screen width with padding or truncation.
 %%
 %% Ensures text fits exactly within the screen width by either:
 %% <ul>
@@ -2419,7 +2419,7 @@ format_line(Line, Width) ->
     end.
 
 %% @private
-%% @doc Format a message for display with sender, content, and timestamp.
+%% Format a message for display with sender, content, and timestamp.
 %%
 %% Creates a formatted message line appropriate for the message type:
 %% <ul>
@@ -2447,7 +2447,7 @@ format_message(From, Message, Timestamp, Width) ->
     end.
 
 %% @private
-%% @doc Get visible messages for current scroll position.
+%% Get visible messages for current scroll position.
 %%
 %% Calculates which messages should be displayed based on the total
 %% message history, scroll position, and available display area height.
@@ -2477,7 +2477,7 @@ get_visible_messages(Messages, ScrollPos, AreaHeight) ->
     end.
 
 %% @private
-%% @doc Add a user message to the message history.
+%% Add a user message to the message history.
 %%
 %% Adds a message from a specific user (not a system message) to the
 %% message history with automatic timestamping. User messages are
@@ -2498,28 +2498,7 @@ add_message(From, Message, UIState) ->
     UIState#ui_state{message_history = CurrentMessages ++ [NewMessage]}.
 
 %% @private
-%% @doc Add a system message to the message history.
-%%
-%% System messages are used for:
-%% <ul>
-%%   <li>Command feedback and status updates</li>
-%%   <li>Error messages and warnings</li>
-%%   <li>Help text and instructions</li>
-%%   <li>WebSocket connection status notifications</li>
-%% </ul>
-%%
-%% The message is automatically timestamped with the current local time
-%% and added to the message history. System messages are displayed in
-%% yellow color to distinguish them from user messages.
-%%
-%% @param Message The system message text to display
-%% @param UIState Current UI state
-%% @returns Updated UI state with the new message added to history.
-
-%%% Room Response Handlers
-
-%% @private
-%% @doc Handle room_created response from server.
+%% Handle room_created response from server.
 handle_room_created_response(Data, UIState) ->
     case maps:get(<<"success">>, Data, false) of
         true ->
@@ -2555,7 +2534,7 @@ handle_room_created_response(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle rooms_list response from server.
+%% Handle rooms_list response from server.
 handle_rooms_list_response(Data, UIState) ->
     case maps:get(<<"success">>, Data, false) of
         true ->
@@ -2633,7 +2612,7 @@ handle_rooms_list_response(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_joined response from server.
+%% Handle room_joined response from server.
 handle_room_joined_response(Data, UIState) ->
     case maps:get(<<"success">>, Data, false) of
         true ->
@@ -2677,7 +2656,7 @@ handle_room_joined_response(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_left response from server.
+%% Handle room_left response from server.
 handle_room_left_response(Data, UIState) ->
     case maps:get(<<"success">>, Data, false) of
         true ->
@@ -2695,7 +2674,7 @@ handle_room_left_response(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_members response from server.
+%% Handle room_members response from server.
 handle_room_members_response(Data, UIState) ->
     case maps:get(<<"success">>, Data, false) of
         true ->
@@ -2749,7 +2728,7 @@ handle_room_members_response(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_messages response from server.
+%% Handle room_messages response from server.
 handle_room_messages_response(Data, UIState) ->
     ?dbg("Handle Room messages response: ~p", [Data]),
     case maps:get(<<"success">>, Data, false) of
@@ -2804,7 +2783,7 @@ handle_room_messages_response(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle incoming room message.
+%% Handle incoming room message.
 handle_room_message(Data, UIState) ->
     ?dbg("Handle room message: ~p", [Data]),
     RoomName = binary_to_list(maps:get(<<"room_id">>, Data, <<"unknown">>)),
@@ -2877,7 +2856,7 @@ handle_room_message(Data, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room message sent confirmation.
+%% Handle room message sent confirmation.
 handle_room_message_sent_response(Data, UIState) ->
     case maps:get(<<"success">>, Data, false) of
         true ->
@@ -2900,7 +2879,7 @@ handle_room_message_sent_response(Data, UIState) ->
 %%% Room Command Handlers
 
 %% @private
-%% @doc Handle create_room command.
+%% Handle create_room command.
 %% Format: create_room <name> [description] [public|private] [password]
 handle_create_room_command(Rest, UIState) ->
     %% Check if connected
@@ -2968,7 +2947,7 @@ handle_create_room_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle join_room command.
+%% Handle join_room command.
 %% Format: join_room <room_name_or_id> [password]
 handle_join_room_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3041,7 +3020,7 @@ handle_join_room_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle leave_room command.
+%% Handle leave_room command.
 %% Format: leave_room <room_name_or_id>
 handle_leave_room_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3080,7 +3059,7 @@ handle_leave_room_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle list_rooms command.
+%% Handle list_rooms command.
 %% Format: list_rooms [public|private|joined|all]
 handle_list_rooms_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3138,7 +3117,7 @@ handle_list_rooms_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_info command.
+%% Handle room_info command.
 %% Format: room_info <room_name_or_id>
 handle_room_info_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3189,7 +3168,7 @@ handle_room_info_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_chat command.
+%% Handle room_chat command.
 %% Format: room_chat <room_name_or_id>
 handle_room_chat_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3237,7 +3216,7 @@ handle_room_chat_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle send_room command.
+%% Handle send_room command.
 %% Format: send_room <room_name_or_id> <message>
 handle_send_room_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3316,7 +3295,7 @@ handle_send_room_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Handle room_history command.
+%% Handle room_history command.
 %% Format: room_history <room_name_or_id> [count]
 handle_room_history_command(Rest, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -3394,7 +3373,7 @@ handle_room_history_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Parse optional arguments for create_room command.
+%% Parse optional arguments for create_room command.
 parse_create_room_options(Parts) ->
     parse_create_room_options(Parts, "", "public", "").
 
@@ -3426,7 +3405,7 @@ parse_create_room_options([Part | Rest], Description, RoomType, Password) ->
     end.
 
 %% @private
-%% @doc Handle help command with comprehensive command documentation.
+%% Handle help command with comprehensive command documentation.
 %% Format: help [command_name] or help [category]
 handle_help_command(Rest, UIState) ->
     HelpTopic = string:strip(Rest),
@@ -3913,7 +3892,7 @@ handle_help_command(Rest, UIState) ->
     end.
 
 %% @private
-%% @doc Send an encrypted room message following proper E2EE architecture.
+%% Send an encrypted room message following proper E2EE architecture.
 %%
 %% This function implements the efficient sender-key encryption flow for room messages:
 %% 1. Encrypts the message with sender's private key
@@ -3966,7 +3945,7 @@ send_encrypted_room_message(ClientState, RoomId, Message) ->
     end.
 
 %% @private
-%% @doc Encrypt message with sender's private key for room broadcasting.
+%% Encrypt message with sender's private key for room broadcasting.
 %%
 %% This implements the efficient sender-key encryption approach where:
 %% 1. Sender encrypts message with their private key
@@ -4013,9 +3992,7 @@ encrypt_with_sender_key(ClientState, Message) ->
     end.
 
 %% @private
-%% @doc Encrypt message for a single room member.
-%% @private
-%% @doc Get our private key for encryption.
+%% Get our private key for encryption.
 get_our_private_key(ClientState) ->
     %% Extract private key from client state keypair
     case ClientState#client_state.keypair of
@@ -4028,7 +4005,23 @@ get_our_private_key(ClientState) ->
     end.
 
 %% @private
-%% @doc Send encrypted messages to room members via server.
+%% Add a system message to the message history.
+%%
+%% System messages are used for:
+%% <ul>
+%%   <li>Command feedback and status updates</li>
+%%   <li>Error messages and warnings</li>
+%%   <li>Help text and instructions</li>
+%%   <li>WebSocket connection status notifications</li>
+%% </ul>
+%%
+%% The message is automatically timestamped with the current local time
+%% and added to the message history. System messages are displayed in
+%% yellow color to distinguish them from user messages.
+%%
+%% @param Message The system message text to display
+%% @param UIState Current UI state
+%% @returns Updated UI state with the new message added to history.
 add_system_message(Message, UIState) ->
     {{_Year, _Month, _Day}, {Hour, Min, Sec}} = calendar:local_time(),
     Timestamp = io_lib:format("~2..0w:~2..0w:~2..0w", [Hour, Min, Sec]),
@@ -4039,7 +4032,7 @@ add_system_message(Message, UIState) ->
     UIState#ui_state{message_history = CurrentMessages ++ [NewMessage]}.
 
 %% @private
-%% @doc Cleanup UI resources on exit.
+%% Cleanup UI resources on exit.
 %%
 %% Properly shuts down the ncurses interface and restores the terminal
 %% to its original state. This should be called before the application
