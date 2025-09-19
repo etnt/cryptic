@@ -176,6 +176,7 @@ handle_room_command(send_room_message, Params, Username) ->
     RoomId = maps:get(<<"room_id">>, Params),
     Message = maps:get(<<"message">>, Params),
 
+    ?msg_in("Room message from ~s to room ~s: ~s", [Username, RoomId, Message]),
     case cryptic_room_manager:send_room_message(RoomId, Username, Message) of
         {ok, MessageId} ->
             ?dbg("User ~s sent message to room ~s", [Username, RoomId]),
@@ -312,6 +313,9 @@ broadcast_room_message(
     ?dbg("DEBUG BROADCAST: RoomId=~p, MessageId=~p, Members=~p~n", [
         RoomId, MessageId, Members
     ]),
+    ?msg_out("Broadcasting room message from ~s to room ~s with ~p members", [
+        FromUsername, RoomId, length(Members)
+    ]),
 
     % Get room information for room name
     {ok, Room} = cryptic_room_manager:get_room_info(RoomId),
@@ -407,6 +411,11 @@ send_room_notification_to_member(
                     ?dbg("DEBUG SENDING: Found encrypted message for ~s", [
                         Member
                     ]),
+                    ?msg_out(
+                        "Sending room notification to member ~s for room ~s", [
+                            Member, RoomId
+                        ]
+                    ),
                     case ets:lookup(user_connections, Member) of
                         [{Member, Pid}] ->
                             Notification = #{

@@ -78,6 +78,7 @@
 
     %% E2E flow helpers
     send_encrypted_message/5,
+    send_message_x3dh/4,
     receive_and_decrypt_messages/3,
     peek_message_count/2
 ]).
@@ -1247,3 +1248,79 @@ parse_blob_object(BlobStr) ->
         base64:decode(lists:flatten(NonceB64)),
         base64:decode(lists:flatten(CiphB64))
     }.
+
+%%%===================================================================
+%%% X3DH Protocol Integration
+%%%===================================================================
+
+%% @doc Send message using X3DH protocol as specified in SESSION-MESSAGE-FLOW.md
+%%
+%% This function implements the full X3DH protocol flow:
+%% 1. Fetch recipient's key bundle (with OTPK consumption)
+%% 2. Perform 3DH key exchanges to establish session key
+%% 3. Include OTPK ID in message for receiver to find correct private key
+%% 4. Send encrypted message via WebSocket
+%%
+%% @param ServerUrl WebSocket server URL
+%% @param SenderKeys Complete sender key bundle from cryptic_lib:generate_client_keys/0
+%% @param ToUser Recipient username
+%% @param Message Binary message to send
+%% @returns ok | {error, Reason}
+-spec send_message_x3dh(string(), map(), string(), binary()) ->
+    ok | {error, term()}.
+send_message_x3dh(ServerUrl, SenderKeys, ToUser, Message) ->
+    try
+        %% Step 1: Get recipient's key bundle (server consumes OTPK)
+        case get_key_bundle(ServerUrl, ToUser) of
+            {error, Reason} ->
+                {error, {key_bundle_fetch_failed, Reason}};
+            {ok, RecipientBundle} ->
+                %% Step 2: Perform X3DH key exchange
+                case
+                    cryptic_lib:x3dh_sender_init(
+                        SenderKeys, RecipientBundle, Message
+                    )
+                of
+                    {error, Reason} ->
+                        {error, {x3dh_failed, Reason}};
+                    {ok, {MessageBlob, MessageId}} ->
+                        %% Step 3: Send encrypted message via WebSocket
+                        #{
+                            metadata := #{
+                                ephemeral_public := EphemeralPub,
+                                otpk_id := OtpkId,
+                                message_id := MessageId
+                            },
+                            ciphertext := Ciphertext,
+                            nonce := Nonce,
+                            signature := Signature
+                        } = MessageBlob,
+
+                        %% Create WebSocket command
+                        WSCommand = #{
+                            type => <<"send_message_x3dh">>,
+                            to => list_to_binary(ToUser),
+                            message_id => base64:encode(MessageId),
+                            ephemeral_public => base64:encode(EphemeralPub),
+                            otpk_id =>
+                                case OtpkId of
+                                    null -> null;
+                                    _ -> base64:encode(OtpkId)
+                                end,
+                            ciphertext => base64:encode(Ciphertext),
+                            nonce => base64:encode(Nonce),
+                            signature => base64:encode(Signature)
+                        },
+
+                        %% Send via WebSocket (simplified - would need actual WS client)
+                        case send_ws_command(ServerUrl, WSCommand) of
+                            {ok, _Response} ->
+                                ok;
+                            {error, Reason} ->
+                                {error, {websocket_send_failed, Reason}}
+                        end
+                end
+        end
+    catch
+        error:ErrorReason -> {error, ErrorReason}
+    end.

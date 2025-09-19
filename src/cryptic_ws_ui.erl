@@ -136,7 +136,14 @@
     % Whether to auto-display incoming messages
     auto_display = true :: boolean(),
     % Count of pending messages per user
-    pending_messages = #{} :: #{string() => integer()}
+    pending_messages = #{} :: #{string() => integer()},
+
+    %% Passphrase input mode
+
+    % Whether in passphrase input mode
+    passphrase_mode = false :: boolean(),
+    % Config directory for key loading
+    passphrase_config_dir :: string() | undefined
 }).
 
 %% Color pairs
@@ -202,34 +209,6 @@ start(Username, ServerHost) ->
 
     ok = cryptic_lib:initialize(),
 
-    %% Initialize client cryptographic keys
-    io:format("🔐 Initializing cryptographic keys for ~s...~n", [Username]),
-    ConfigDir =
-        case os:getenv("CRYPTIC_CONFIG_DIR") of
-            false ->
-                error(
-                    {missing_config_dir,
-                        "CRYPTIC_CONFIG_DIR environment variable not set"}
-                );
-            Dir ->
-                Dir
-        end,
-    ClientKeys =
-        %% TODO: In production, implement proper passphrase prompting here
-        %% For example:
-        %% - Check for CRYPTIC_PASSPHRASE environment variable
-        %% - Or prompt user via terminal input with disabled echo
-        %% - Or use GUI password dialog
-        %% - Or read from secure keystore
-        case cryptic_lib:initialize_client_keys(ConfigDir, <<"qwe123">>) of
-            {ok, Keys} ->
-                io:format("✅ Keys loaded successfully~n"),
-                Keys;
-            {error, Reason} ->
-                io:format("❌ Key initialization failed: ~p~n", [Reason]),
-                error({key_init_failed, Reason})
-        end,
-
     %% Start the event manager for logging
     {ok, _} = gen_event:start_link({local, cryptic_event_manager}),
 
@@ -282,11 +261,8 @@ start(Username, ServerHost) ->
         username = Username,
         cert_config = CertConfig,
         connection_status = disconnected,
-        keypair = {
-            maps:get(identity_dh_private, ClientKeys),
-            maps:get(identity_dh_public, ClientKeys)
-        },
-        client_keys = ClientKeys
+        keypair = undefined,
+        client_keys = undefined
     },
 
     %% Create initial UI state
@@ -319,7 +295,8 @@ start(Username, ServerHost) ->
         "Certificate: " ++ Username, WelcomeState2
     ),
     WelcomeState4 = add_system_message(
-        "Type 'connect' to establish WebSocket mTLS connection", WelcomeState3
+        "Type 'connect' to establish connection and initialize keys",
+        WelcomeState3
     ),
     WelcomeState5 = add_system_message(
         "Type 'help' for commands", WelcomeState4
@@ -420,12 +397,26 @@ position_cursor(UIState) ->
         current_input = Input,
         cursor_position = CursorPos,
         screen_height = Height,
-        screen_width = Width
+        screen_width = Width,
+        passphrase_mode = PassphraseMode
     } = UIState,
 
-    Prompt = "> ",
+    %% Use correct prompt based on mode
+    Prompt =
+        case PassphraseMode of
+            true -> "Passphrase: ";
+            false -> "> "
+        end,
     PromptLen = length(Prompt),
-    InputLine = Prompt ++ Input,
+
+    %% For passphrase mode, use masked input for length calculation
+    DisplayInput =
+        case PassphraseMode of
+            true -> string:chars($*, length(Input));
+            false -> Input
+        end,
+
+    InputLine = Prompt ++ DisplayInput,
 
     %% Calculate cursor screen position
     CursorScreenPos = PromptLen + CursorPos,
@@ -665,24 +656,33 @@ draw_messages([{From, Message, Timestamp} | Rest], Line, Width, UIState) ->
 %%
 %% @param UIState Current UI state to determine the appropriate help text.
 draw_help_bar(UIState) ->
-    #ui_state{screen_height = Height, screen_width = Width} = UIState,
+    #ui_state{
+        screen_height = Height,
+        screen_width = Width,
+        passphrase_mode = PassphraseMode
+    } = UIState,
 
-    WSChatState = UIState#ui_state.ws_chat_state,
     HelpLine =
-        case
-            {
-                WSChatState#ws_chat_state.connection_status,
-                UIState#ui_state.chat_mode
-            }
-        of
-            {disconnected, _} ->
-                "Commands: connect | help | quit";
-            {connected, false} ->
-                "Commands: help | send | chat | create_room | join_room | list_rooms | list_users | disconnect";
-            {connected, true} ->
-                "Chat Mode: Type message to send | :exit to leave chat | :help for commands";
-            {connecting, _} ->
-                "Connecting to WebSocket mTLS server..."
+        case PassphraseMode of
+            true ->
+                "Passphrase Mode: Type passphrase and press Enter | Ctrl+C to cancel";
+            false ->
+                WSChatState = UIState#ui_state.ws_chat_state,
+                case
+                    {
+                        WSChatState#ws_chat_state.connection_status,
+                        UIState#ui_state.chat_mode
+                    }
+                of
+                    {disconnected, _} ->
+                        "Commands: connect | help | quit";
+                    {connected, false} ->
+                        "Commands: help | send | chat | create_room | join_room | list_rooms | list_users | disconnect";
+                    {connected, true} ->
+                        "Chat Mode: Type message to send | :exit to leave chat | :help for commands";
+                    {connecting, _} ->
+                        "Connecting to WebSocket mTLS server..."
+                end
         end,
     HelpLineFmt = format_line(HelpLine, Width),
 
@@ -711,13 +711,26 @@ draw_input_line(UIState) ->
         current_input = Input,
         cursor_position = CursorPos,
         screen_height = Height,
-        screen_width = Width
+        screen_width = Width,
+        passphrase_mode = PassphraseMode
     } = UIState,
 
     %% Create input line with prompt
-    Prompt = "> ",
+    Prompt =
+        case PassphraseMode of
+            true -> "Passphrase: ";
+            false -> "> "
+        end,
     PromptLen = length(Prompt),
-    InputLine = Prompt ++ Input,
+
+    %% Mask input if in passphrase mode
+    DisplayInput =
+        case PassphraseMode of
+            true -> string:chars($*, length(Input));
+            false -> Input
+        end,
+
+    InputLine = Prompt ++ DisplayInput,
 
     %% Calculate cursor screen position
     CursorScreenPos = PromptLen + CursorPos,
@@ -781,6 +794,91 @@ draw_input_line(UIState) ->
 %% @param UIState Current UI state
 %% @returns Updated UI state after processing the input.
 handle_input(Input, UIState) ->
+    case UIState#ui_state.passphrase_mode of
+        true ->
+            %% Handle passphrase input mode
+            handle_passphrase_input(Input, UIState);
+        false ->
+            %% Normal input handling
+            handle_normal_input(Input, UIState)
+    end.
+
+%% @private
+%% Handle input when in passphrase mode.
+handle_passphrase_input(Input, UIState) ->
+    case Input of
+        quit ->
+            %% Cancel passphrase input
+            NewUIState = UIState#ui_state{
+                passphrase_mode = false,
+                passphrase_config_dir = undefined,
+                current_input = "",
+                cursor_position = 0
+            },
+            add_system_message(
+                "Connection cancelled - passphrase required", NewUIState
+            );
+        {char, Char} when Char >= 32, Char =< 126 ->
+            %% Add character to passphrase (don't display it)
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            {Before, After} = lists:split(CursorPos, CurrentInput),
+            NewInput = Before ++ [Char] ++ After,
+            NewCursorPos = CursorPos + 1,
+            UIState#ui_state{
+                current_input = NewInput,
+                cursor_position = NewCursorPos
+            };
+        {key, 10} ->
+            %% Enter pressed - process passphrase
+            Passphrase = list_to_binary(UIState#ui_state.current_input),
+            ConfigDir = UIState#ui_state.passphrase_config_dir,
+
+            %% Exit passphrase mode
+            NormalUIState = UIState#ui_state{
+                passphrase_mode = false,
+                passphrase_config_dir = undefined,
+                current_input = "",
+                cursor_position = 0
+            },
+
+            %% Process the key loading and connection
+            case Passphrase of
+                <<>> ->
+                    %% Empty passphrase not allowed
+                    add_system_message(
+                        "Empty passphrase not allowed", NormalUIState
+                    );
+                _ ->
+                    load_client_keys_and_connect(
+                        NormalUIState, ConfigDir, Passphrase
+                    )
+            end;
+        {key, ?ceKEY_BACKSPACE} ->
+            %% Handle backspace in passphrase mode
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            case CursorPos > 0 of
+                true ->
+                    {Before, After} = lists:split(CursorPos, CurrentInput),
+                    NewBefore = lists:droplast(Before),
+                    NewInput = NewBefore ++ After,
+                    NewCursorPos = CursorPos - 1,
+                    UIState#ui_state{
+                        current_input = NewInput,
+                        cursor_position = NewCursorPos
+                    };
+                false ->
+                    UIState
+            end;
+        _ ->
+            %% Ignore other keys in passphrase mode
+            UIState
+    end.
+
+%% @private
+%% Handle normal input (not in passphrase mode).
+handle_normal_input(Input, UIState) ->
     case Input of
         quit ->
             %% Send quit message to main loop
@@ -977,7 +1075,7 @@ process_command("help", UIState) ->
 process_command("help " ++ Rest, UIState) ->
     handle_help_command(Rest, UIState);
 process_command("connect", UIState) ->
-    %% Establish WebSocket mTLS connection
+    %% Implement 5-step authentication flow per SESSION-MESSAGE-FLOW.md
     WSChatState = UIState#ui_state.ws_chat_state,
     case WSChatState#ws_chat_state.connection_status of
         connected ->
@@ -987,109 +1085,30 @@ process_command("connect", UIState) ->
         connecting ->
             add_system_message("Connection already in progress", UIState);
         disconnected ->
-            %% Update status to connecting
-            NewWSChatState = WSChatState#ws_chat_state{
-                connection_status = connecting
-            },
-            ConnectingUIState = UIState#ui_state{
-                ws_chat_state = NewWSChatState
-            },
-            ConnectingState = add_system_message(
-                "Connecting to WebSocket mTLS server...", ConnectingUIState
-            ),
-
-            %% Attempt to connect
-            Username = WSChatState#ws_chat_state.username,
-            ServerHost = WSChatState#ws_chat_state.server_host,
-            CertConfig = WSChatState#ws_chat_state.cert_config,
-
-            case
-                cryptic_ws_client:start_link(Username, ServerHost, CertConfig)
-            of
-                {ok, ClientPid} ->
-                    %% Generate keypair for this user
-                    {PubKey, PrivKey} = cryptic_lib:gen_keypair(),
-
-                    %% Create a client state record with keypair
-                    ClientState = #client_state{
-                        ws_client_pid = ClientPid,
-                        username = Username,
-                        keypair = {PubKey, PrivKey}
-                    },
-                    %% Connection successful, set UI PID for message forwarding
-                    cryptic_ws_client:set_ui_pid(
-                        ClientState#client_state.ws_client_pid, self()
+            %% Step 1: Switch to passphrase input mode
+            case os:getenv("CRYPTIC_CONFIG_DIR") of
+                false ->
+                    add_system_message(
+                        "Error: CRYPTIC_CONFIG_DIR environment variable not set",
+                        UIState
+                    );
+                ConfigDir ->
+                    InitialState = add_system_message(
+                        "Starting secure connection...", UIState
+                    ),
+                    InitialState2 = add_system_message(
+                        "Enter passphrase for key decryption:", InitialState
                     ),
 
-                    %% Upload the public key to the server
-                    case
-                        cryptic_ws_client:send_command(ClientPid, #{
-                            type => <<"upload_prekey">>,
-                            prekey => base64:encode(PubKey)
-                        })
-                    of
-                        ok ->
-                            SuccessWSChatState = NewWSChatState#ws_chat_state{
-                                connection_status = connected,
-                                ws_client_state = {ok, ClientState},
-                                keypair = {PubKey, PrivKey}
-                            },
-                            SuccessUIState = ConnectingState#ui_state{
-                                ws_chat_state = SuccessWSChatState
-                            },
-                            SuccessState = add_system_message(
-                                "WebSocket mTLS connection established!",
-                                SuccessUIState
-                            ),
-                            SuccessState2 = add_system_message(
-                                "Authenticated as: " ++ Username, SuccessState
-                            ),
-                            SuccessState3 = add_system_message(
-                                "Keypair generated and uploaded to server",
-                                SuccessState2
-                            ),
-                            SuccessState3;
-                        queued ->
-                            %% Prekey upload queued until WebSocket connection is ready
-                            SuccessWSChatState = NewWSChatState#ws_chat_state{
-                                connection_status = connected,
-                                ws_client_state = {ok, ClientState},
-                                keypair = {PubKey, PrivKey}
-                            },
-                            SuccessUIState = ConnectingState#ui_state{
-                                ws_chat_state = SuccessWSChatState
-                            },
-                            SuccessState = add_system_message(
-                                "WebSocket mTLS connection established!",
-                                SuccessUIState
-                            ),
-                            SuccessState2 = add_system_message(
-                                "Authenticated as: " ++ Username, SuccessState
-                            ),
-                            SuccessState3 = add_system_message(
-                                "Keypair generated, prekey upload queued...",
-                                SuccessState2
-                            ),
-                            SuccessState3;
-                        {error, UploadReason} ->
-                            ErrMsg = io_lib:format(
-                                "Failed to upload prekey: ~p", [UploadReason]
-                            ),
-                            FailState = add_system_message(
-                                lists:flatten(ErrMsg), ConnectingState
-                            ),
-                            FailState
-                    end;
-                {error, Reason} ->
-                    %% Connection failed
-                    FailWSChatState = NewWSChatState#ws_chat_state{
-                        connection_status = disconnected
+                    %% Switch to passphrase input mode
+                    PassphraseState = InitialState2#ui_state{
+                        passphrase_mode = true,
+                        passphrase_config_dir = ConfigDir,
+                        current_input = "",
+                        cursor_position = 0
                     },
-                    FailUIState = ConnectingState#ui_state{
-                        ws_chat_state = FailWSChatState
-                    },
-                    ErrMsg = io_lib:format("Connection failed: ~p", [Reason]),
-                    add_system_message(lists:flatten(ErrMsg), FailUIState)
+
+                    PassphraseState
             end
     end;
 process_command("disconnect", UIState) ->
@@ -1140,11 +1159,11 @@ process_command("list_users", UIState) ->
         connected ->
             case WSChatState#ws_chat_state.ws_client_state of
                 {ok, ClientState} ->
+                    ListUsersCmd = #{type => <<"list_users">>},
+                    ?msg_out("UI sending list_users command: ~p", [ListUsersCmd]),
                     case
                         cryptic_ws_client:send_command(
-                            ClientState#client_state.ws_client_pid, #{
-                                type => <<"list_users">>
-                            }
+                            ClientState#client_state.ws_client_pid, ListUsersCmd
                         )
                     of
                         ok ->
@@ -1186,12 +1205,17 @@ process_command("send " ++ Rest, UIState) ->
                             %% Don't show status message, will show "You -> user: message" on success
 
                             %% First, get the recipient's prekey
+                            GetKeyBundleCmd = #{
+                                type => <<"get_key_bundle">>,
+                                user => list_to_binary(TrimmedToUser)
+                            },
+                            ?msg_out("UI requesting key bundle for ~s: ~p", [
+                                TrimmedToUser, GetKeyBundleCmd
+                            ]),
                             case
                                 cryptic_ws_client:send_command(
-                                    ClientState#client_state.ws_client_pid, #{
-                                        type => <<"get_prekey">>,
-                                        user => list_to_binary(TrimmedToUser)
-                                    }
+                                    ClientState#client_state.ws_client_pid,
+                                    GetKeyBundleCmd
                                 )
                             of
                                 ok ->
@@ -1504,7 +1528,7 @@ process_chat_command(Message, UIState) ->
                     case
                         cryptic_ws_client:send_command(
                             ClientState#client_state.ws_client_pid, #{
-                                type => <<"get_prekey">>,
+                                type => <<"get_key_bundle">>,
                                 user => list_to_binary(ToUser)
                             }
                         )
@@ -1576,6 +1600,7 @@ handle_websocket_message(Message, UIState) ->
     case Message of
         {text, JsonText} ->
             ?dbg("Attempting to decode JSON: ~p", [JsonText]),
+            ?msg_in("UI received WebSocket message: ~s", [JsonText]),
             try
                 Data = jsx:decode(JsonText),
                 ?dbg("Successfully decoded JSON: ~p", [Data]),
@@ -1605,8 +1630,12 @@ handle_websocket_message(Message, UIState) ->
                             Users
                         );
                     <<"prekey">> ->
-                        %% Prekey response - handle pending encrypted send
-                        handle_prekey_response(Data, UIState);
+                        %% Legacy prekey response - redirect to X3DH key bundle flow
+                        %% This ensures all message sending uses X3DH protocol
+                        handle_key_bundle_response(Data, UIState);
+                    <<"key_bundle">> ->
+                        %% Key bundle response - handle X3DH session establishment
+                        handle_key_bundle_response(Data, UIState);
                     <<"user_status">> ->
                         %% User status response (e.g., user offline) - handle pending send
                         handle_user_status_response(Data, UIState);
@@ -1702,118 +1731,396 @@ handle_websocket_message(Message, UIState) ->
             )
     end.
 
-%% @doc Handle prekey response and complete the encrypted message send.
+%% @doc Handle key bundle response and complete the X3DH session establishment.
 %%
-%% When we receive a prekey response from the server, we can now encrypt
-%% and send the pending message securely.
-handle_prekey_response(Data, UIState) ->
+%% When we receive a key bundle response from the server, we can now perform
+%% X3DH key agreement and send the encrypted message securely.
+handle_key_bundle_response(Data, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
+    ?dbg("handle_key_bundle_response called with Data: ~p", [Data]),
+    ?dbg("Current pending_operation: ~p", [
+        WSChatState#ws_chat_state.pending_operation
+    ]),
     case WSChatState#ws_chat_state.pending_operation of
-        #{
-            type := send_encrypted,
-            to_user := ToUser,
-            message := Message,
-            from_user := FromUser
-        } ->
-            case maps:get(<<"prekey">>, Data, undefined) of
-                undefined ->
-                    add_system_message("Error: No prekey in response", UIState);
-                PrekeyB64 ->
-                    try
-                        %% Decode the recipient's public key
-                        RecipientPubKey = base64:decode(PrekeyB64),
-
-                        %% Encrypt the message
-                        case
-                            cryptic_client_lib:encrypt_message(
-                                Message, RecipientPubKey
-                            )
-                        of
-                            {ok, {EphPub, Nonce, Cipher}} ->
-                                %% Send the encrypted message
-                                case
-                                    WSChatState#ws_chat_state.ws_client_state
-                                of
-                                    {ok, ClientState} ->
-                                        case
-                                            cryptic_ws_client:send_command(
-                                                ClientState#client_state.ws_client_pid,
-                                                #{
-                                                    type => <<"send_message">>,
-                                                    from => list_to_binary(
-                                                        FromUser
-                                                    ),
-                                                    to => list_to_binary(
-                                                        ToUser
-                                                    ),
-                                                    ephemeral => base64:encode(
-                                                        EphPub
-                                                    ),
-                                                    nonce => base64:encode(
-                                                        Nonce
-                                                    ),
-                                                    cipher => base64:encode(
-                                                        Cipher
-                                                    )
-                                                }
-                                            )
-                                        of
-                                            ok ->
-                                                %% Clear pending operation and show success
-                                                ClearWSChatState = WSChatState#ws_chat_state{
-                                                    pending_operation =
-                                                        undefined
-                                                },
-                                                ClearUIState = UIState#ui_state{
-                                                    ws_chat_state =
-                                                        ClearWSChatState
-                                                },
-                                                SenderText = io_lib:format(
-                                                    "You -> ~s", [ToUser]
-                                                ),
-                                                add_message(
-                                                    lists:flatten(SenderText),
-                                                    Message,
-                                                    ClearUIState
-                                                );
-                                            {error, Reason} ->
-                                                SendErrMsg = io_lib:format(
-                                                    "Failed to send encrypted message: ~p",
-                                                    [Reason]
-                                                ),
-                                                add_system_message(
-                                                    lists:flatten(SendErrMsg),
-                                                    UIState
-                                                )
-                                        end;
-                                    _ ->
-                                        add_system_message(
-                                            "WebSocket client not available",
-                                            UIState
-                                        )
-                                end;
-                            {error, Reason} ->
-                                EncryptErrMsg = io_lib:format(
-                                    "Failed to encrypt message: ~p", [Reason]
-                                ),
-                                add_system_message(
-                                    lists:flatten(EncryptErrMsg), UIState
-                                )
-                        end
-                    catch
-                        _:Error ->
-                            ProcessErrMsg = io_lib:format(
-                                "Failed to process prekey: ~p", [Error]
-                            ),
-                            add_system_message(
-                                lists:flatten(ProcessErrMsg), UIState
-                            )
-                    end
-            end;
+        #{type := send_encrypted} = SendOp ->
+            handle_key_bundle_for_sending(Data, SendOp, UIState);
+        #{type := decrypt_x3dh_message} = DecryptOp ->
+            handle_key_bundle_for_decryption(Data, DecryptOp, UIState);
         _ ->
-            %% No pending operation or wrong type
-            add_system_message("Received unexpected prekey response", UIState)
+            handle_unexpected_key_bundle_response(WSChatState, UIState)
     end.
+
+%% @private
+%% Handle key bundle response for sending encrypted messages (X3DH sender role).
+handle_key_bundle_for_sending(Data, SendOp, UIState) ->
+    #{to_user := ToUser, message := Message} = SendOp,
+    try
+        ?dbg("Processing key bundle response for sending", []),
+        RecipientBundle = extract_and_build_recipient_bundle(Data),
+        send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState)
+    catch
+        _:Error ->
+            add_system_message(
+                lists:flatten(
+                    io_lib:format("Error processing key bundle: ~p", [Error])
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Handle key bundle response for decrypting X3DH messages (X3DH receiver role).
+handle_key_bundle_for_decryption(Data, DecryptOp, UIState) ->
+    #{sender := From, recipient_blob := RecipientBlob} = DecryptOp,
+    ?dbg("MATCHED decrypt_x3dh_message case for sender: ~s", [From]),
+    try
+        ?dbg("Processing key bundle response for X3DH decryption from ~s", [
+            From
+        ]),
+
+        %% Extract and cache the sender's identity keys (for caching only)
+        {_SenderIdSignPub, _SenderKeyId} = extract_and_cache_identity_key(
+            Data, From
+        ),
+
+        %% Perform X3DH decryption (function gets signing key from message metadata)
+        decrypt_x3dh_message_with_key(
+            undefined, RecipientBlob, From, UIState
+        )
+    catch
+        _:DecryptError:Stacktrace ->
+            ?dbg(
+                "Error processing key bundle for decryption: ~p~n~p~n",
+                [DecryptError, Stacktrace]
+            ),
+            clear_pending_operation_and_add_error(
+                lists:flatten(
+                    io_lib:format(
+                        "Error processing key bundle for decryption: ~p", [
+                            DecryptError
+                        ]
+                    )
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Handle unexpected key bundle response when no matching pending operation.
+handle_unexpected_key_bundle_response(WSChatState, UIState) ->
+    ?dbg(
+        "UNEXPECTED: No matching pending operation for key bundle response", []
+    ),
+    ?dbg("Pending operation was: ~p", [
+        WSChatState#ws_chat_state.pending_operation
+    ]),
+    add_system_message("Received unexpected key bundle response", UIState).
+
+%% @private
+%% Extract key bundle data from response and build recipient bundle for X3DH.
+extract_and_build_recipient_bundle(Data) ->
+    %% Extract key bundle data from response
+    #{
+        <<"identity_sign_public">> := IdentitySignKeyB64,
+        <<"identity_dh_public">> := IdentityDHKeyB64,
+        <<"signed_prekey">> := SignedPrekeyB64,
+        <<"signed_prekey_signature">> := SignatureB64,
+        <<"key_id">> := KeyIdB64,
+        <<"one_time_prekey">> := OTPKData
+    } = Data,
+
+    %% Decode the key bundle components
+    IdentitySignKey = base64:decode(IdentitySignKeyB64),
+    IdentityDHKey = base64:decode(IdentityDHKeyB64),
+    SignedPrekey = base64:decode(SignedPrekeyB64),
+    Signature = base64:decode(SignatureB64),
+    KeyId = base64:decode(KeyIdB64),
+
+    %% Handle one-time prekey (could be null)
+    {OTPK, OTPKId} =
+        case OTPKData of
+            null ->
+                {undefined, undefined};
+            #{<<"public">> := OTPKPubB64, <<"id">> := IdB64} ->
+                {base64:decode(OTPKPubB64), base64:decode(IdB64)}
+        end,
+
+    %% Build recipient key bundle for X3DH
+    %% Server now sends both identity keys separately
+    RecipientBundle = #{
+        identity_sign_public => IdentitySignKey,
+        identity_dh_public => IdentityDHKey,
+        signed_prekey => #{
+            public => SignedPrekey,
+            signature => Signature
+        },
+        key_id => KeyId,
+        one_time_prekey =>
+            case OTPK of
+                undefined -> null;
+                _ -> #{id => OTPKId, public => OTPK}
+            end
+    },
+    ?dbg("Recipient bundle: ~p~n", [RecipientBundle]),
+    RecipientBundle.
+
+%% @private
+%% Send X3DH encrypted message using the recipient's key bundle.
+send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.ws_client_state of
+        {ok, ClientState} ->
+            SenderKeys = WSChatState#ws_chat_state.client_keys,
+
+            %% Perform X3DH and encrypt message
+            case
+                cryptic_lib:x3dh_sender_init(
+                    SenderKeys, RecipientBundle, list_to_binary(Message)
+                )
+            of
+                {ok, {MessageBlob, MessageId}} ->
+                    ?dbg("X3DH encryption successful: ~p", [MessageId]),
+                    send_x3dh_message_to_server(
+                        MessageBlob, MessageId, ToUser, ClientState, UIState
+                    );
+                {error, X3DHErr} ->
+                    add_system_message(
+                        lists:flatten(
+                            io_lib:format("X3DH key agreement failed: ~p", [
+                                X3DHErr
+                            ])
+                        ),
+                        UIState
+                    )
+            end;
+        {error, ClientErr} ->
+            add_system_message(
+                lists:flatten(
+                    io_lib:format("Client state error: ~p", [ClientErr])
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Send the X3DH encrypted message to the server via WebSocket.
+send_x3dh_message_to_server(
+    MessageBlob, MessageId, ToUser, ClientState, UIState
+) ->
+    %% Unpack MessageBlob to match existing handler format
+    #{
+        metadata := Metadata,
+        signature := MessageSignature,
+        ciphertext := Ciphertext,
+        nonce := Nonce
+    } = MessageBlob,
+
+    ?dbg("Metadata: ~p", [Metadata]),
+    #{
+        ephemeral_public := EphemeralPub,
+        otpk_id := OtpkId
+    } = Metadata,
+
+    %% Send the X3DH encrypted message with complete metadata
+    X3DHSendCmd = #{
+        type => <<"send_message_x3dh">>,
+        to => list_to_binary(ToUser),
+        message_id => base64:encode(MessageId),
+        ephemeral_public => base64:encode(EphemeralPub),
+        otpk_id =>
+            case OtpkId of
+                undefined -> null;
+                _ -> base64:encode(OtpkId)
+            end,
+        ciphertext => base64:encode(Ciphertext),
+        nonce => base64:encode(Nonce),
+        signature => base64:encode(MessageSignature),
+        %% Include complete metadata for proper X3DH signature verification
+        metadata => base64:encode(erlang:term_to_binary(Metadata))
+    },
+    ?msg_out("UI sending X3DH message to ~s: ~p", [ToUser, X3DHSendCmd]),
+    case
+        cryptic_ws_client:send_command(
+            ClientState#client_state.ws_client_pid, X3DHSendCmd
+        )
+    of
+        ok ->
+            %% Clear pending operation and show success
+            clear_pending_operation_and_add_message(
+                lists:flatten(
+                    io_lib:format("Encrypted message sent to ~s using X3DH", [
+                        ToUser
+                    ])
+                ),
+                UIState
+            );
+        {error, SendErr} ->
+            add_system_message(
+                lists:flatten(
+                    io_lib:format("Failed to send encrypted message: ~p", [
+                        SendErr
+                    ])
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Extract sender's identity key from key bundle response and cache it.
+extract_and_cache_identity_key(Data, From) ->
+    %% Extract both identity keys from the response
+    #{
+        <<"identity_sign_public">> := IdentitySignKeyB64,
+        <<"identity_dh_public">> := IdentityDHKeyB64
+    } = Data,
+    SenderIdSignPub = base64:decode(IdentitySignKeyB64),
+    SenderIdDHPub = base64:decode(IdentityDHKeyB64),
+
+    %% Extract the full key bundle data to match store_key_bundle format
+    #{
+        <<"signed_prekey">> := SignedPrekeyB64,
+        <<"signed_prekey_signature">> := SignatureB64,
+        <<"key_id">> := KeyIdB64,
+        <<"one_time_prekey">> := OTPKData
+    } = Data,
+
+    %% Decode the key bundle components
+    SignedPrekey = base64:decode(SignedPrekeyB64),
+    Signature = base64:decode(SignatureB64),
+    KeyId = base64:decode(KeyIdB64),
+
+    %% Handle one-time prekey (could be null)
+    OneTimePrekeys =
+        case OTPKData of
+            null ->
+                [];
+            #{<<"public">> := OTPKPubB64, <<"id">> := IdB64} ->
+                OTPKPub = base64:decode(OTPKPubB64),
+                OTPKId = base64:decode(IdB64),
+                [#{id => OTPKId, public => OTPKPub}]
+        end,
+
+    %% Build the complete key bundle in the format expected by store_key_bundle
+    User = maps:get(<<"user">>, Data, list_to_binary(From)),
+    KeyBundle = #{
+        identity_sign_public => SenderIdSignPub,
+        identity_dh_public => SenderIdDHPub,
+        signed_prekey_public => SignedPrekey,
+        signed_prekey_signature => Signature,
+        one_time_prekeys => OneTimePrekeys,
+        key_id => KeyId
+    },
+
+    %% Cache the key bundle
+    cryptic_lib:store_key_bundle(binary_to_list(User), KeyBundle),
+    ?dbg("Cached key bundle for ~s", [binary_to_list(User)]),
+    {SenderIdSignPub, KeyId}.
+
+%% @private
+%% Decrypt X3DH message using the sender's identity key.
+decrypt_x3dh_message_with_key(
+    _SenderIdPub, RecipientBlob, From, UIState
+) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.client_keys of
+        undefined ->
+            clear_pending_operation_and_add_error(
+                "No client keys available for X3DH decryption",
+                UIState
+            );
+        ClientKeys ->
+            %% Get the private key for the OTPK ID used
+            OtpkPrivateKey = find_otpk_private_key(RecipientBlob, ClientKeys),
+
+            %% Extract Alice's signing key from message metadata for signature verification
+            %% (not from cached key bundle which contains her DH key)
+            #{metadata := MessageMetadata} = RecipientBlob,
+            #{sender_identity_sign_public := AliceSigningKey} = MessageMetadata,
+
+            ?dbg(
+                "About to call x3dh_receiver_decrypt with:~n  AliceSigningKey (for sig verification): ~p~n  RecipientBlob: ~p~n  OtpkPrivateKey: ~p",
+                [
+                    AliceSigningKey,
+                    RecipientBlob,
+                    OtpkPrivateKey
+                ]
+            ),
+
+            case
+                cryptic_lib:x3dh_receiver_decrypt(
+                    ClientKeys,
+                    RecipientBlob,
+                    AliceSigningKey,
+                    OtpkPrivateKey
+                )
+            of
+                {ok, {PlaintextMessage, _MessageId}} ->
+                    ?dbg("Successfully decrypted X3DH message from ~s", [From]),
+                    DecryptedText = binary_to_list(PlaintextMessage),
+                    clear_pending_operation_and_add_message_from_user(
+                        From, DecryptedText, UIState
+                    );
+                {error, DecryptReason} ->
+                    ?dbg("Failed to decrypt X3DH message from ~s: ~p", [
+                        From, DecryptReason
+                    ]),
+                    clear_pending_operation_and_add_error(
+                        lists:flatten(
+                            io_lib:format(
+                                "Failed to decrypt message from ~s: ~p", [
+                                    From, DecryptReason
+                                ]
+                            )
+                        ),
+                        UIState
+                    )
+            end
+    end.
+
+%% @private
+%% Find the OTPK private key for the given recipient blob.
+find_otpk_private_key(RecipientBlob, ClientKeys) ->
+    OtpkId = maps:get(
+        otpk_id, maps:get(metadata, RecipientBlob, #{}), undefined
+    ),
+    case OtpkId of
+        undefined ->
+            ?dbg("No OTPK ID in message, using null", []),
+            null;
+        OtpkIdVal ->
+            case cryptic_lib:find_otpk_private_key(ClientKeys, OtpkIdVal) of
+                {ok, PrivKey} ->
+                    ?dbg("Found OTPK private key for ID ~p", [OtpkIdVal]),
+                    PrivKey;
+                {error, OtpkReason} ->
+                    ?dbg(
+                        "Warning: Could not find OTPK private key for ID ~p: ~p",
+                        [OtpkIdVal, OtpkReason]
+                    ),
+                    null
+            end
+    end.
+
+%% @private
+%% Clear pending operation and add a system message.
+clear_pending_operation_and_add_message(Message, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    ClearedChatState = WSChatState#ws_chat_state{pending_operation = undefined},
+    ClearedState = UIState#ui_state{ws_chat_state = ClearedChatState},
+    add_system_message(Message, ClearedState).
+
+%% @private
+%% Clear pending operation and add an error message.
+clear_pending_operation_and_add_error(ErrorMessage, UIState) ->
+    clear_pending_operation_and_add_message(ErrorMessage, UIState).
+
+%% @private
+%% Clear pending operation and add a message from a user.
+clear_pending_operation_and_add_message_from_user(From, DecryptedText, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    ClearedChatState = WSChatState#ws_chat_state{pending_operation = undefined},
+    ClearedUIState = UIState#ui_state{ws_chat_state = ClearedChatState},
+    add_message(From, DecryptedText, ClearedUIState).
 
 %% @doc Handle user status response from the server.
 %%
@@ -1862,210 +2169,70 @@ handle_user_status_response(Data, UIState) ->
 handle_prekey_received(User, PrekeyB64, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
     case WSChatState#ws_chat_state.pending_operation of
-        #{
-            type := send_encrypted,
-            to_user := ToUser,
-            message := Message,
-            from_user := FromUser
-        } ->
-            %% Check if this prekey matches our pending send operation
+        #{type := send_encrypted} = SendOp ->
+            handle_prekey_for_send_encrypted(User, PrekeyB64, SendOp, UIState);
+        #{type := decrypt_room_message} = _DecryptOp ->
+            %% Legacy room message decryption no longer supported
             UserStr = binary_to_list(User),
-            case ToUser =:= UserStr of
-                true ->
-                    %% This prekey matches our pending send operation
-                    try
-                        %% Decode the recipient's public key
-                        RecipientPubKey = base64:decode(PrekeyB64),
-
-                        %% Encrypt the message
-                        case
-                            cryptic_client_lib:encrypt_message(
-                                Message, RecipientPubKey
-                            )
-                        of
-                            {ok, {EphPub, Nonce, Cipher}} ->
-                                %% Send the encrypted message
-                                case
-                                    WSChatState#ws_chat_state.ws_client_state
-                                of
-                                    {ok, ClientState} ->
-                                        case
-                                            cryptic_ws_client:send_command(
-                                                ClientState#client_state.ws_client_pid,
-                                                #{
-                                                    type => <<"send_message">>,
-                                                    from => list_to_binary(
-                                                        FromUser
-                                                    ),
-                                                    to => list_to_binary(
-                                                        ToUser
-                                                    ),
-                                                    ephemeral => base64:encode(
-                                                        EphPub
-                                                    ),
-                                                    nonce => base64:encode(
-                                                        Nonce
-                                                    ),
-                                                    cipher => base64:encode(
-                                                        Cipher
-                                                    )
-                                                }
-                                            )
-                                        of
-                                            ok ->
-                                                %% Clear pending operation and show success
-                                                ClearWSChatState = WSChatState#ws_chat_state{
-                                                    pending_operation =
-                                                        undefined
-                                                },
-                                                ClearUIState = UIState#ui_state{
-                                                    ws_chat_state =
-                                                        ClearWSChatState
-                                                },
-                                                SenderText = io_lib:format(
-                                                    "You -> ~s", [ToUser]
-                                                ),
-                                                add_message(
-                                                    lists:flatten(SenderText),
-                                                    Message,
-                                                    ClearUIState
-                                                );
-                                            queued ->
-                                                %% Message queued, clear pending operation
-                                                ClearWSChatState = WSChatState#ws_chat_state{
-                                                    pending_operation =
-                                                        undefined
-                                                },
-                                                ClearUIState = UIState#ui_state{
-                                                    ws_chat_state =
-                                                        ClearWSChatState
-                                                },
-                                                MsgText = io_lib:format(
-                                                    "Encrypted message queued for ~s: ~s",
-                                                    [ToUser, Message]
-                                                ),
-                                                add_system_message(
-                                                    lists:flatten(MsgText),
-                                                    ClearUIState
-                                                );
-                                            {error, Reason} ->
-                                                SendErrMsg = io_lib:format(
-                                                    "Failed to send encrypted message: ~p",
-                                                    [Reason]
-                                                ),
-                                                add_system_message(
-                                                    lists:flatten(SendErrMsg),
-                                                    UIState
-                                                )
-                                        end;
-                                    _ ->
-                                        add_system_message(
-                                            "WebSocket client not available",
-                                            UIState
-                                        )
-                                end;
-                            {error, Reason} ->
-                                EncryptErrMsg = io_lib:format(
-                                    "Failed to encrypt message: ~p", [Reason]
-                                ),
-                                add_system_message(
-                                    lists:flatten(EncryptErrMsg), UIState
-                                )
-                        end
-                    catch
-                        _:Error ->
-                            ProcessErrMsg = io_lib:format(
-                                "Failed to process prekey: ~p", [Error]
-                            ),
-                            add_system_message(
-                                lists:flatten(ProcessErrMsg), UIState
-                            )
-                    end;
-                false ->
-                    %% User mismatch - just acknowledge
-                    MsgText = io_lib:format(
-                        "Received prekey for user ~s (not waiting for this user)",
-                        [UserStr]
-                    ),
-                    add_system_message(lists:flatten(MsgText), UIState)
-            end;
-        #{
-            type := decrypt_room_message,
-            sender_user := SenderUser,
-            room_id := RoomId,
-            ephemeral := EphemeralB64,
-            nonce := NonceB64,
-            cipher := CipherB64
-        } ->
-            %% Check if this prekey matches our pending room message decryption
-            UserStr = binary_to_list(User),
-            case SenderUser =:= UserStr of
-                true ->
-                    %% This prekey matches our pending room message decryption
-                    try
-                        %% Decode the sender's public key
-                        SenderPubKey = base64:decode(PrekeyB64),
-
-                        %% Decode message components
-                        Ephemeral = base64:decode(EphemeralB64),
-                        Nonce = base64:decode(NonceB64),
-                        Cipher = base64:decode(CipherB64),
-
-                        %% Decrypt the room message using sender's public key
-                        case
-                            cryptic_client_lib:decrypt_message(
-                                {Ephemeral, Nonce, Cipher}, SenderPubKey
-                            )
-                        of
-                            {ok, PlaintextMessage} ->
-                                %% Clear pending operation and display message
-                                ClearWSChatState = WSChatState#ws_chat_state{
-                                    pending_operation = undefined
-                                },
-                                ClearUIState = UIState#ui_state{
-                                    ws_chat_state = ClearWSChatState
-                                },
-                                SenderText = io_lib:format(
-                                    "[~s] ~s", [RoomId, UserStr]
-                                ),
-                                add_message(
-                                    lists:flatten(SenderText),
-                                    PlaintextMessage,
-                                    ClearUIState
-                                );
-                            {error, Reason} ->
-                                DecryptErrMsg = io_lib:format(
-                                    "Failed to decrypt room message from ~s: ~p",
-                                    [UserStr, Reason]
-                                ),
-                                add_system_message(
-                                    lists:flatten(DecryptErrMsg), UIState
-                                )
-                        end
-                    catch
-                        _:Error ->
-                            ProcessErrMsg = io_lib:format(
-                                "Failed to process room message prekey: ~p", [
-                                    Error
-                                ]
-                            ),
-                            add_system_message(
-                                lists:flatten(ProcessErrMsg), UIState
-                            )
-                    end;
-                false ->
-                    %% User mismatch - just acknowledge
-                    MsgText = io_lib:format(
-                        "Received prekey for user ~s (not waiting for this user)",
-                        [UserStr]
-                    ),
-                    add_system_message(lists:flatten(MsgText), UIState)
-            end;
+            ErrMsg = io_lib:format(
+                "Legacy room message decryption from ~s no longer supported. "
+                "Room messages must use X3DH protocol.",
+                [UserStr]
+            ),
+            add_system_message(lists:flatten(ErrMsg), UIState);
         _ ->
             %% No pending operation - just acknowledge
-            MsgText = io_lib:format("Received prekey for user ~s", [
-                binary_to_list(User)
-            ]),
+            UserStr = binary_to_list(User),
+            MsgText = io_lib:format("Received prekey for user ~s", [UserStr]),
+            add_system_message(lists:flatten(MsgText), UIState)
+    end.
+
+%% @private
+%% Handle prekey received for pending send_encrypted operation.
+%% Redirect to X3DH key bundle flow for consistency.
+handle_prekey_for_send_encrypted(User, _PrekeyB64, SendOp, UIState) ->
+    #{
+        to_user := ToUser
+    } = SendOp,
+    UserStr = binary_to_list(User),
+    case ToUser =:= UserStr of
+        true ->
+            %% Redirect to X3DH flow - request full key bundle instead of single prekey
+            WSChatState = UIState#ui_state.ws_chat_state,
+            case WSChatState#ws_chat_state.ws_client_state of
+                {ok, ClientState} ->
+                    %% Request key bundle for X3DH protocol
+                    KeyBundleCmd = #{
+                        type => <<"get_key_bundle">>,
+                        user => list_to_binary(ToUser)
+                    },
+                    case
+                        cryptic_ws_client:send_command(
+                            ClientState#client_state.ws_client_pid, KeyBundleCmd
+                        )
+                    of
+                        ok ->
+                            add_system_message(
+                                "Requesting X3DH key bundle for " ++ ToUser,
+                                UIState
+                            );
+                        {error, Reason} ->
+                            ErrMsg = io_lib:format(
+                                "Failed to request key bundle: ~p", [Reason]
+                            ),
+                            add_system_message(lists:flatten(ErrMsg), UIState)
+                    end;
+                _ ->
+                    add_system_message(
+                        "WebSocket client not available", UIState
+                    )
+            end;
+        false ->
+            %% User mismatch - just acknowledge
+            MsgText = io_lib:format(
+                "Received prekey for user ~s (not waiting for this user)",
+                [UserStr]
+            ),
             add_system_message(lists:flatten(MsgText), UIState)
     end.
 
@@ -2083,154 +2250,79 @@ handle_encrypted_message_received(Message, UIState) ->
                     "Received message without message field", UIState
                 );
             NestedMessage ->
-                %% Check if this is an encrypted message with the right fields
-                case
-                    {
-                        maps:get(<<"ephemeral">>, NestedMessage, undefined),
-                        maps:get(<<"nonce">>, NestedMessage, undefined),
-                        maps:get(<<"cipher">>, NestedMessage, undefined)
-                    }
-                of
-                    {undefined, _, _} ->
-                        add_system_message(
-                            "Received message missing ephemeral key", UIState
-                        );
-                    {_, undefined, _} ->
-                        add_system_message(
-                            "Received message missing nonce", UIState
-                        );
-                    {_, _, undefined} ->
-                        add_system_message(
-                            "Received message missing cipher", UIState
-                        );
-                    {EphemeralB64, NonceB64, CipherB64} ->
-                        Timestamp = maps:get(
-                            <<"timestamp">>,
-                            NestedMessage,
-                            erlang:system_time(seconds)
-                        ),
-
-                        %% Get our private key
-                        WSChatState = UIState#ui_state.ws_chat_state,
-                        case WSChatState#ws_chat_state.keypair of
-                            {_PubKey, PrivKey} ->
-                                %% Decode encrypted components
-                                EphemeralPub = base64:decode(EphemeralB64),
-                                Nonce = base64:decode(NonceB64),
-                                Cipher = base64:decode(CipherB64),
-
-                                %% Decrypt using cryptic_lib functions directly
-                                try
-                                    %% Compute shared secret
-                                    SharedSecret = cryptic_lib:scalarmult(
-                                        PrivKey, EphemeralPub
-                                    ),
-
-                                    %% Derive AEAD key using ephemeral public key as salt
-                                    AeadKey = cryptic_lib:derive_aead_key_ephemeral(
-                                        SharedSecret, EphemeralPub
-                                    ),
-
-                                    %% Decrypt message
-                                    case
-                                        cryptic_lib:aead_decrypt(
-                                            Cipher, AeadKey, Nonce, <<>>
-                                        )
-                                    of
-                                        error ->
-                                            CryptoErrMsg = io_lib:format(
-                                                "Failed to decrypt message from ~s: decryption_failed",
-                                                [From]
-                                            ),
-                                            add_system_message(
-                                                lists:flatten(CryptoErrMsg),
-                                                UIState
-                                            );
-                                        PlainBin ->
-                                            %% Convert back to string if possible
-                                            PlainText =
-                                                case
-                                                    unicode:characters_to_list(
-                                                        PlainBin
-                                                    )
-                                                of
-                                                    % Keep as binary if not valid UTF-8
-                                                    {error, _, _} ->
-                                                        PlainBin;
-                                                    % Keep as binary if incomplete
-                                                    {incomplete, _, _} ->
-                                                        PlainBin;
-                                                    % Convert to string
-                                                    List ->
-                                                        List
-                                                end,
-
-                                            %% Add to inbox and update message count
-                                            NewInbox =
-                                                UIState#ui_state.inbox ++
-                                                    [
-                                                        {From, PlainText,
-                                                            Timestamp}
-                                                    ],
-                                            MessageCount = length(NewInbox),
-
-                                            %% Update pending message count for sender
-                                            PendingMessages =
-                                                UIState#ui_state.pending_messages,
-                                            CurrentCount = maps:get(
-                                                From, PendingMessages, 0
-                                            ),
-                                            NewPendingMessages = maps:put(
-                                                From,
-                                                CurrentCount + 1,
-                                                PendingMessages
-                                            ),
-
-                                            TempUIState = UIState#ui_state{
-                                                inbox = NewInbox,
-                                                message_count = MessageCount,
-                                                pending_messages =
-                                                    NewPendingMessages
-                                            },
-
-                                            %% Check auto_display setting
-                                            case
-                                                UIState#ui_state.auto_display
-                                            of
-                                                true ->
-                                                    %% Show message immediately and clear pending count
-                                                    ClearedPendingMessages = maps:put(
-                                                        From,
-                                                        0,
-                                                        NewPendingMessages
-                                                    ),
-                                                    NewUIState = TempUIState#ui_state{
-                                                        pending_messages =
-                                                            ClearedPendingMessages
-                                                    },
-                                                    add_message(
-                                                        From,
-                                                        PlainText,
-                                                        NewUIState
-                                                    );
-                                                false ->
-                                                    %% Just store in inbox, no notification needed
-                                                    TempUIState
-                                            end
-                                    end
-                                catch
-                                    error:CryptoReason ->
-                                        CatchErrMsg = io_lib:format(
-                                            "Failed to decrypt message from ~s: ~p",
-                                            [From, CryptoReason]
-                                        ),
-                                        add_system_message(
-                                            lists:flatten(CatchErrMsg), UIState
-                                        )
-                                end;
-                            undefined ->
+                %% Check if this is an X3DH encrypted message
+                case maps:get(<<"message_type">>, NestedMessage, undefined) of
+                    <<"x3dh">> ->
+                        %% Handle X3DH message with correct field names
+                        case
+                            {
+                                maps:get(
+                                    <<"ephemeral_public">>,
+                                    NestedMessage,
+                                    undefined
+                                ),
+                                maps:get(<<"nonce">>, NestedMessage, undefined),
+                                maps:get(
+                                    <<"ciphertext">>, NestedMessage, undefined
+                                )
+                            }
+                        of
+                            {undefined, _, _} ->
                                 add_system_message(
-                                    "No keypair available for decryption",
+                                    "Received X3DH message missing ephemeral_public",
+                                    UIState
+                                );
+                            {_, undefined, _} ->
+                                add_system_message(
+                                    "Received X3DH message missing nonce",
+                                    UIState
+                                );
+                            {_, _, undefined} ->
+                                add_system_message(
+                                    "Received X3DH message missing ciphertext",
+                                    UIState
+                                );
+                            {EphemeralPubB64, NonceB64, CiphertextB64} ->
+                                handle_x3dh_message(
+                                    From,
+                                    NestedMessage,
+                                    EphemeralPubB64,
+                                    NonceB64,
+                                    CiphertextB64,
+                                    UIState
+                                )
+                        end;
+                    _ ->
+                        %% Check if this is a legacy encrypted message with the old field names
+                        case
+                            {
+                                maps:get(
+                                    <<"ephemeral">>, NestedMessage, undefined
+                                ),
+                                maps:get(<<"nonce">>, NestedMessage, undefined),
+                                maps:get(<<"cipher">>, NestedMessage, undefined)
+                            }
+                        of
+                            {undefined, _, _} ->
+                                add_system_message(
+                                    "Received message missing ephemeral key",
+                                    UIState
+                                );
+                            {_, undefined, _} ->
+                                add_system_message(
+                                    "Received message missing nonce", UIState
+                                );
+                            {_, _, undefined} ->
+                                add_system_message(
+                                    "Received message missing cipher", UIState
+                                );
+                            {EphemeralB64, NonceB64, CipherB64} ->
+                                handle_legacy_encrypted_message(
+                                    From,
+                                    NestedMessage,
+                                    EphemeralB64,
+                                    NonceB64,
+                                    CipherB64,
                                     UIState
                                 )
                         end
@@ -2802,7 +2894,7 @@ handle_room_message(Data, UIState) ->
             Content = binary_to_list(maps:get(<<"message">>, Data, <<"">>)),
             SenderText = io_lib:format("~s@~s", [From, RoomName]),
             add_message(lists:flatten(SenderText), Content, UIState);
-        {EphemeralB64, CipherB64, NonceB64} ->
+        {_EphemeralB64, CipherB64, _NonceB64} ->
             %% Encrypted room message - decrypt it
             ?dbg("Decrypting room message: cipher=~p", [CipherB64]),
             WSChatState = UIState#ui_state.ws_chat_state,
@@ -2818,34 +2910,14 @@ handle_room_message(Data, UIState) ->
                     %% Request sender's public key from server
                     WSChatState = UIState#ui_state.ws_chat_state,
                     case WSChatState#ws_chat_state.ws_client_state of
-                        {ok, ClientState} ->
-                            %% Set pending operation for room message decryption
-                            PendingOp = #{
-                                type => decrypt_room_message,
-                                sender_user => From,
-                                room_id => RoomName,
-                                ephemeral => EphemeralB64,
-                                nonce => NonceB64,
-                                cipher => CipherB64
-                            },
-
-                            %% Request sender's public key (prekey)
-                            Command = #{
-                                <<"type">> => <<"get_prekey">>,
-                                <<"user">> => list_to_binary(From)
-                            },
-
-                            cryptic_ws_client:send_command(
-                                ClientState#client_state.ws_client_pid, Command
+                        {ok, _ClientState} ->
+                            %% Legacy room message format not supported - room messages should use X3DH
+                            ErrMsg = io_lib:format(
+                                "Room message from ~s uses legacy encryption format. "
+                                "Room messages must be migrated to use X3DH protocol.",
+                                [From]
                             ),
-
-                            %% Update UI state with pending decryption
-                            UpdatedWSChatState = WSChatState#ws_chat_state{
-                                pending_operation = PendingOp
-                            },
-                            UIState#ui_state{
-                                ws_chat_state = UpdatedWSChatState
-                            };
+                            add_system_message(lists:flatten(ErrMsg), UIState);
                         error ->
                             add_system_message(
                                 "No WebSocket connection for key retrieval",
@@ -3928,6 +4000,7 @@ send_encrypted_room_message(ClientState, RoomId, Message) ->
                 },
 
                 ?dbg("Sending encrypted room message command: ~p", [Command]),
+                ?msg_out("UI sending encrypted room message: ~p", [Command]),
                 cryptic_ws_client:send_command(
                     ClientState#client_state.ws_client_pid, Command
                 ),
@@ -4005,6 +4078,243 @@ get_our_private_key(ClientState) ->
     end.
 
 %% @private
+%% Complete the client key loading and connection process.
+%%
+%% Implements steps 2-5 of the authentication flow:
+%% Step 2: Load/generate encrypted keys
+%% Step 3: Establish WebSocket mTLS connection
+%% Step 4: Upload identity keys to server
+%% Step 5: Send prekey bundle per SESSION-MESSAGE-FLOW.md protocol
+%%
+%% @param UIState Current UI state
+%% @param ConfigDir Configuration directory path
+%% @param Passphrase User-provided passphrase for key decryption
+%% @returns Updated UI state with connection results
+load_client_keys_and_connect(UIState, ConfigDir, Passphrase) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+
+    %% Step 2: Load/generate encrypted keys
+    case cryptic_lib:initialize_client_keys(ConfigDir, Passphrase) of
+        {ok, ClientKeys} ->
+            KeysState = add_system_message(
+                "Keys loaded successfully", UIState
+            ),
+
+            %% Update status to connecting
+            NewWSChatState = WSChatState#ws_chat_state{
+                connection_status = connecting,
+                client_keys = ClientKeys,
+                keypair = {
+                    maps:get(identity_dh_private, ClientKeys),
+                    maps:get(identity_dh_public, ClientKeys)
+                }
+            },
+            ConnectingUIState = KeysState#ui_state{
+                ws_chat_state = NewWSChatState
+            },
+            ConnectingState = add_system_message(
+                "Establishing WebSocket mTLS connection...", ConnectingUIState
+            ),
+
+            %% Step 3: Establish WebSocket mTLS connection
+            Username = WSChatState#ws_chat_state.username,
+            ServerHost = WSChatState#ws_chat_state.server_host,
+            CertConfig = WSChatState#ws_chat_state.cert_config,
+
+            case
+                cryptic_ws_client:start_link(Username, ServerHost, CertConfig)
+            of
+                {ok, ClientPid} ->
+                    %% Create client state record
+                    ClientState = #client_state{
+                        ws_client_pid = ClientPid,
+                        username = Username,
+                        keypair = {
+                            maps:get(identity_dh_private, ClientKeys),
+                            maps:get(identity_dh_public, ClientKeys)
+                        }
+                    },
+
+                    %% Set UI PID for message forwarding
+                    cryptic_ws_client:set_ui_pid(ClientPid, self()),
+
+                    %% Step 4: Upload identity keys to server
+                    %% Use identity_sign_public for signature verification (Ed25519)
+                    IdentitySignPublicKey = maps:get(
+                        identity_sign_public, ClientKeys
+                    ),
+                    IdentityDHPublicKey = maps:get(
+                        identity_dh_public, ClientKeys
+                    ),
+                    SignedPrekeyPublic = maps:get(
+                        signed_prekey_public, ClientKeys
+                    ),
+                    SignedPrekeySignature = maps:get(
+                        signed_prekey_signature, ClientKeys
+                    ),
+
+                    UploadKeysCmd = #{
+                        type => <<"upload_identity_keys">>,
+                        identity_sign_public => base64:encode(
+                            IdentitySignPublicKey
+                        ),
+                        identity_dh_public => base64:encode(
+                            IdentityDHPublicKey
+                        ),
+                        signed_prekey_public => base64:encode(
+                            SignedPrekeyPublic
+                        ),
+                        signed_prekey_signature => base64:encode(
+                            SignedPrekeySignature
+                        )
+                    },
+                    ?msg_out("UI uploading identity keys: ~p", [UploadKeysCmd]),
+                    case
+                        cryptic_ws_client:send_command(ClientPid, UploadKeysCmd)
+                    of
+                        ok ->
+                            %% Step 5: Send prekey bundle per SESSION-MESSAGE-FLOW.md
+                            upload_prekey_bundle_and_finalize(
+                                ConnectingState,
+                                ClientPid,
+                                ClientState,
+                                NewWSChatState,
+                                ClientKeys
+                            );
+                        queued ->
+                            %% Identity upload queued, continue with prekey bundle
+                            upload_prekey_bundle_and_finalize(
+                                ConnectingState,
+                                ClientPid,
+                                ClientState,
+                                NewWSChatState,
+                                ClientKeys
+                            );
+                        {error, UploadReason} ->
+                            ErrMsg = io_lib:format(
+                                "Failed to upload identity keys: ~p", [
+                                    UploadReason
+                                ]
+                            ),
+                            add_system_message(
+                                lists:flatten(ErrMsg), ConnectingState
+                            )
+                    end;
+                {error, ConnectionReason} ->
+                    %% Connection failed
+                    FailWSChatState = NewWSChatState#ws_chat_state{
+                        connection_status = disconnected
+                    },
+                    FailUIState = ConnectingState#ui_state{
+                        ws_chat_state = FailWSChatState
+                    },
+                    ErrMsg = io_lib:format("WebSocket connection failed: ~p", [
+                        ConnectionReason
+                    ]),
+                    add_system_message(lists:flatten(ErrMsg), FailUIState)
+            end;
+        {error, KeyReason} ->
+            ErrMsg = io_lib:format("ERROR: Key initialization failed: ~p", [
+                KeyReason
+            ]),
+            add_system_message(lists:flatten(ErrMsg), UIState)
+    end.
+
+%% @private
+%% Upload prekey bundle and finalize connection.
+%%
+%% Implements Step 5 of the authentication flow by uploading the complete
+%% prekey bundle (one-time prekeys) as specified in SESSION-MESSAGE-FLOW.md.
+%%
+%% @param UIState Current UI state
+%% @param ClientPid WebSocket client PID
+%% @param ClientState Client state record
+%% @param WSChatState WebSocket chat state
+%% @param ClientKeys Complete client key set
+%% @returns Updated UI state with final connection status
+upload_prekey_bundle_and_finalize(
+    UIState, ClientPid, ClientState, WSChatState, ClientKeys
+) ->
+    %% Step 5: Upload one-time prekeys (prekey bundle)
+    OneTimePrekeys = maps:get(one_time_prekeys, ClientKeys),
+    PrekeyBundle = lists:map(
+        fun(#{public := PubKey, id := KeyId}) ->
+            #{
+                id => base64:encode(KeyId),
+                public_key => base64:encode(PubKey)
+            }
+        end,
+        OneTimePrekeys
+    ),
+
+    PrekeyBundleCmd = #{
+        type => <<"upload_prekey_bundle">>,
+        one_time_prekeys => PrekeyBundle
+    },
+    ?msg_out("UI uploading prekey bundle: ~p", [PrekeyBundleCmd]),
+    case cryptic_ws_client:send_command(ClientPid, PrekeyBundleCmd) of
+        ok ->
+            %% All steps completed successfully
+            SuccessWSChatState = WSChatState#ws_chat_state{
+                connection_status = connected,
+                ws_client_state = {ok, ClientState}
+            },
+            SuccessUIState = UIState#ui_state{
+                ws_chat_state = SuccessWSChatState
+            },
+            SuccessState = add_system_message(
+                "Secure connection established!", SuccessUIState
+            ),
+            SuccessState2 = add_system_message(
+                "Identity keys uploaded", SuccessState
+            ),
+            SuccessState3 = add_system_message(
+                "Prekey bundle uploaded (" ++
+                    integer_to_list(length(OneTimePrekeys)) ++ " keys)",
+                SuccessState2
+            ),
+            SuccessState4 = add_system_message(
+                "Ready for secure messaging!", SuccessState3
+            ),
+            SuccessState4;
+        queued ->
+            %% Prekey bundle upload queued
+            SuccessWSChatState = WSChatState#ws_chat_state{
+                connection_status = connected,
+                ws_client_state = {ok, ClientState}
+            },
+            SuccessUIState = UIState#ui_state{
+                ws_chat_state = SuccessWSChatState
+            },
+            SuccessState = add_system_message(
+                "Secure connection established!", SuccessUIState
+            ),
+            SuccessState2 = add_system_message(
+                "Identity keys uploaded", SuccessState
+            ),
+            SuccessState3 = add_system_message(
+                "Prekey bundle upload queued...", SuccessState2
+            ),
+            SuccessState3;
+        {error, BundleReason} ->
+            %% Prekey bundle upload failed, but connection is still valid
+            SuccessWSChatState = WSChatState#ws_chat_state{
+                connection_status = connected,
+                ws_client_state = {ok, ClientState}
+            },
+            SuccessUIState = UIState#ui_state{
+                ws_chat_state = SuccessWSChatState
+            },
+            SuccessState = add_system_message(
+                "Connection established with warnings", SuccessUIState
+            ),
+            ErrMsg = io_lib:format("Prekey bundle upload failed: ~p", [
+                BundleReason
+            ]),
+            add_system_message(lists:flatten(ErrMsg), SuccessState)
+    end.
+
+%% @private
 %% Add a system message to the message history.
 %%
 %% System messages are used for:
@@ -4030,6 +4340,678 @@ add_system_message(Message, UIState) ->
     CurrentMessages = UIState#ui_state.message_history,
 
     UIState#ui_state{message_history = CurrentMessages ++ [NewMessage]}.
+
+%% @private
+%% Handle X3DH encrypted message with proper field names.
+handle_x3dh_message(
+    From, NestedMessage, EphemeralPubB64, NonceB64, CiphertextB64, UIState
+) ->
+    try
+        ?dbg("Handling X3DH message from ~s", [From]),
+        case validate_x3dh_message_components(NestedMessage) of
+            {ok, Components} ->
+                process_x3dh_message_with_components(
+                    From,
+                    NestedMessage,
+                    EphemeralPubB64,
+                    NonceB64,
+                    CiphertextB64,
+                    Components,
+                    UIState
+                );
+            {error, ErrorMsg} ->
+                add_system_message(ErrorMsg, UIState)
+        end
+    catch
+        _:Error ->
+            add_system_message(
+                lists:flatten(
+                    io_lib:format("Error handling X3DH message: ~p", [Error])
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Validate that all required X3DH message components are present.
+validate_x3dh_message_components(NestedMessage) ->
+    SignatureB64 = maps:get(<<"signature">>, NestedMessage, undefined),
+    MessageIdB64 = maps:get(<<"message_id">>, NestedMessage, undefined),
+    MetadataB64 = maps:get(<<"metadata">>, NestedMessage, undefined),
+    OtpkId = maps:get(<<"otpk_id">>, NestedMessage, undefined),
+
+    case {SignatureB64, MessageIdB64, MetadataB64} of
+        {undefined, _, _} ->
+            {error, "X3DH message missing signature"};
+        {_, undefined, _} ->
+            {error, "X3DH message missing message_id"};
+        {_, _, undefined} ->
+            {error, "X3DH message missing metadata"};
+        {SignatureB64, MessageIdB64, MetadataB64} ->
+            {ok, #{
+                signature_b64 => SignatureB64,
+                message_id_b64 => MessageIdB64,
+                metadata_b64 => MetadataB64,
+                otpk_id => OtpkId
+            }}
+    end.
+
+%% @private
+%% Process X3DH message with validated components.
+process_x3dh_message_with_components(
+    From,
+    NestedMessage,
+    EphemeralPubB64,
+    NonceB64,
+    CiphertextB64,
+    Components,
+    UIState
+) ->
+    #{
+        signature_b64 := SignatureB64,
+        message_id_b64 := MessageIdB64,
+        metadata_b64 := MetadataB64,
+        otpk_id := OtpkId
+    } = Components,
+
+    %% Decode components
+    DecodedComponents = decode_x3dh_components(
+        EphemeralPubB64,
+        NonceB64,
+        CiphertextB64,
+        SignatureB64,
+        MessageIdB64,
+        MetadataB64
+    ),
+
+    ?dbg(
+        "Decoded X3DH components: EphemeralPub(~p), Nonce(~p), Ciphertext(~p), Signature(~p), MessageId(~p), OtpkId(~p)",
+        [
+            maps:get(ephemeral_pub, DecodedComponents),
+            maps:get(nonce, DecodedComponents),
+            maps:get(ciphertext, DecodedComponents),
+            maps:get(signature, DecodedComponents),
+            maps:get(message_id, DecodedComponents),
+            OtpkId
+        ]
+    ),
+    ?dbg("Alice's transmitted metadata: ~p", [
+        maps:get(metadata, DecodedComponents)
+    ]),
+
+    %% Check if we have client keys
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.client_keys of
+        undefined ->
+            add_system_message(
+                "No client keys available for X3DH decryption",
+                UIState
+            );
+        ClientKeys ->
+            process_x3dh_with_client_keys(
+                From, NestedMessage, DecodedComponents, ClientKeys, UIState
+            )
+    end.
+
+%% @private
+%% Decode all X3DH message components from base64.
+decode_x3dh_components(
+    EphemeralPubB64,
+    NonceB64,
+    CiphertextB64,
+    SignatureB64,
+    MessageIdB64,
+    MetadataB64
+) ->
+    #{
+        ephemeral_pub => base64:decode(EphemeralPubB64),
+        nonce => base64:decode(NonceB64),
+        ciphertext => base64:decode(CiphertextB64),
+        signature => base64:decode(SignatureB64),
+        message_id => base64:decode(MessageIdB64),
+        metadata => erlang:binary_to_term(base64:decode(MetadataB64))
+    }.
+
+%% @private
+%% Process X3DH message when we have client keys available.
+process_x3dh_with_client_keys(
+    From, NestedMessage, DecodedComponents, ClientKeys, UIState
+) ->
+    ?dbg("Using client keys for X3DH decryption~n", []),
+
+    %% Build recipient blob from decoded components
+    RecipientBlob = build_recipient_blob(DecodedComponents),
+
+    ?dbg("Attempting X3DH decryption with RecipientBlob: ~p", [RecipientBlob]),
+
+    %% Extract sender's identity keys from metadata (sent by Alice)
+    #{metadata := Metadata} = RecipientBlob,
+    case
+        {
+            maps:get(sender_identity_dh_public, Metadata, undefined),
+            maps:get(sender_identity_sign_public, Metadata, undefined)
+        }
+    of
+        {undefined, _} ->
+            ?info(
+                "No sender_identity_dh_public in metadata, falling back to key bundle lookup",
+                []
+            ),
+            %% Fallback to old method for compatibility
+            handle_sender_key_bundle_lookup(
+                From, NestedMessage, RecipientBlob, ClientKeys, UIState
+            );
+        {_, undefined} ->
+            ?info(
+                "No sender_identity_sign_public in metadata, falling back to key bundle lookup",
+                []
+            ),
+            %% Fallback to old method for compatibility
+            handle_sender_key_bundle_lookup(
+                From, NestedMessage, RecipientBlob, ClientKeys, UIState
+            );
+        {SenderIdDHPub, SenderIdPub} ->
+            ?info(
+                "Found sender identity keys in metadata (DH: ~p, Sign: ~p), proceeding with direct decrypt",
+                [SenderIdDHPub, SenderIdPub]
+            ),
+            %% Proceed directly with X3DH decryption using Bob's own keys
+            proceed_with_x3dh_decrypt_direct(
+                SenderIdPub,
+                RecipientBlob,
+                ClientKeys,
+                From,
+                UIState,
+                NestedMessage
+            )
+    end.
+
+%% @private
+%% Build recipient blob from decoded X3DH components.
+build_recipient_blob(DecodedComponents) ->
+    #{
+        metadata => maps:get(metadata, DecodedComponents),
+        signature => maps:get(signature, DecodedComponents),
+        ciphertext => maps:get(ciphertext, DecodedComponents),
+        nonce => maps:get(nonce, DecodedComponents)
+    }.
+
+%% @private
+%% Handle sender key bundle lookup - use cached or request from server.
+handle_sender_key_bundle_lookup(
+    From, NestedMessage, RecipientBlob, ClientKeys, UIState
+) ->
+    case cryptic_lib:get_key_bundle(From) of
+        {ok, KeyBundle} ->
+            %% Use the DH key from the cached bundle (not the signing key)
+            SenderIdDHPub = maps:get(identity_dh_public, KeyBundle, <<>>),
+            ?dbg("Found cached key bundle for ~s, proceeding with decrypt", [
+                From
+            ]),
+            proceed_with_x3dh_decrypt(
+                SenderIdDHPub,
+                RecipientBlob,
+                ClientKeys,
+                From,
+                UIState,
+                NestedMessage
+            );
+        _ ->
+            ?dbg("Key bundle not found for ~s, requesting from server", [From]),
+            request_sender_key_bundle(
+                From, NestedMessage, RecipientBlob, UIState
+            )
+    end.
+
+%% @private
+%% Request sender's key bundle from server and store pending operation.
+request_sender_key_bundle(From, NestedMessage, RecipientBlob, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.ws_client_state of
+        {ok, ClientState} ->
+            send_key_bundle_request_and_store_pending(
+                From,
+                NestedMessage,
+                RecipientBlob,
+                ClientState,
+                WSChatState,
+                UIState
+            );
+        _ ->
+            ?dbg("Not connected to server", []),
+            add_system_message("Not connected to server", UIState)
+    end.
+
+%% @private
+%% Send key bundle request to server and store pending X3DH operation.
+send_key_bundle_request_and_store_pending(
+    From, NestedMessage, RecipientBlob, ClientState, WSChatState, UIState
+) ->
+    GetKeyBundleCmd = #{
+        type => <<"get_key_bundle">>,
+        user => list_to_binary(From)
+    },
+    ?msg_out("UI requesting key bundle for X3DH decryption from ~s: ~p", [
+        From, GetKeyBundleCmd
+    ]),
+    case
+        cryptic_ws_client:send_command(
+            ClientState#client_state.ws_client_pid,
+            GetKeyBundleCmd
+        )
+    of
+        ok ->
+            store_pending_x3dh_operation(
+                From, NestedMessage, RecipientBlob, WSChatState, UIState
+            );
+        {error, Err} ->
+            ?dbg("Failed to request key bundle: ~p", [Err]),
+            add_system_message(
+                lists:flatten(
+                    io_lib:format("Failed to request key bundle: ~p", [Err])
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Store pending X3DH operation for processing when key bundle arrives.
+store_pending_x3dh_operation(
+    From, NestedMessage, RecipientBlob, WSChatState, UIState
+) ->
+    PendingOp = #{
+        type => decrypt_x3dh_message,
+        sender => From,
+        recipient_blob => RecipientBlob,
+        nested_message => NestedMessage
+    },
+    UpdatedWSChatState = WSChatState#ws_chat_state{
+        pending_operation = PendingOp
+    },
+    UpdatedUIState = UIState#ui_state{
+        ws_chat_state = UpdatedWSChatState
+    },
+    ?dbg("Stored pending X3DH message for ~s, returning updated UI state", [
+        From
+    ]),
+    add_system_message(
+        lists:flatten(
+            io_lib:format("Requesting key bundle for ~s...", [From])
+        ),
+        UpdatedUIState
+    ).
+
+%% Helper function to proceed with X3DH decryption once we have sender's identity key
+proceed_with_x3dh_decrypt(
+    SenderIdPub, RecipientBlob, ClientKeys, From, UIState, NestedMessage
+) ->
+    %% Get the sender's key ID from the cached key bundle
+    SenderKeyId =
+        case cryptic_lib:get_key_bundle(From) of
+            {ok, SenderBundle} -> maps:get(key_id, SenderBundle, <<>>);
+            _ -> <<>>
+        end,
+
+    %% Get the private key for the OTPK ID used
+    OtpkId = maps:get(
+        otpk_id,
+        maps:get(metadata, RecipientBlob, #{}),
+        undefined
+    ),
+    OtpkPrivateKey =
+        case OtpkId of
+            undefined ->
+                ?dbg("No OTPK ID in message, using null", []),
+                null;
+            OtpkIdVal ->
+                %% Look up the private key for this OTPK ID
+                case
+                    cryptic_lib:find_otpk_private_key(
+                        ClientKeys, OtpkIdVal
+                    )
+                of
+                    {ok, PrivKey} ->
+                        ?dbg(
+                            "Found OTPK private key for ID ~p",
+                            [OtpkIdVal]
+                        ),
+                        PrivKey;
+                    {error, Reason} ->
+                        ?dbg(
+                            "Warning: Could not find OTPK private key for ID ~p: ~p",
+                            [OtpkIdVal, Reason]
+                        ),
+                        null
+                end
+        end,
+
+    %% Update the RecipientBlob metadata with sender identity DH key and correct sender ID
+    #{metadata := OriginalMetadata} = RecipientBlob,
+    UpdatedMetadata = OriginalMetadata#{
+        % SenderIdPub is now the DH key directly
+        sender_identity_dh_public => SenderIdPub,
+        sender_id => SenderKeyId
+    },
+    UpdatedRecipientBlob = RecipientBlob#{metadata := UpdatedMetadata},
+
+    case
+        cryptic_lib:x3dh_receiver_decrypt(
+            ClientKeys,
+            UpdatedRecipientBlob,
+            SenderIdPub,
+            OtpkPrivateKey
+        )
+    of
+        {ok, {PlainBin, _MessageId}} ->
+            ?dbg(
+                "X3DH decryption successful, plaintext: ~p",
+                [PlainBin]
+            ),
+            %% Convert to string
+            PlainText =
+                case unicode:characters_to_list(PlainBin) of
+                    {error, _, _} -> PlainBin;
+                    {incomplete, _, _} -> PlainBin;
+                    List -> List
+                end,
+
+            %% Add to inbox
+            Timestamp = maps:get(
+                <<"server_timestamp">>,
+                NestedMessage,
+                erlang:system_time(second)
+            ),
+            NewInbox =
+                UIState#ui_state.inbox ++
+                    [{From, PlainText, Timestamp}],
+            MessageCount = length(NewInbox),
+
+            %% Update pending messages
+            PendingMessages =
+                UIState#ui_state.pending_messages,
+            CurrentCount = maps:get(
+                From, PendingMessages, 0
+            ),
+            NewPendingMessages = maps:put(
+                From, CurrentCount + 1, PendingMessages
+            ),
+
+            TempUIState = UIState#ui_state{
+                inbox = NewInbox,
+                message_count = MessageCount,
+                pending_messages = NewPendingMessages
+            },
+
+            %% Auto-display if enabled
+            case UIState#ui_state.auto_display of
+                true ->
+                    ClearedPendingMessages = maps:put(
+                        From, 0, NewPendingMessages
+                    ),
+                    NewUIState = TempUIState#ui_state{
+                        pending_messages =
+                            ClearedPendingMessages
+                    },
+                    add_message(
+                        From, PlainText, NewUIState
+                    );
+                false ->
+                    TempUIState
+            end;
+        {error, X3DHError} ->
+            add_system_message(
+                lists:flatten(
+                    io_lib:format(
+                        "X3DH decryption failed: ~p", [
+                            X3DHError
+                        ]
+                    )
+                ),
+                UIState
+            )
+    end.
+
+%% @private
+%% Proceed with X3DH decryption directly using sender's identity key from metadata.
+%% This avoids the need to request the sender's key bundle from the server.
+proceed_with_x3dh_decrypt_direct(
+    SenderIdPub, RecipientBlob, ClientKeys, From, UIState, NestedMessage
+) ->
+    ?info("Starting proceed_with_x3dh_decrypt_direct for message from ~p", [
+        From
+    ]),
+    %% Get the private key for the OTPK ID used (from Bob's own keys)
+    OtpkId = maps:get(
+        otpk_id,
+        maps:get(metadata, RecipientBlob, #{}),
+        undefined
+    ),
+    OtpkPrivateKey =
+        case OtpkId of
+            undefined ->
+                ?dbg("No OTPK ID in message, using null", []),
+                null;
+            OtpkIdVal ->
+                %% Look up Bob's private key for this OTPK ID
+                case
+                    cryptic_lib:find_otpk_private_key(
+                        ClientKeys, OtpkIdVal
+                    )
+                of
+                    {ok, PrivKey} ->
+                        ?info(
+                            "Found OTPK private key for ID ~p",
+                            [OtpkIdVal]
+                        ),
+                        PrivKey;
+                    {error, Reason} ->
+                        ?dbg(
+                            "Warning: Could not find OTPK private key for ID ~p: ~p",
+                            [OtpkIdVal, Reason]
+                        ),
+                        null
+                end
+        end,
+
+    %% Get sender key ID from metadata (no need to fetch from server)
+    #{metadata := OriginalMetadata} = RecipientBlob,
+    SenderKeyId = maps:get(sender_id, OriginalMetadata, <<>>),
+
+    %% Sender's DH key should already be in metadata, no need to convert
+    SenderIdDHPub = maps:get(sender_identity_dh_public, OriginalMetadata, <<>>),
+    UpdatedMetadata = OriginalMetadata#{
+        sender_identity_dh_public => SenderIdDHPub,
+        sender_id => SenderKeyId
+    },
+    UpdatedRecipientBlob = RecipientBlob#{metadata := UpdatedMetadata},
+
+    ?info(
+        "About to call x3dh_receiver_decrypt with OTPK key: ~p, sender key ID: ~p",
+        [OtpkPrivateKey, SenderKeyId]
+    ),
+
+    case
+        cryptic_lib:x3dh_receiver_decrypt(
+            ClientKeys,
+            UpdatedRecipientBlob,
+            SenderIdPub,
+            OtpkPrivateKey
+        )
+    of
+        {ok, {PlainBin, _MessageId}} ->
+            ?info(
+                "X3DH decryption successful, plaintext: ~p",
+                [PlainBin]
+            ),
+            %% Convert to string
+            PlainText =
+                case unicode:characters_to_list(PlainBin) of
+                    {error, _, _} -> PlainBin;
+                    {incomplete, _, _} -> PlainBin;
+                    List -> List
+                end,
+
+            %% Add to inbox
+            Timestamp = maps:get(
+                <<"server_timestamp">>,
+                NestedMessage,
+                erlang:system_time(second)
+            ),
+            NewInbox =
+                UIState#ui_state.inbox ++
+                    [{From, PlainText, Timestamp}],
+
+            %% Update pending messages
+            PendingMessages =
+                UIState#ui_state.pending_messages,
+            CurrentCount = maps:get(
+                From, PendingMessages, 0
+            ),
+            NewPendingMessages = maps:put(
+                From, CurrentCount + 1, PendingMessages
+            ),
+            %% Clear pending operation
+            WSChatState = UIState#ui_state.ws_chat_state,
+            ClearedWSChatState = WSChatState#ws_chat_state{
+                pending_operation = undefined
+            },
+            TempUIState = UIState#ui_state{
+                inbox = NewInbox,
+                message_count = length(NewInbox),
+                pending_messages = NewPendingMessages,
+                ws_chat_state = ClearedWSChatState
+            },
+            %% Auto-display if enabled
+            case UIState#ui_state.auto_display of
+                true ->
+                    ClearedPendingMessages = maps:put(
+                        From, 0, NewPendingMessages
+                    ),
+                    NewUIState = TempUIState#ui_state{
+                        pending_messages =
+                            ClearedPendingMessages
+                    },
+                    add_message(
+                        From, PlainText, NewUIState
+                    );
+                false ->
+                    TempUIState
+            end;
+        {error, X3DHError} ->
+            ?info("X3DH decryption failed with error: ~p", [X3DHError]),
+            %% Clear pending operation on error
+            WSChatState = UIState#ui_state.ws_chat_state,
+            ClearedWSChatState = WSChatState#ws_chat_state{
+                pending_operation = undefined
+            },
+            ErrorUIState = UIState#ui_state{
+                ws_chat_state = ClearedWSChatState
+            },
+            add_system_message(
+                lists:flatten(
+                    io_lib:format(
+                        "X3DH decryption failed: ~p", [
+                            X3DHError
+                        ]
+                    )
+                ),
+                ErrorUIState
+            )
+    end.
+
+%% @private
+%% Handle legacy encrypted message with old field names.
+handle_legacy_encrypted_message(
+    From, NestedMessage, EphemeralB64, NonceB64, CipherB64, UIState
+) ->
+    Timestamp = maps:get(
+        <<"timestamp">>, NestedMessage, erlang:system_time(seconds)
+    ),
+
+    %% Get our private key
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.keypair of
+        {_PubKey, PrivKey} ->
+            %% Decode encrypted components
+            EphemeralPub = base64:decode(EphemeralB64),
+            Nonce = base64:decode(NonceB64),
+            Cipher = base64:decode(CipherB64),
+
+            %% Decrypt using cryptic_lib functions directly
+            try
+                %% Compute shared secret
+                SharedSecret = cryptic_lib:scalarmult(PrivKey, EphemeralPub),
+
+                %% Derive AEAD key using ephemeral public key as salt
+                AeadKey = cryptic_lib:derive_aead_key_ephemeral(
+                    SharedSecret, EphemeralPub
+                ),
+
+                %% Decrypt message
+                case cryptic_lib:aead_decrypt(Cipher, AeadKey, Nonce, <<>>) of
+                    error ->
+                        CryptoErrMsg = io_lib:format(
+                            "Failed to decrypt legacy message from ~s: decryption_failed",
+                            [From]
+                        ),
+                        add_system_message(
+                            lists:flatten(CryptoErrMsg), UIState
+                        );
+                    PlainBin ->
+                        %% Convert back to string if possible
+                        PlainText =
+                            case unicode:characters_to_list(PlainBin) of
+                                {error, _, _} -> PlainBin;
+                                {incomplete, _, _} -> PlainBin;
+                                List -> List
+                            end,
+
+                        %% Add to inbox and update message count
+                        NewInbox =
+                            UIState#ui_state.inbox ++
+                                [{From, PlainText, Timestamp}],
+                        MessageCount = length(NewInbox),
+
+                        %% Update pending message count for sender
+                        PendingMessages = UIState#ui_state.pending_messages,
+                        CurrentCount = maps:get(From, PendingMessages, 0),
+                        NewPendingMessages = maps:put(
+                            From, CurrentCount + 1, PendingMessages
+                        ),
+
+                        TempUIState = UIState#ui_state{
+                            inbox = NewInbox,
+                            message_count = MessageCount,
+                            pending_messages = NewPendingMessages
+                        },
+
+                        %% Check auto_display setting
+                        case UIState#ui_state.auto_display of
+                            true ->
+                                %% Show message immediately and clear pending count
+                                ClearedPendingMessages = maps:put(
+                                    From, 0, NewPendingMessages
+                                ),
+                                NewUIState = TempUIState#ui_state{
+                                    pending_messages = ClearedPendingMessages
+                                },
+                                add_message(From, PlainText, NewUIState);
+                            false ->
+                                %% Just store in inbox, no notification needed
+                                TempUIState
+                        end
+                end
+            catch
+                error:CryptoReason ->
+                    CatchErrMsg = io_lib:format(
+                        "Failed to decrypt legacy message from ~s: ~p",
+                        [From, CryptoReason]
+                    ),
+                    add_system_message(lists:flatten(CatchErrMsg), UIState)
+            end;
+        undefined ->
+            add_system_message("No keypair available for decryption", UIState)
+    end.
 
 %% @private
 %% Cleanup UI resources on exit.

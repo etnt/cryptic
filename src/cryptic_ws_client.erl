@@ -286,6 +286,7 @@ handle_continue(connect, State) ->
 %% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
 handle_call({send_command, Command}, _From, State = #state{connected = true}) ->
     JsonCommand = jsx:encode(Command),
+    ?msg_out("Sending WebSocket command: ~s", [JsonCommand]),
     gun:ws_send(
         State#state.conn_pid, State#state.stream_ref, {text, JsonCommand}
     ),
@@ -338,6 +339,7 @@ handle_info(
     lists:foreach(
         fun(Command) ->
             JsonCommand = jsx:encode(Command),
+            ?msg_out("Sending pending WebSocket command: ~s", [JsonCommand]),
             gun:ws_send(ConnPid, StreamRef, {text, JsonCommand})
         end,
         lists:reverse(State#state.pending_commands)
@@ -350,6 +352,7 @@ handle_info(
         connected = true, pending_commands = [], ping_timer_ref = PingTimerRef
     }};
 handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
+    ?msg_in("Received WebSocket message: ~s", [Data]),
     case jsx:decode(Data, [return_maps]) of
         Message = #{<<"type">> := Type} ->
             handle_server_message(Type, Message, State);
@@ -380,6 +383,7 @@ handle_info(
     State = #state{connected = true, conn_pid = ConnPid, stream_ref = StreamRef}
 ) ->
     %% Send WebSocket ping frame
+    ?msg_out("Sending WebSocket ping", []),
     gun:ws_send(ConnPid, StreamRef, ping),
     %% Schedule next ping in 30 seconds
     PingTimerRef = erlang:send_after(30000, self(), send_ping),
@@ -389,6 +393,7 @@ handle_info(send_ping, State = #state{connected = false}) ->
     {noreply, State};
 %% Handle pong response from server
 handle_info({gun_ws, _ConnPid, _StreamRef, pong}, State) ->
+    ?msg_in("Received WebSocket pong", []),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -642,6 +647,16 @@ handle_server_message(<<"room_message_sent">>, Message, State) ->
     case State#state.ui_pid of
         undefined ->
             ?warning("No UI PID set, cannot forward room_message_sent", []);
+        UIPid ->
+            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
+    end,
+    {noreply, State};
+handle_server_message(<<"key_bundle">>, Message, State) ->
+    %% Forward key bundle response to UI for X3DH session establishment
+    ?info("Received key_bundle response, forwarding to UI", []),
+    case State#state.ui_pid of
+        undefined ->
+            ?warning("No UI PID set, cannot forward key_bundle", []);
         UIPid ->
             UIPid ! {websocket_message, {text, jsx:encode(Message)}}
     end,

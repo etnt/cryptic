@@ -8,7 +8,8 @@
 -define(info(Fs, As), ?log_event(info, {Fs, As})).
 
 %% Return: {FmtStr, Args} as event handler is expecting it.
--define(dbg_str(Mod, Line, Fs, As), {"~s ~p(~p): " ++ Fs, [
+-define(dbg_str(Mod, Line, Fs, As),
+    {"~s ~p(~p): " ++ Fs, [
         calendar:system_time_to_rfc3339(
             erlang:system_time(millisecond),
             [
@@ -19,8 +20,12 @@
         Mod,
         Line
         | As
-    ]}).
+    ]}
+).
 
 -define(dbg(Fs, As), ?log_event(debug, ?dbg_str(?MODULE, ?LINE, Fs, As))).
+
+-define(msg_in(Fs, As), ?log_event(in, {Fs, As})).
+-define(msg_out(Fs, As), ?log_event(out, {Fs, As})).
 
 -endif.

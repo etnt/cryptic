@@ -3,7 +3,7 @@
 %%% This module implements the main server for the Cryptic chat application
 %%% using the gen_server behavior. It provides server lifecycle management,
 %%% WebSocket mTLS server initialization, and ETS table management for
-%%% user connections, prekeys, and message storage.
+%%% user connections and message storage.
 %%%
 %%% == Features ==
 %%%
@@ -37,7 +37,6 @@
 %%% The server manages several ETS tables for runtime data:
 %%% <ul>
 %%%   <li>`user_connections' - Active WebSocket connections (set, public)</li>
-%%%   <li>`prekeys' - User public keys for encryption (set, public)</li>
 %%%   <li>`blobs' - Stored messages and data (bag, public)</li>
 %%% </ul>
 %%%
@@ -63,13 +62,15 @@
 -export([start_link/0, start_websocket_mtls/0, start_websocket_mtls/1]).
 
 %% gen_server callbacks
--export([init/1
-    , handle_call/3
-    , handle_cast/2
-    , handle_continue/2
-    , handle_info/2
-    , terminate/2
-    , code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_continue/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -include("cryptic.hrl").
 
@@ -129,7 +130,6 @@ start_websocket_mtls() ->
 %% Creates and manages ETS tables for runtime data storage:
 %% <ul>
 %%%   <li>`user_connections' - WebSocket connection tracking</li>
-%%%   <li>`prekeys' - User public key storage</li>
 %%%   <li>`blobs' - Message and data blob storage</li>
 %% </ul>
 %%
@@ -141,22 +141,43 @@ start_websocket_mtls(Config) ->
     application:ensure_all_started(ssl),
 
     Port = maps:get(port, Config, 8443),
-    
+
     %% Get certificate paths from environment variables or defaults
     PrivDir = code:priv_dir(cryptic),
-    CertFile = case os:getenv("CRYPTIC_SERVER_CERT") of
-        false -> maps:get(certfile, Config, filename:join([PrivDir, "ssl", "server.crt"]));
-        EnvCert -> EnvCert
-    end,
-    KeyFile = case os:getenv("CRYPTIC_SERVER_KEY") of
-        false -> maps:get(keyfile, Config, filename:join([PrivDir, "ssl", "server.key"]));
-        EnvKey -> EnvKey
-    end,
-    CACertFile = case os:getenv("CRYPTIC_CA_CERT") of
-        false -> maps:get(cacertfile, Config, filename:join([PrivDir, "ssl", "ca.crt"]));
-        EnvCA -> EnvCA
-    end,
-    
+    CertFile =
+        case os:getenv("CRYPTIC_SERVER_CERT") of
+            false ->
+                maps:get(
+                    certfile,
+                    Config,
+                    filename:join([PrivDir, "ssl", "server.crt"])
+                );
+            EnvCert ->
+                EnvCert
+        end,
+    KeyFile =
+        case os:getenv("CRYPTIC_SERVER_KEY") of
+            false ->
+                maps:get(
+                    keyfile,
+                    Config,
+                    filename:join([PrivDir, "ssl", "server.key"])
+                );
+            EnvKey ->
+                EnvKey
+        end,
+    CACertFile =
+        case os:getenv("CRYPTIC_CA_CERT") of
+            false ->
+                maps:get(
+                    cacertfile,
+                    Config,
+                    filename:join([PrivDir, "ssl", "ca.crt"])
+                );
+            EnvCA ->
+                EnvCA
+        end,
+
     %% WebSocket route
     Dispatch = cowboy_router:compile([
         {'_', [
@@ -164,7 +185,7 @@ start_websocket_mtls(Config) ->
             {"/", cowboy_static, {priv_file, cryptic, "index.html"}}
         ]}
     ]),
-    
+
     %% TLS options with client certificate verification
     TLSOptions = [
         {verify, verify_peer},
@@ -175,20 +196,25 @@ start_websocket_mtls(Config) ->
         {certfile, CertFile},
         {keyfile, KeyFile}
     ],
-    
+
     io:format("Starting WebSocket mTLS server on port ~p~n", [Port]),
     io:format("Using certificates:~n"),
     io:format("  CA: ~s~n", [CACertFile]),
     io:format("  Cert: ~s~n", [CertFile]),
     io:format("  Key: ~s~n", [KeyFile]),
-    
-    {ok, _} = cowboy:start_tls(cryptic_ws_listener, 
-                               [{port, Port}] ++ TLSOptions, 
-                               #{env => #{dispatch => Dispatch},
-                                 websocket_timeout => 300000,  % 5 minute WebSocket timeout
-                                 websocket_max_frame_size => 65536  % 64KB max frame
-                               }),
-    
+
+    {ok, _} = cowboy:start_tls(
+        cryptic_ws_listener,
+        [{port, Port}] ++ TLSOptions,
+        #{
+            env => #{dispatch => Dispatch},
+            % 5 minute WebSocket timeout
+            websocket_timeout => 300000,
+            % 64KB max frame
+            websocket_max_frame_size => 65536
+        }
+    ),
+
     io:format("Cryptic WebSocket server with mTLS started on port ~p~n", [Port]),
     {ok, started}.
 
@@ -205,7 +231,7 @@ start_websocket_mtls(Config) ->
 %% @param Args Initialization arguments (empty list)
 %% @returns {ok, State, {continue, start_server}} to continue initialization
 init([]) ->
-     process_flag(trap_exit, true),
+    process_flag(trap_exit, true),
     {ok, #{}, {continue, start_server}}.
 
 %% @doc Handle continuation after initialization
@@ -218,8 +244,10 @@ init([]) ->
 %% @returns {noreply, State, {continue, continue}} to proceed with startup
 handle_continue(start_server, CfgMap) ->
     %% Setup event handlers for Cryptic events with server configuration
-    cryptic_event_manager:setup_event_handlers(#{log_type => server,
-                                                 log_dir => "logs"}),
+    cryptic_event_manager:setup_event_handlers(#{
+        log_type => server,
+        log_dir => "logs"
+    }),
     % Allow time for event manager setup
     sleep(10),
 
@@ -247,7 +275,6 @@ sleep(T) ->
 %% == ETS Tables Created ==
 %%
 %% <ul>
-%%%   <li>`prekeys' - Named table for user public key storage</li>
 %%%   <li>`blobs' - Named bag table for message storage</li>
 %% </ul>
 %%
@@ -261,10 +288,8 @@ sleep(T) ->
 %% @returns {noreply, State} after completing initialization
 
 continue(CfgMap) ->
-
     %% Clean up any existing tables first
     catch ets:delete(user_connections),
-    catch ets:delete(prekeys),
     catch ets:delete(blobs),
     catch ets:delete(rooms),
     catch ets:delete(room_messages),
@@ -273,8 +298,7 @@ continue(CfgMap) ->
     %% Create user connections ETS table
     ets:new(user_connections, [named_table, set, public]),
 
-    %% Create ETS stores for prekeys and blobs
-    ets:new(prekeys, [named_table, public, set]),
+    %% Create ETS stores for blobs
     ets:new(blobs, [named_table, public, bag]),
 
     %% Create chat room ETS tables
@@ -282,38 +306,43 @@ continue(CfgMap) ->
     ets:new(room_messages, [named_table, bag, public, {keypos, 3}]),
     ets:new(user_rooms, [named_table, bag, public]),
 
-    %% Initialize cryptic_lib (creates its ETS tables)  
+    %% Initialize cryptic_lib (creates its ETS tables)
     ok = cryptic_lib:initialize(),
 
     %% Give time for application environment to be fully available
     sleep(100),
-    
+
     %% Optionally start WebSocket mTLS server
     io:format("Checking WebSocket mTLS configuration...~n"),
-    WSEnabled = case application:get_env(cryptic, websocket_mtls_enabled) of
-        {ok, true} -> 
-            ?info("WebSocket mTLS enabled in config~n",[]),
-            true;
-        {ok, false} ->
-            ?info("WebSocket mTLS explicitly disabled in config~n",[]),
-            false;
-        undefined ->
-            ?info("WebSocket mTLS not configured, defaulting to disabled~n",[]),
-            false;
-        Other ->
-            ?info("WebSocket mTLS config value: ~p~n", [Other]),
-            false
-    end,
+    WSEnabled =
+        case application:get_env(cryptic, websocket_mtls_enabled) of
+            {ok, true} ->
+                ?info("WebSocket mTLS enabled in config~n", []),
+                true;
+            {ok, false} ->
+                ?info("WebSocket mTLS explicitly disabled in config~n", []),
+                false;
+            undefined ->
+                ?info(
+                    "WebSocket mTLS not configured, defaulting to disabled~n",
+                    []
+                ),
+                false;
+            Other ->
+                ?info("WebSocket mTLS config value: ~p~n", [Other]),
+                false
+        end,
     case WSEnabled of
         true ->
-            WSPort = case application:get_env(cryptic, websocket_mtls_port) of
-                {ok, Port} -> Port;
-                undefined -> 8443
-            end,
+            WSPort =
+                case application:get_env(cryptic, websocket_mtls_port) of
+                    {ok, Port} -> Port;
+                    undefined -> 8443
+                end,
             ?info("Starting WebSocket mTLS server on port ~p~n", [WSPort]),
             start_websocket_mtls(#{port => WSPort});
         false ->
-            ?info("WebSocket mTLS server disabled~n",[])
+            ?info("WebSocket mTLS server disabled~n", [])
     end,
 
     {noreply, CfgMap}.
@@ -364,7 +393,6 @@ handle_info(_Info, State) ->
 %% <ul>
 %%%   <li>Stop Cowboy WebSocket listener</li>
 %%%   <li>Delete user_connections ETS table</li>
-%%%   <li>Delete prekeys ETS table</li>
 %%%   <li>Delete blobs ETS table</li>
 %% </ul>
 %%
@@ -377,7 +405,6 @@ terminate(_Reason, _State) ->
 
     %% Clean up ETS tables
     catch ets:delete(user_connections),
-    catch ets:delete(prekeys),
     catch ets:delete(blobs),
 
     ok.

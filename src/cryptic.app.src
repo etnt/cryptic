@@ -2,7 +2,18 @@
     {description, "Minimal End-to-End Encrypted Chat"},
     {vsn, "0.1.0"},
     {registered, []},
-    {applications, [kernel, stdlib, asn1, public_key, ssl, crypto, ranch, cowlib, cowboy, uuid]},
+    {applications, [
+        kernel,
+        stdlib,
+        asn1,
+        public_key,
+        ssl,
+        crypto,
+        ranch,
+        cowlib,
+        cowboy,
+        uuid
+    ]},
     {mod, {cryptic_app, []}},
     {env, [
         %% Event handling configuration
@@ -13,7 +24,9 @@
         {websocket_mtls_port, 8443},
 
         % Poll interval (seconds)
-        {poll_interval, 2},  % FIXME: adjust as needed
+
+        % FIXME: adjust as needed
+        {poll_interval, 2},
 
         % Enable debug output
         {enable_debug, false}

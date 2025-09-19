@@ -101,7 +101,9 @@ websocket_init(State = #{username := Username}) ->
         message => <<"Connected to Cryptic server">>,
         username => list_to_binary(Username)
     },
-    {[{text, jsx:encode(WelcomeMsg)}], State}.
+    WelcomeJson = jsx:encode(WelcomeMsg),
+    ?msg_out("Sending welcome message to ~s: ~s", [Username, WelcomeJson]),
+    {[{text, WelcomeJson}], State}.
 
 %% @doc Handle incoming WebSocket frames
 %%
@@ -115,14 +117,22 @@ websocket_init(State = #{username := Username}) ->
 websocket_handle({text, Msg}, State = #{username := Username}) ->
     try
         ?dbg("Received message from ~s: ~s", [Username, Msg]),
+        ?msg_in("Received WebSocket message from ~s: ~s", [Username, Msg]),
         Command = jsx:decode(Msg, [return_maps]),
         ?dbg("Decoded command: ~p", [Command]),
         case handle_command(Command, Username, State) of
             {reply, Response} ->
                 ResponseJson = jsx:encode(Response),
+                ?msg_out("Sending WebSocket response to ~s: ~s", [
+                    Username, ResponseJson
+                ]),
                 {[{text, ResponseJson}], State};
             {reply, Response, NewState} ->
-                {[{text, jsx:encode(Response)}], NewState};
+                ResponseJson = jsx:encode(Response),
+                ?msg_out("Sending WebSocket response to ~s: ~s", [
+                    Username, ResponseJson
+                ]),
+                {[{text, ResponseJson}], NewState};
             {noreply, NewState} ->
                 {[], NewState};
             {error, ErrorMsg} ->
@@ -130,18 +140,24 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                     type => <<"error">>,
                     message => list_to_binary(ErrorMsg)
                 },
-                {[{text, jsx:encode(ErrorResp)}], State}
+                ErrorJson = jsx:encode(ErrorResp),
+                ?msg_out("Sending WebSocket error to ~s: ~s", [
+                    Username, ErrorJson
+                ]),
+                {[{text, ErrorJson}], State}
         end
     catch
         _Error:Reason ->
             ?error("Failed to handle incoming text frame; Reason: ~p~n", [
                 Reason
             ]),
-            ErrorResponse = #{
+            CatchErrorResponse = #{
                 type => <<"error">>,
                 message => <<"Invalid JSON format">>
             },
-            {[{text, jsx:encode(ErrorResponse)}], State}
+            CatchErrorJson = jsx:encode(CatchErrorResponse),
+            ?msg_out("Sending error response: ~s", [CatchErrorJson]),
+            {[{text, CatchErrorJson}], State}
     end;
 websocket_handle({binary, _Data}, State) ->
     %% Handle binary data if needed
@@ -149,10 +165,13 @@ websocket_handle({binary, _Data}, State) ->
     {[], State};
 %% Handle WebSocket ping frames
 websocket_handle(ping, State) ->
+    ?msg_in("Received WebSocket ping", []),
     %% Respond with pong
+    ?msg_out("Sending WebSocket pong", []),
     {[pong], State};
 %% Handle WebSocket pong frames
 websocket_handle(pong, State) ->
+    ?msg_in("Received WebSocket pong", []),
     %% Just acknowledge, no response needed
     {[], State};
 websocket_handle(_Data, State) ->
@@ -175,18 +194,24 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
         to => list_to_binary(Username),
         message => Message
     },
-    {[{text, jsx:encode(Response)}], State};
+    ResponseJson = jsx:encode(Response),
+    ?msg_out("Forwarding message from ~s to ~s: ~s", [
+        FromUser, Username, ResponseJson
+    ]),
+    {[{text, ResponseJson}], State};
 websocket_info({room_notification, Notification}, State) ->
     %% Incoming room message notification
     ?dbg("DEBUG WS: Received room_notification: ~p", [Notification]),
     JsonResponse = jsx:encode(Notification),
     ?dbg("DEBUG WS: Sending JSON: ~p", [JsonResponse]),
+    ?msg_out("Sending room notification: ~s", [JsonResponse]),
     {[{text, JsonResponse}], State};
 websocket_info({send_message, RoomMessage}, State) ->
     %% Handle room message forwarding from broadcast_to_room_members
     ?dbg("DEBUG WS: Received send_message: ~p", [RoomMessage]),
     JsonResponse = jsx:encode(RoomMessage),
     ?dbg("DEBUG WS: Forwarding room message: ~p", [JsonResponse]),
+    ?msg_out("Forwarding room message: ~s", [JsonResponse]),
     {[{text, JsonResponse}], State};
 websocket_info(_Info, State) ->
     {[], State}.
@@ -290,6 +315,92 @@ handle_command(
         _:Error ->
             {error, io_lib:format("Invalid key bundle format: ~p", [Error])}
     end;
+%% Handle identity keys upload (new 5-step authentication flow)
+handle_command(
+    #{
+        <<"type">> := <<"upload_identity_keys">>,
+        <<"identity_sign_public">> := IdentitySignPubB64,
+        <<"identity_dh_public">> := IdentityDHPubB64,
+        <<"signed_prekey_public">> := SignedPrekeyPubB64,
+        <<"signed_prekey_signature">> := SignatureB64
+    },
+    Username,
+    _State
+) ->
+    try
+        %% Decode the identity key components
+        IdentitySignPub = base64:decode(IdentitySignPubB64),
+        IdentityDHPub = base64:decode(IdentityDHPubB64),
+        SignedPrekeyPub = base64:decode(SignedPrekeyPubB64),
+        Signature = base64:decode(SignatureB64),
+
+        %% Create identity key record
+        IdentityKeys = #{
+            username => Username,
+            identity_sign_public => IdentitySignPub,
+            identity_dh_public => IdentityDHPub,
+            signed_prekey_public => SignedPrekeyPub,
+            signed_prekey_signature => Signature,
+            timestamp => erlang:system_time(second)
+        },
+
+        %% Store the identity keys
+        case cryptic_lib:store_identity_keys(Username, IdentityKeys) of
+            ok ->
+                {reply, #{
+                    type => <<"success">>,
+                    message => <<"Identity keys uploaded successfully">>
+                }};
+            {error, Reason} ->
+                {error,
+                    io_lib:format("Failed to store identity keys: ~p", [Reason])}
+        end
+    catch
+        _:Error ->
+            {error, io_lib:format("Invalid identity keys format: ~p", [Error])}
+    end;
+%% Handle prekey bundle upload (Step 5 of new authentication flow)
+handle_command(
+    #{
+        <<"type">> := <<"upload_prekey_bundle">>,
+        <<"one_time_prekeys">> := OtpkListJson
+    },
+    Username,
+    _State
+) ->
+    try
+        %% Decode one-time prekeys
+        OtpkList = lists:map(
+            fun(#{<<"id">> := IdB64, <<"public_key">> := PubB64}) ->
+                #{
+                    id => base64:decode(IdB64),
+                    public => base64:decode(PubB64)
+                }
+            end,
+            OtpkListJson
+        ),
+
+        %% Store the prekey bundle
+        case cryptic_lib:store_prekey_bundle(Username, OtpkList) of
+            ok ->
+                {reply, #{
+                    type => <<"success">>,
+                    message => iolist_to_binary(
+                        io_lib:format(
+                            "Prekey bundle uploaded: ~p one-time keys", [
+                                length(OtpkList)
+                            ]
+                        )
+                    )
+                }};
+            {error, Reason} ->
+                {error,
+                    io_lib:format("Failed to store prekey bundle: ~p", [Reason])}
+        end
+    catch
+        _:Error ->
+            {error, io_lib:format("Invalid prekey bundle format: ~p", [Error])}
+    end;
 handle_command(
     #{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State
 ) ->
@@ -326,12 +437,20 @@ handle_command(
     _State
 ) ->
     User = binary_to_list(UserB),
+    ?dbg("get_key_bundle request for user: ~p", [User]),
     case cryptic_lib:get_key_bundle(User) of
         {error, not_found} ->
+            ?dbg("Key bundle not found for user: ~p", [User]),
             {error, "User key bundle not found"};
         {ok, BundleData} ->
+            ?dbg(
+                "Found key bundle for user: ~p, bundle keys: ~p", [
+                    User, maps:keys(BundleData)
+                ]
+            ),
             #{
-                identity_sign_public := IdentityPub,
+                identity_sign_public := IdentitySignPub,
+                identity_dh_public := IdentityDHPub,
                 signed_prekey := #{
                     public := SignedPrekeyPub,
                     signature := Signature
@@ -352,13 +471,19 @@ handle_command(
                         {FirstOtpk, RestOtpks}
                 end,
 
-            %% Prepare response
+            %% Prepare response with both identity keys
+            ?dbg(
+                "Sending both identity keys - Sign: ~p, DH: ~p", [
+                    IdentitySignPub, IdentityDHPub
+                ]
+            ),
             Response = #{
                 type => <<"key_bundle">>,
                 user => UserB,
                 key_id => base64:encode(KeyId),
-                identity_public => base64:encode(IdentityPub),
-                signed_prekey_public => base64:encode(SignedPrekeyPub),
+                identity_sign_public => base64:encode(IdentitySignPub),
+                identity_dh_public => base64:encode(IdentityDHPub),
+                signed_prekey => base64:encode(SignedPrekeyPub),
                 signed_prekey_signature => base64:encode(Signature),
                 one_time_prekey =>
                     case SelectedOtpk of
@@ -473,6 +598,56 @@ handle_command(
                 message => <<"Secure message sent">>
             }}
     end;
+%% Handle X3DH protocol messages (SESSION-MESSAGE-FLOW.md implementation)
+handle_command(
+    #{
+        <<"type">> := <<"send_message_x3dh">>,
+        <<"to">> := ToUserB,
+        <<"message_id">> := MessageIdB64,
+        <<"ephemeral_public">> := EphemeralPubB64,
+        <<"otpk_id">> := OtpkIdB64,
+        <<"ciphertext">> := CiphertextB64,
+        <<"nonce">> := NonceB64,
+        <<"signature">> := SignatureB64,
+        <<"metadata">> := MetadataB64
+    },
+    Username,
+    _State
+) ->
+    ToUser = binary_to_list(ToUserB),
+
+    %% Create X3DH message blob with complete metadata
+    MessageBlob = #{
+        from => Username,
+        to => ToUser,
+        message_type => <<"x3dh">>,
+        message_id => MessageIdB64,
+        ephemeral_public => EphemeralPubB64,
+        otpk_id => OtpkIdB64,
+        ciphertext => CiphertextB64,
+        nonce => NonceB64,
+        signature => SignatureB64,
+        metadata => MetadataB64,
+        server_timestamp => erlang:system_time(second)
+    },
+
+    %% Store message
+    cryptic_lib:store_message(ToUser, MessageBlob),
+
+    %% Try to deliver immediately if user is online
+    case find_user_connection(ToUser) of
+        {ok, Pid} ->
+            Pid ! {message, Username, MessageBlob};
+        not_found ->
+            % Message stored for later retrieval
+            ok
+    end,
+
+    {reply, #{
+        type => <<"message_sent">>,
+        success => true,
+        message => <<"X3DH message sent">>
+    }};
 %% Handle encrypted room messages (proper E2EE implementation)
 %% messages to currently connected users.
 %%
@@ -560,7 +735,7 @@ handle_command(
     ),
     {reply, Response};
 handle_command(Command, Username, _State) ->
-    io:format("Unknown command from ~s: ~p~n", [Username, Command]),
+    ?dbg("Unknown command from ~s: ~p", [Username, Command]),
     {error, "Unknown command"}.
 
 %% @private

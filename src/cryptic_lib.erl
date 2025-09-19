@@ -147,8 +147,18 @@
     store_key_bundle/2,
     get_key_bundle/1,
     get_signed_prekey_with_signature/1,
-    mark_otpk_consumed/2
+    mark_otpk_consumed/2,
+    get_available_otpks/1,
+    %% Identity keys management
+    store_identity_keys/2,
+    store_prekey_bundle/2,
+    %% X3DH Protocol Implementation
+    x3dh_sender_init/3,
+    x3dh_receiver_decrypt/4,
+    find_otpk_private_key/2
 ]).
+
+-include("cryptic.hrl").
 
 %% @doc Initialize the cryptic_lib module.
 %% This function ensures that necessary ETS tables are created.
@@ -457,12 +467,17 @@ derive_aead_key_simple(SharedSecret) ->
 %%% Server Storage Functions (Simple in-memory implementation)
 %%%===================================================================
 
-%% Simple in-memory storage (for demo purposes - would use persistent storage in production)
+%% Simple in-memory storage with structured tuple keys for efficient access
+%% Key structure:
+%%   - {Username, identity} -> Identity key data
+%%   - {Username, otpk, KeyId} -> One-time prekey data
+%%   - Username -> User registration data
+%%   - MessageId -> Message data
+%%   - {SenderID, RecipientID} -> Sequence numbers
 -define(PREKEY_TABLE, cryptic_prekeys).
 -define(MESSAGE_TABLE, cryptic_messages).
 -define(USER_TABLE, cryptic_users).
 -define(SEQUENCE_TABLE, cryptic_sequences).
--define(KEY_BUNDLE_TABLE, cryptic_key_bundles).
 
 %% @doc Store a user's prekey.
 -spec store_prekey(string(), binary()) -> ok | {error, term()}.
@@ -604,11 +619,30 @@ generate_client_keys() ->
     ),
 
     %% Generate X25519 signed prekey
-    {SignedPrekeyPriv, SignedPrekeyPub} = crypto:generate_key(ecdh, x25519),
+    {SignedPrekeyPub, SignedPrekeyPriv} = crypto:generate_key(ecdh, x25519),
 
     %% Sign the prekey public key with identity signing key
     SignedPrekeySignature = crypto:sign(eddsa, none, SignedPrekeyPub, [
         IdentitySignPriv, ed25519
+    ]),
+
+    %% Debug: Verify that we can verify our own signature
+    VerifyOwnSig = crypto:verify(
+        eddsa, none, SignedPrekeyPub, SignedPrekeySignature, [
+            IdentitySignPub, ed25519
+        ]
+    ),
+    ?dbg("generate_client_keys: Self-signature verification: ~p~n", [
+        VerifyOwnSig
+    ]),
+    ?dbg("generate_client_keys: IdentitySignPub: ~p~n", [
+        IdentitySignPub
+    ]),
+    ?dbg("generate_client_keys: SignedPrekeyPub: ~p~n", [
+        SignedPrekeyPub
+    ]),
+    ?dbg("generate_client_keys: SignedPrekeySignature: ~p~n", [
+        SignedPrekeySignature
     ]),
 
     %% Generate 10 One-Time Prekeys (OPKs)
@@ -673,7 +707,7 @@ generate_client_keys() ->
 generate_one_time_prekeys(Count) ->
     [
         begin
-            {PrivKey, PubKey} = crypto:generate_key(ecdh, x25519),
+            {PubKey, PrivKey} = crypto:generate_key(ecdh, x25519),
             % 64-bit unique ID
             Id = crypto:strong_rand_bytes(8),
             #{
@@ -871,7 +905,15 @@ sign_message(Message, PrivateKey) ->
 %% @returns true if signature is valid, false otherwise
 -spec verify_signature(binary(), binary(), binary()) -> boolean().
 verify_signature(Message, Signature, PublicKey) ->
-    crypto:verify(eddsa, none, Message, Signature, [PublicKey, ed25519]).
+    ?dbg(
+        "verify_signature called with Message size: ~p, Signature size: ~p, PublicKey size: ~p",
+        [
+            byte_size(Message), byte_size(Signature), byte_size(PublicKey)
+        ]
+    ),
+    Result = crypto:verify(eddsa, none, Message, Signature, [PublicKey, ed25519]),
+    ?dbg("verify_signature result: ~p", [Result]),
+    Result.
 
 %% @doc Encrypt message with metadata using sign-then-encrypt approach.
 %%
@@ -1000,15 +1042,16 @@ decrypt_message_secure(
 
 %% @doc Store complete key bundle for a user with signatures and metadata.
 %%
-%% Stores the complete key bundle including identity keys, signed prekeys with
-%% signatures, and one-time prekeys. This implements Step 1 requirements for
-%% key ID and signature storage.
+%% Stores the complete key bundle using PREKEY_TABLE structured format:
+%% - {Username, identity} -> Identity keys and signed prekey with signature
+%% - {Username, otpk, KeyId} -> Individual one-time prekeys
 %%
 %% @param Username User ID
 %% @param KeyBundle Complete key bundle map from generate_client_keys/0
 %% @returns ok
 -spec store_key_bundle(string(), map()) -> ok.
 store_key_bundle(Username, KeyBundle) ->
+    ?dbg("Storing key bundle for username: ~p", [Username]),
     #{
         identity_sign_public := IdentitySignPub,
         signed_prekey_public := SignedPrekeyPub,
@@ -1017,35 +1060,209 @@ store_key_bundle(Username, KeyBundle) ->
         key_id := KeyId
     } = KeyBundle,
 
-    %% Store the complete bundle with metadata
-    BundleData = #{
+    ?dbg("store_key_bundle: IdentitySignPub: ~p", [IdentitySignPub]),
+    ?dbg("store_key_bundle: SignedPrekeyPub: ~p", [SignedPrekeyPub]),
+    ?dbg("store_key_bundle: SignedPrekeySignature: ~p", [
+        SignedPrekeySignature
+    ]),
+
+    %% Store identity data in PREKEY_TABLE format
+    IdentityData = #{
         username => Username,
         key_id => KeyId,
-        identity_sign_public => IdentitySignPub,
+        identity_public => IdentitySignPub,
         signed_prekey => #{
             public => SignedPrekeyPub,
             signature => SignedPrekeySignature,
             timestamp => erlang:system_time(second)
         },
-        one_time_prekeys => OneTimePrekeys,
         created_at => erlang:system_time(second)
     },
 
-    ets:insert(?KEY_BUNDLE_TABLE, {Username, BundleData}),
+    ?dbg("Storing identity and ~p OTPKs for ~p", [
+        length(OneTimePrekeys), Username
+    ]),
+    ets:insert(?PREKEY_TABLE, {{Username, identity}, IdentityData}),
+
+    %% Store each one-time prekey individually
+    lists:foreach(
+        fun(#{id := OtpkId, public := OtpkPub}) ->
+            KeyTuple = {Username, otpk, OtpkId},
+            PrekeyData = #{
+                username => Username,
+                key_id => OtpkId,
+                public_key => OtpkPub,
+                consumed => false,
+                created_at => erlang:system_time(second)
+            },
+            ets:insert(?PREKEY_TABLE, {KeyTuple, PrekeyData})
+        end,
+        OneTimePrekeys
+    ),
+
+    %% Update user record
     ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
+    ?dbg("Successfully stored key bundle for ~p", [Username]),
     ok.
 
-%% @doc Get complete key bundle for a user.
+%% @doc Store identity keys for a user (5-step authentication flow).
 %%
-%% Retrieves the user's complete key bundle including signatures and metadata.
+%% Stores the user's identity keys including the public identity key,
+%% signed prekey, and prekey signature. This is used in the new
+%% 5-step authentication flow where identity keys are uploaded separately
+%% from one-time prekey bundles.
+%%
+%% @param Username User ID
+%% @param IdentityKeys Map containing identity key components
+%% @returns ok or {error, Reason}
+-spec store_identity_keys(string(), map()) -> ok | {error, term()}.
+store_identity_keys(Username, IdentityKeys) ->
+    try
+        #{
+            identity_sign_public := IdentitySignPub,
+            identity_dh_public := IdentityDHPub,
+            signed_prekey_public := SignedPrekeyPub,
+            signed_prekey_signature := Signature,
+            timestamp := Timestamp
+        } = IdentityKeys,
+
+        %% Store identity keys with structured tuple key
+        IdentityData = #{
+            username => Username,
+            identity_sign_public => IdentitySignPub,
+            identity_dh_public => IdentityDHPub,
+            signed_prekey => #{
+                public => SignedPrekeyPub,
+                signature => Signature,
+                timestamp => Timestamp
+            },
+            created_at => erlang:system_time(second)
+        },
+
+        %% Use structured tuple key: {username, identity}
+        ets:insert(?PREKEY_TABLE, {{Username, identity}, IdentityData}),
+        ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
+        ok
+    catch
+        error:{badkey, Key} ->
+            {error, {missing_key, Key}};
+        _:Error ->
+            {error, Error}
+    end.
+
+%% @doc Store prekey bundle (one-time prekeys) for a user.
+%%
+%% Stores a list of one-time prekeys for forward secrecy. This is used
+%% in step 5 of the new authentication flow where prekey bundles are
+%% uploaded separately from identity keys.
+%%
+%% @param Username User ID
+%% @param PrekeyList List of prekey maps with id and public key
+%% @returns ok or {error, Reason}
+-spec store_prekey_bundle(string(), [map()]) -> ok | {error, term()}.
+store_prekey_bundle(Username, PrekeyList) ->
+    try
+        %% Store each one-time prekey individually with structured tuple keys
+        lists:foreach(
+            fun(#{id := KeyId, public := PubKey}) ->
+                %% Use structured tuple key: {username, otpk, key_id}
+                KeyTuple = {Username, otpk, KeyId},
+                PrekeyData = #{
+                    username => Username,
+                    key_id => KeyId,
+                    public_key => PubKey,
+                    consumed => false,
+                    created_at => erlang:system_time(second)
+                },
+                ets:insert(?PREKEY_TABLE, {KeyTuple, PrekeyData})
+            end,
+            PrekeyList
+        ),
+
+        %% Update user record
+        ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
+        ok
+    catch
+        _:Error ->
+            {error, Error}
+    end.
+
+%% @doc Get complete key bundle for a user with fresh OTPK list.
+%%
+%% Retrieves the user's complete key bundle from PREKEY_TABLE structured format.
+%% Reconstructs the bundle from identity data and available OTPKs.
 %%
 %% @param Username User ID
 %% @returns {ok, KeyBundle} or {error, not_found}
 -spec get_key_bundle(string()) -> {ok, map()} | {error, not_found}.
 get_key_bundle(Username) ->
-    case ets:lookup(?KEY_BUNDLE_TABLE, Username) of
-        [{Username, BundleData}] -> {ok, BundleData};
-        [] -> {error, not_found}
+    ?dbg("Looking up key bundle for username: ~p", [Username]),
+
+    %% Look for identity entry in PREKEY_TABLE
+    case ets:lookup(?PREKEY_TABLE, {Username, identity}) of
+        [{{Username, identity}, IdentityData}] ->
+            ?dbg("Found identity data for ~p", [Username]),
+            %% Extract identity data
+            #{
+                identity_sign_public := IdentitySignPub,
+                identity_dh_public := IdentityDHPub,
+                signed_prekey := #{
+                    public := SignedPrekeyPub,
+                    signature := SignedPrekeySignature,
+                    timestamp := Timestamp
+                }
+            } = IdentityData,
+
+            ?dbg("get_key_bundle: Retrieved IdentitySignPub: ~p", [
+                IdentitySignPub
+            ]),
+            ?dbg("get_key_bundle: Retrieved IdentityDHPub: ~p", [
+                IdentityDHPub
+            ]),
+            ?dbg("get_key_bundle: Retrieved SignedPrekeyPub: ~p", [
+                SignedPrekeyPub
+            ]),
+            ?dbg("get_key_bundle: Retrieved SignedPrekeySignature: ~p", [
+                SignedPrekeySignature
+            ]),
+
+            %% key_id might not exist for upload_identity_keys flow
+            KeyId = maps:get(
+                key_id, IdentityData, crypto:strong_rand_bytes(16)
+            ),
+
+            %% Get OTPKs for this user
+            AvailableOtpks = get_available_otpks(Username),
+            ?dbg("Available OTPKs for ~p: ~p", [
+                Username, length(AvailableOtpks)
+            ]),
+
+            %% Reconstruct bundle in expected format
+            ReconstructedBundle = #{
+                username => Username,
+                key_id => KeyId,
+                identity_sign_public => IdentitySignPub,
+                identity_dh_public => IdentityDHPub,
+                signed_prekey => #{
+                    public => SignedPrekeyPub,
+                    signature => SignedPrekeySignature,
+                    timestamp => Timestamp
+                },
+                one_time_prekeys => AvailableOtpks,
+                created_at => maps:get(
+                    created_at, IdentityData, erlang:system_time(second)
+                )
+            },
+
+            ?dbg("Successfully retrieved bundle for ~p", [
+                Username
+            ]),
+            {ok, ReconstructedBundle};
+        [] ->
+            ?dbg("No key bundle found for username: ~p", [
+                Username
+            ]),
+            {error, not_found}
     end.
 
 %% @doc Get signed prekey with signature for verification.
@@ -1063,40 +1280,56 @@ get_signed_prekey_with_signature(Username) ->
             {error, not_found};
         {ok, BundleData} ->
             #{
-                identity_sign_public := IdentityPub,
+                identity_sign_public := IdentitySignPub,
                 signed_prekey := #{
                     public := PrekeyPub,
                     signature := Signature
                 }
             } = BundleData,
-            {ok, {PrekeyPub, Signature, IdentityPub}}
+            {ok, {PrekeyPub, Signature, IdentitySignPub}}
     end.
 
 %% @doc Mark one-time prekey as consumed to ensure one-time use.
 %%
-%% Removes the specified OTPK from the user's bundle to prevent reuse.
-%% Implements Step 1 requirement for OTPK consumption tracking.
+%% Removes the specified OTPK from the user's prekey storage to prevent reuse.
+%% Uses the new structured tuple key format for efficient lookup.
 %%
 %% @param Username User ID
 %% @param OtpkId One-time prekey ID to mark as consumed
 %% @returns ok | {error, not_found}
 -spec mark_otpk_consumed(string(), binary()) -> ok | {error, not_found}.
 mark_otpk_consumed(Username, OtpkId) ->
-    case ets:lookup(?KEY_BUNDLE_TABLE, Username) of
+    %% Use structured tuple key for direct lookup
+    KeyTuple = {Username, otpk, OtpkId},
+    case ets:lookup(?PREKEY_TABLE, KeyTuple) of
         [] ->
             {error, not_found};
-        [{Username, BundleData}] ->
-            #{one_time_prekeys := OtpkList} = BundleData,
-            %% Remove the consumed OTPK
-            UpdatedOtpkList = lists:filter(
-                fun(#{id := Id}) -> Id =/= OtpkId end, OtpkList
-            ),
-            UpdatedBundleData = BundleData#{
-                one_time_prekeys => UpdatedOtpkList
-            },
-            ets:insert(?KEY_BUNDLE_TABLE, {Username, UpdatedBundleData}),
+        [{KeyTuple, _PrekeyData}] ->
+            %% Delete the consumed OTPK
+            ets:delete(?PREKEY_TABLE, KeyTuple),
             ok
     end.
+
+%% @doc Get available one-time prekeys for a user.
+%%
+%% Retrieves all unconsumed OTPKs for the specified user using
+%% structured tuple key matching.
+%%
+%% @param Username User ID
+%% @returns List of available OTPK data maps
+-spec get_available_otpks(string()) -> [map()].
+get_available_otpks(Username) ->
+    %% Use ets:match to find all OTPKs for this user
+    Pattern = {{Username, otpk, '_'}, '$1'},
+    Matches = ets:match(?PREKEY_TABLE, Pattern),
+    [
+        #{
+            id => maps:get(key_id, PrekeyData),
+            public => maps:get(public_key, PrekeyData)
+            %% Note: private key not stored on server for security
+        }
+     || [PrekeyData] <- Matches, not maps:get(consumed, PrekeyData, false)
+    ].
 
 %% @doc Get next sequence number for a communication pair.
 %%
@@ -1168,13 +1401,316 @@ update_sequence(SenderID, RecipientID, ReceivedSeq) ->
     end,
     ok.
 
+%%%===================================================================
+%%% X3DH Protocol Implementation (SESSION-MESSAGE-FLOW.md)
+%%%===================================================================
+
+%% @doc Perform X3DH key agreement from sender's perspective.
+%%
+%% Implements the Alice side of the X3DH protocol as described in SESSION-MESSAGE-FLOW.md.
+%% Performs three (or four) Diffie-Hellman exchanges and combines them into a session key:
+%% - DH1: Identity × Signed Prekey
+%% - DH2: Ephemeral × Identity
+%% - DH3: Ephemeral × Signed Prekey
+%% - DH4: Ephemeral × One-Time Prekey (optional)
+%%
+%% @param SenderKeys Map containing sender's client keys (from generate_client_keys/0)
+%% @param RecipientBundle Map containing recipient's key bundle from server
+%% @param Message Binary message to encrypt
+%% @returns {ok, {MessageBlob, MessageId}} or {error, Reason}
+-spec x3dh_sender_init(map(), map(), binary()) ->
+    {ok, {map(), binary()}} | {error, term()}.
+x3dh_sender_init(SenderKeys, RecipientBundle, Message) ->
+    try
+        ?dbg("DEBUG: Starting X3DH sender init, SenderKeys: ~p~n", [SenderKeys]),
+        %% Extract sender's keys
+        #{
+            identity_dh_private := SenderIdPriv,
+            identity_dh_public := SenderIdDHPub,
+            identity_sign_private := SenderSignPriv,
+            identity_sign_public := SenderSignPub,
+            key_id := SenderKeyId
+        } = SenderKeys,
+        ?dbg("DEBUG: SenderKeyId: ~p~n", [SenderKeyId]),
+        ?dbg(
+            "DEBUG: Alice signing with SenderSignPriv (identity_sign_private): ~p~n",
+            [SenderSignPriv]
+        ),
+        ?dbg(
+            "DEBUG: Alice's corresponding public key (identity_sign_public): ~p~n",
+            [SenderSignPub]
+        ),
+
+        ?dbg("DEBUG: RecipientBundle: ~p~n", [RecipientBundle]),
+        %% Extract recipient's keys
+        #{
+            identity_sign_public := RecipientIdPub,
+            identity_dh_public := RecipientIdDHPub,
+            signed_prekey := #{
+                public := RecipientSpkPub,
+                signature := SpkSignature
+            },
+            key_id := RecipientKeyId
+        } = RecipientBundle,
+        ?dbg("DEBUG: RecipientKeyId: ~p~n", [RecipientKeyId]),
+
+        %% Verify signed prekey signature
+        ?dbg(
+            "DEBUG: About to verify signature with:~n  SpkPub: ~p~n  Signature: ~p~n  IdentityPub: ~p~n",
+            [RecipientSpkPub, SpkSignature, RecipientIdPub]
+        ),
+        case verify_signature(RecipientSpkPub, SpkSignature, RecipientIdPub) of
+            false ->
+                {error, invalid_signed_prekey_signature};
+            true ->
+                %% Generate ephemeral keypair for this session
+                {EphemeralPub, EphemeralPriv} = gen_keypair(),
+
+                %% Perform X3DH key exchanges (use Bob's X25519 DH public key directly)
+                %% DH1: Identity × Signed Prekey (per X3DH specification)
+                DH1 = scalarmult(SenderIdPriv, RecipientSpkPub),
+                ?info("X3DH Alice DH1 result: ~p", [DH1]),
+
+                %% DH2: Ephemeral × Identity (per X3DH specification)
+                DH2 = scalarmult(EphemeralPriv, RecipientIdDHPub),
+                ?info("X3DH Alice DH2 result: ~p", [DH2]),
+
+                %% DH3: Ephemeral × Signed Prekey
+                DH3 = scalarmult(EphemeralPriv, RecipientSpkPub),
+                ?info("X3DH Alice DH3 result: ~p", [DH3]),
+
+                %% DH4: Ephemeral × One-Time Prekey (optional)
+                {DH4, OtpkId} =
+                    case maps:get(one_time_prekey, RecipientBundle, null) of
+                        null ->
+                            ?info("X3DH Alice DH4: OTPK is null, no DH4", []),
+                            {<<>>, null};
+                        #{id := OtpkIdBin, public := OtpkPub} ->
+                            DH4Val = scalarmult(EphemeralPriv, OtpkPub),
+                            ?info("X3DH Alice DH4 result: ~p", [DH4Val]),
+                            {DH4Val, OtpkIdBin}
+                    end,
+
+                %% Combine DH outputs and derive session key
+                DHCombined = <<DH1/binary, DH2/binary, DH3/binary, DH4/binary>>,
+                ?info("X3DH Alice DHCombined length: ~p", [
+                    byte_size(DHCombined)
+                ]),
+                SessionKey = hkdf_sha256(DHCombined, <<"X3DH SessionKey">>, 32),
+
+                %% Generate unique message ID
+                MessageId = crypto:strong_rand_bytes(16),
+                ?dbg("DEBUG: Generated MessageId: ~p~n", [MessageId]),
+
+                %% Create message metadata for X3DH
+                Metadata = #{
+                    version => 1,
+                    type => <<"X3DH_INIT">>,
+                    sender_id => SenderKeyId,
+                    sender_identity_dh_public => SenderIdDHPub,
+                    sender_identity_sign_public => SenderSignPub,
+                    recipient_id => RecipientKeyId,
+                    ephemeral_public => EphemeralPub,
+                    otpk_id => OtpkId,
+                    message_id => MessageId,
+                    timestamp => erlang:system_time(second)
+                },
+
+                %% Sign the message metadata for identity binding
+                ?dbg("DEBUG: Alice creating Metadata map: ~p", [Metadata]),
+                MetadataBin = erlang:term_to_binary(Metadata),
+                ?dbg("DEBUG: Alice signing MetadataBin: ~p", [MetadataBin]),
+                ?dbg("DEBUG: Alice signing MetadataBin size: ~p", [
+                    byte_size(MetadataBin)
+                ]),
+                Signature = sign_message(MetadataBin, SenderSignPriv),
+                ?dbg("DEBUG: Alice generated signature: ~p", [Signature]),
+
+                %% Test: Verify Alice's signature immediately with her own public key
+                SelfVerifyResult = verify_signature(
+                    MetadataBin, Signature, SenderSignPub
+                ),
+                ?dbg("DEBUG: Alice self-verification of signature: ~p", [
+                    SelfVerifyResult
+                ]),
+
+                %% Encrypt the actual message with session key
+                {Ciphertext, Nonce} = aead_encrypt(Message, SessionKey, <<>>),
+                ?dbg(
+                    ">>>>>> Encrypted message with session key: ~p , Nonce: ~p~n",
+                    [SessionKey, Nonce]
+                ),
+
+                %% Create complete message blob
+                MessageBlob = #{
+                    metadata => Metadata,
+                    signature => Signature,
+                    ciphertext => Ciphertext,
+                    nonce => Nonce
+                },
+
+                {ok, {MessageBlob, MessageId}}
+        end
+    catch
+        error:Reason -> {error, Reason};
+        throw:Reason -> {error, Reason}
+    end.
+
+%% @doc Perform X3DH key agreement from receiver's perspective.
+%%
+%% Implements the Bob side of the X3DH protocol as described in SESSION-MESSAGE-FLOW.md.
+%% Recreates the same session key by performing the same DH exchanges and decrypts the message.
+%%
+%% @param ReceiverKeys Map containing receiver's client keys
+%% @param MessageBlob Encrypted message blob from sender
+%% @param SenderIdPub Sender's identity public key for signature verification
+%% @param OtpkPrivateKey Private key for the OTPK ID specified in message (or null)
+%% @returns {ok, Message} or {error, Reason}
+-spec x3dh_receiver_decrypt(
+    map(), map(), binary(), binary() | null
+) ->
+    {ok, binary()} | {error, term()}.
+x3dh_receiver_decrypt(
+    ReceiverKeys,
+    MessageBlob,
+    SenderIdPub,
+    OtpkPrivateKey
+) ->
+    try
+        %% Extract message components
+        #{
+            metadata := CompleteMetadata,
+            signature := Signature,
+            ciphertext := Ciphertext,
+            nonce := Nonce
+        } = MessageBlob,
+
+        %% Extract required metadata fields for X3DH operations
+        #{
+            ephemeral_public := EphemeralPub,
+            sender_identity_dh_public := OriginalSenderIdDHPub,
+            message_id := MessageId
+        } = CompleteMetadata,
+
+        %% Use Alice's complete transmitted metadata directly for signature verification
+        %% This ensures we verify against exactly what Alice signed
+
+        %% Verify message signature using complete metadata
+        MetadataBin = erlang:term_to_binary(CompleteMetadata),
+        ?dbg("X3DH signature verification - Complete Metadata map: ~p", [
+            CompleteMetadata
+        ]),
+        ?dbg("X3DH signature verification - MetadataBin: ~p", [MetadataBin]),
+        ?dbg("X3DH signature verification - MetadataBin size: ~p", [
+            byte_size(MetadataBin)
+        ]),
+        ?dbg("X3DH signature verification - Signature: ~p", [Signature]),
+        ?dbg("X3DH signature verification - SenderIdPub: ~p", [SenderIdPub]),
+        case verify_signature(MetadataBin, Signature, SenderIdPub) of
+            false ->
+                ?dbg("X3DH signature verification FAILED", []),
+                {error, invalid_message_signature};
+            true ->
+                %% Use the sender's DH public key from Alice's metadata directly
+                %% Alice already included her DH public key in the metadata
+                SenderIdDHPub = OriginalSenderIdDHPub,
+
+                %% Extract receiver's keys
+                #{
+                    identity_dh_private := ReceiverIdPriv,
+                    signed_prekey_private := ReceiverSpkPriv
+                } = ReceiverKeys,
+
+                %% Perform same X3DH key exchanges as sender
+                %% DH1: Identity × Signed Prekey (receiver perspective: Signed Prekey × Identity)
+                DH1 = scalarmult(ReceiverSpkPriv, SenderIdDHPub),
+                ?info("X3DH DH1 result: ~p", [DH1]),
+
+                %% DH2: Ephemeral × Identity (receiver perspective: Identity × Ephemeral)
+                DH2 = scalarmult(ReceiverIdPriv, EphemeralPub),
+                ?info("X3DH DH2 result: ~p", [DH2]),
+
+                %% DH3: Ephemeral × Signed Prekey (receiver perspective: Signed Prekey × Ephemeral)
+                DH3 = scalarmult(ReceiverSpkPriv, EphemeralPub),
+                ?info("X3DH DH3 result: ~p", [DH3]),
+
+                %% DH4: Ephemeral × One-Time Prekey (if OTPK was used)
+                DH4 =
+                    case OtpkPrivateKey of
+                        null ->
+                            ?info("X3DH DH4: OTPK is null, no DH4", []),
+                            <<>>;
+                        OtpkPriv when is_binary(OtpkPriv) ->
+                            DH4Result = scalarmult(OtpkPriv, EphemeralPub),
+                            ?info("X3DH DH4 result: ~p", [DH4Result]),
+                            DH4Result
+                    end,
+
+                %% Combine DH outputs to recreate session key
+                DHCombined = <<DH1/binary, DH2/binary, DH3/binary, DH4/binary>>,
+                ?info("X3DH DHCombined length: ~p", [byte_size(DHCombined)]),
+                SessionKey = hkdf_sha256(DHCombined, <<"X3DH SessionKey">>, 32),
+                ?dbg(">>>>>> Decrypt with SessionKey: ~p , Nonec: ~p~n", [
+                    SessionKey, Nonce
+                ]),
+
+                %% Decrypt the message
+                ?info(
+                    "X3DH About to call aead_decrypt with ciphertext size: ~p, key size: ~p, nonce size: ~p",
+                    [
+                        byte_size(Ciphertext),
+                        byte_size(SessionKey),
+                        byte_size(Nonce)
+                    ]
+                ),
+                case aead_decrypt(Ciphertext, SessionKey, Nonce, <<>>) of
+                    error ->
+                        ?info("X3DH AEAD decryption failed", []),
+                        {error, decryption_failed};
+                    DecryptedMessage ->
+                        ?info("X3DH AEAD decryption successful, message: ~p", [
+                            DecryptedMessage
+                        ]),
+                        {ok, {DecryptedMessage, MessageId}}
+                end
+        end
+    catch
+        error:Reason -> {error, Reason};
+        throw:Reason -> {error, Reason}
+    end.
+
+%% @doc Find the private key for a specific OTPK ID in the client keys.
+%%
+%% Searches through the client's one-time prekeys to find the private key
+%% matching the given OTPK ID. This is used by the receiver to decrypt
+%% X3DH messages that used a specific OTPK.
+%%
+%% @param ClientKeys Map containing client's complete key bundle
+%% @param OtpkId Binary OTPK ID to search for
+%% @returns {ok, PrivateKey} or {error, not_found}
+-spec find_otpk_private_key(map(), binary()) ->
+    {ok, binary()} | {error, not_found}.
+find_otpk_private_key(ClientKeys, OtpkId) ->
+    #{one_time_prekeys := OtpkList} = ClientKeys,
+
+    case
+        lists:search(
+            fun(#{id := Id}) -> Id =:= OtpkId end,
+            OtpkList
+        )
+    of
+        {value, #{private := PrivateKey}} ->
+            {ok, PrivateKey};
+        false ->
+            {error, not_found}
+    end.
+
 %% @doc Ensure ETS tables exist.
 ensure_tables() ->
     ensure_table(?PREKEY_TABLE),
     ensure_table(?MESSAGE_TABLE),
     ensure_table(?USER_TABLE),
     ensure_table(?SEQUENCE_TABLE),
-    ensure_table(?KEY_BUNDLE_TABLE),
     ok.
 
 ensure_table(TableName) ->
