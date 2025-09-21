@@ -71,7 +71,6 @@
 -include("cryptic.hrl").
 -include("cryptic_ui.hrl").
 
-
 %%%===================================================================
 %%% Public API
 %%%===================================================================
@@ -817,9 +816,11 @@ handle_normal_input(Input, UIState) ->
         {key, 10} ->
             %% Process command and clear input
             Command = UIState#ui_state.current_input,
+            %% Trim whitespace from command for processing
+            TrimmedCommand = string:strip(Command),
             %% Add non-empty commands to history
             NewHistory =
-                case string:strip(Command) of
+                case TrimmedCommand of
                     "" ->
                         UIState#ui_state.command_history;
                     CleanCommand ->
@@ -829,7 +830,7 @@ handle_normal_input(Input, UIState) ->
                             50
                         )
                 end,
-            ProcessedUIState = process_command(Command, UIState),
+            ProcessedUIState = process_command(TrimmedCommand, UIState),
             ProcessedUIState#ui_state{
                 current_input = "",
                 cursor_position = 0,
@@ -929,6 +930,128 @@ handle_normal_input(Input, UIState) ->
                     };
                 true ->
                     UIState
+            end;
+        %% Emacs-style control key bindings
+        {ctrl, ctrl_a} ->
+            %% Ctrl+A - Move cursor to beginning of line
+            UIState#ui_state{cursor_position = 0};
+        {ctrl, ctrl_e} ->
+            %% Ctrl+E - Move cursor to end of line
+            CurrentInput = UIState#ui_state.current_input,
+            UIState#ui_state{cursor_position = length(CurrentInput)};
+        {ctrl, ctrl_b} ->
+            %% Ctrl+B - Move cursor backward one character
+            CursorPos = UIState#ui_state.cursor_position,
+            NewCursorPos = max(0, CursorPos - 1),
+            UIState#ui_state{cursor_position = NewCursorPos};
+        {ctrl, ctrl_f} ->
+            %% Ctrl+F - Move cursor forward one character
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            NewCursorPos = min(length(CurrentInput), CursorPos + 1),
+            UIState#ui_state{cursor_position = NewCursorPos};
+        {ctrl, ctrl_d} ->
+            %% Ctrl+D - Delete character at cursor (like Delete key)
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            if
+                CursorPos < length(CurrentInput) ->
+                    {Before, After} = lists:split(CursorPos, CurrentInput),
+                    NewAfter =
+                        case After of
+                            [] -> [];
+                            [_ | Rest] -> Rest
+                        end,
+                    NewInput = Before ++ NewAfter,
+                    UIState#ui_state{
+                        current_input = NewInput,
+                        history_position = 0
+                    };
+                true ->
+                    UIState
+            end;
+        {ctrl, ctrl_k} ->
+            %% Ctrl+K - Kill from cursor to end of line
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            {Before, After} = lists:split(CursorPos, CurrentInput),
+            %% Add killed text to kill ring if not empty
+            NewKillRing =
+                case After of
+                    [] ->
+                        UIState#ui_state.kill_ring;
+                    _ ->
+                        [After | lists:sublist(UIState#ui_state.kill_ring, 9)]
+                end,
+            UIState#ui_state{
+                current_input = Before,
+                kill_ring = NewKillRing,
+                history_position = 0
+            };
+        {ctrl, ctrl_u} ->
+            %% Ctrl+U - Kill entire line
+            CurrentInput = UIState#ui_state.current_input,
+            %% Add killed text to kill ring if not empty
+            NewKillRing =
+                case CurrentInput of
+                    [] ->
+                        UIState#ui_state.kill_ring;
+                    _ ->
+                        [
+                            CurrentInput
+                            | lists:sublist(UIState#ui_state.kill_ring, 9)
+                        ]
+                end,
+            UIState#ui_state{
+                current_input = [],
+                cursor_position = 0,
+                kill_ring = NewKillRing,
+                history_position = 0
+            };
+        {ctrl, ctrl_w} ->
+            %% Ctrl+W - Kill word backward
+            CurrentInput = UIState#ui_state.current_input,
+            CursorPos = UIState#ui_state.cursor_position,
+            {Before, After} = lists:split(CursorPos, CurrentInput),
+            %% Find start of word to kill
+            {_WordStart, KilledWord, NewBefore} = find_word_backward(Before),
+            NewInput = NewBefore ++ After,
+            NewCursorPos = length(NewBefore),
+            %% Add killed word to kill ring if not empty
+            NewKillRing =
+                case KilledWord of
+                    [] ->
+                        UIState#ui_state.kill_ring;
+                    _ ->
+                        [
+                            KilledWord
+                            | lists:sublist(UIState#ui_state.kill_ring, 9)
+                        ]
+                end,
+            UIState#ui_state{
+                current_input = NewInput,
+                cursor_position = NewCursorPos,
+                kill_ring = NewKillRing,
+                history_position = 0
+            };
+        {ctrl, ctrl_y} ->
+            %% Ctrl+Y - Yank (paste) from kill ring
+            case UIState#ui_state.kill_ring of
+                [] ->
+                    %% Nothing to yank
+                    UIState;
+                [LastKilled | _] ->
+                    %% Insert at cursor position
+                    CurrentInput = UIState#ui_state.current_input,
+                    CursorPos = UIState#ui_state.cursor_position,
+                    {Before, After} = lists:split(CursorPos, CurrentInput),
+                    NewInput = Before ++ LastKilled ++ After,
+                    NewCursorPos = CursorPos + length(LastKilled),
+                    UIState#ui_state{
+                        current_input = NewInput,
+                        cursor_position = NewCursorPos,
+                        history_position = 0
+                    }
             end;
         _ ->
             %% Ignore other input
@@ -2320,9 +2443,36 @@ format_timestamp(Timestamp) ->
 %% @param MainPid PID of the main UI process to send input events to.
 input_handler(MainPid) ->
     case cecho:getch() of
-        % Ctrl+C
+        % Ctrl+A - Beginning of line
+        1 ->
+            MainPid ! {input, {ctrl, ctrl_a}};
+        % Ctrl+B - Backward char
+        2 ->
+            MainPid ! {input, {ctrl, ctrl_b}};
+        % Ctrl+C - Quit (existing)
         3 ->
             MainPid ! {input, quit};
+        % Ctrl+D - Delete char forward
+        4 ->
+            MainPid ! {input, {ctrl, ctrl_d}};
+        % Ctrl+E - End of line
+        5 ->
+            MainPid ! {input, {ctrl, ctrl_e}};
+        % Ctrl+F - Forward char
+        6 ->
+            MainPid ! {input, {ctrl, ctrl_f}};
+        % Ctrl+K - Kill to end of line
+        11 ->
+            MainPid ! {input, {ctrl, ctrl_k}};
+        % Ctrl+U - Kill whole line
+        21 ->
+            MainPid ! {input, {ctrl, ctrl_u}};
+        % Ctrl+W - Kill word backward
+        23 ->
+            MainPid ! {input, {ctrl, ctrl_w}};
+        % Ctrl+Y - Yank (paste)
+        25 ->
+            MainPid ! {input, {ctrl, ctrl_y}};
         % Enter
         10 ->
             MainPid ! {input, {key, 10}};
@@ -2359,6 +2509,8 @@ input_handler(MainPid) ->
             %% Ignore other keys
             ok
     end,
+    %% Small delay to prevent busy looping
+    timer:sleep(50),
     input_handler(MainPid).
 
 %% @private
@@ -3424,34 +3576,37 @@ handle_help_command(Rest, UIState) ->
             HelpState10 = add_system_message(
                 "  utilities   - Utility and info commands", HelpState9
             ),
-            HelpState11 = add_system_message("", HelpState10),
-            HelpState12 = add_system_message("QUICK REFERENCE:", HelpState11),
-            HelpState13 = add_system_message(
-                "  connect                    - Connect to server", HelpState12
+            HelpState11 = add_system_message(
+                "  editing     - Emacs-style line editing keys", HelpState10
             ),
+            HelpState12 = add_system_message("", HelpState11),
+            HelpState13 = add_system_message("QUICK REFERENCE:", HelpState12),
             HelpState14 = add_system_message(
-                "  send <user> <message>      - Send direct message",
-                HelpState13
+                "  connect                    - Connect to server", HelpState13
             ),
             HelpState15 = add_system_message(
-                "  create_room <name>         - Create new room", HelpState14
+                "  send <user> <message>      - Send direct message",
+                HelpState14
             ),
             HelpState16 = add_system_message(
-                "  join_room <room>           - Join existing room", HelpState15
+                "  create_room <name>         - Create new room", HelpState15
             ),
             HelpState17 = add_system_message(
-                "  room_chat <room>           - Enter room chat mode",
-                HelpState16
+                "  join_room <room>           - Join existing room", HelpState16
             ),
             HelpState18 = add_system_message(
-                "  list_rooms                 - List available rooms",
+                "  room_chat <room>           - Enter room chat mode",
                 HelpState17
             ),
             HelpState19 = add_system_message(
-                "  list_users                 - List online users", HelpState18
+                "  list_rooms                 - List available rooms",
+                HelpState18
+            ),
+            HelpState20 = add_system_message(
+                "  list_users                 - List online users", HelpState19
             ),
             add_system_message(
-                "  help <topic>               - Get detailed help", HelpState19
+                "  help <topic>               - Get detailed help", HelpState20
             );
         "connection" ->
             %% Connection commands help
@@ -3712,6 +3867,65 @@ handle_help_command(Rest, UIState) ->
                 "  Example: help send", HelpState18
             ),
             add_system_message("  Example: help rooms", HelpState19);
+        "editing" ->
+            %% Emacs-style editing commands help
+            HelpState = add_system_message(
+                "=== EMACS-STYLE EDITING KEYS ===", UIState
+            ),
+            HelpState2 = add_system_message("", HelpState),
+            HelpState3 = add_system_message("CURSOR MOVEMENT:", HelpState2),
+            HelpState4 = add_system_message(
+                "  Ctrl+A  - Move to beginning of line", HelpState3
+            ),
+            HelpState5 = add_system_message(
+                "  Ctrl+E  - Move to end of line", HelpState4
+            ),
+            HelpState6 = add_system_message(
+                "  Ctrl+B  - Move backward one character", HelpState5
+            ),
+            HelpState7 = add_system_message(
+                "  Ctrl+F  - Move forward one character", HelpState6
+            ),
+            HelpState8 = add_system_message("", HelpState7),
+            HelpState9 = add_system_message("EDITING OPERATIONS:", HelpState8),
+            HelpState10 = add_system_message(
+                "  Ctrl+D  - Delete character at cursor", HelpState9
+            ),
+            HelpState11 = add_system_message(
+                "  Ctrl+K  - Kill from cursor to end of line", HelpState10
+            ),
+            HelpState12 = add_system_message(
+                "  Ctrl+U  - Kill entire line", HelpState11
+            ),
+            HelpState13 = add_system_message(
+                "  Ctrl+W  - Kill word backward", HelpState12
+            ),
+            HelpState14 = add_system_message(
+                "  Ctrl+Y  - Yank (paste) from kill ring", HelpState13
+            ),
+            HelpState15 = add_system_message("", HelpState14),
+            HelpState16 = add_system_message(
+                "TRADITIONAL KEYS (still work):", HelpState15
+            ),
+            HelpState17 = add_system_message(
+                "  Home    - Move to beginning of line", HelpState16
+            ),
+            HelpState18 = add_system_message(
+                "  End     - Move to end of line", HelpState17
+            ),
+            HelpState19 = add_system_message(
+                "  Left    - Move backward one character", HelpState18
+            ),
+            HelpState20 = add_system_message(
+                "  Right   - Move forward one character", HelpState19
+            ),
+            HelpState21 = add_system_message(
+                "  Delete  - Delete character at cursor", HelpState20
+            ),
+            HelpState22 = add_system_message(
+                "  Up/Down - Navigate command history", HelpState21
+            ),
+            add_system_message("", HelpState22);
         %% Individual command help
         "connect" ->
             HelpState = add_system_message("COMMAND: connect", UIState),
@@ -3858,7 +4072,7 @@ handle_help_command(Rest, UIState) ->
                 "Available help topics:", HelpState2
             ),
             HelpState4 = add_system_message(
-                "  Categories: connection, messaging, rooms, utilities",
+                "  Categories: connection, messaging, rooms, utilities, editing",
                 HelpState3
             ),
             HelpState5 = add_system_message(
@@ -4928,6 +5142,63 @@ handle_legacy_encrypted_message(
         undefined ->
             add_system_message("No keypair available for decryption", UIState)
     end.
+
+%% @private
+%% Find the start of a word backward from the current position.
+%%
+%% This function implements word boundary detection for Ctrl+W (kill word backward).
+%% It finds the beginning of the current word or the previous word if the cursor
+%% is at word boundary or whitespace.
+%%
+%% Word boundaries are defined as:
+%% - Whitespace characters (space, tab)
+%% - Beginning of line
+%%
+%% @param Before List of characters before the cursor position
+%% @returns {WordStart, KilledWord, NewBefore} where:
+%%   - WordStart: Position where the word starts (unused but kept for consistency)
+%%   - KilledWord: The word that was killed
+%%   - NewBefore: The remaining text before cursor after killing the word
+find_word_backward(Before) ->
+    %% Reverse the list to work from cursor backward
+    Reversed = lists:reverse(Before),
+
+    %% Skip any trailing whitespace first
+    {SkippedWS, RestAfterWS} = skip_whitespace(Reversed),
+
+    %% Find the word to kill
+    {Word, RestAfterWord} = take_word(RestAfterWS),
+
+    %% The killed text includes any skipped whitespace plus the word
+    KilledWord = lists:reverse(SkippedWS ++ Word),
+
+    %% What remains before cursor
+    NewBefore = lists:reverse(RestAfterWord),
+
+    %% WordStart would be the position, but we don't actually need it
+    WordStart = length(NewBefore),
+
+    {WordStart, KilledWord, NewBefore}.
+
+%% @private
+%% Skip whitespace characters from the beginning of a reversed string.
+skip_whitespace([]) ->
+    {[], []};
+skip_whitespace([C | Rest]) when C =:= $\s; C =:= $\t ->
+    {Skipped, Remaining} = skip_whitespace(Rest),
+    {[C | Skipped], Remaining};
+skip_whitespace(String) ->
+    {[], String}.
+
+%% @private
+%% Take a word (non-whitespace characters) from the beginning of a reversed string.
+take_word([]) ->
+    {[], []};
+take_word([C | Rest]) when C =:= $\s; C =:= $\t ->
+    {[], [C | Rest]};
+take_word([C | Rest]) ->
+    {Word, Remaining} = take_word(Rest),
+    {[C | Word], Remaining}.
 
 %% @private
 %% Cleanup UI resources on exit.
