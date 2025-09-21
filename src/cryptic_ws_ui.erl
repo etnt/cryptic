@@ -592,7 +592,16 @@ draw_help_bar(UIState) ->
                     {disconnected, _} ->
                         "Commands: connect | help | quit";
                     {connected, false} ->
-                        "Commands: help | send | chat | create_room | join_room | list_rooms | list_users | disconnect";
+                        %% Check if there are enough messages to scroll
+                        Messages = UIState#ui_state.message_history,
+                        ScreenHeight = UIState#ui_state.screen_height,
+                        AreaHeight = ScreenHeight - 4,
+                        case length(Messages) > AreaHeight of
+                            true ->
+                                "Commands: help | send | chat | PgUp/PgDn scroll | disconnect";
+                            false ->
+                                "Commands: help | send | chat | create_room | join_room | list_rooms | list_users | disconnect"
+                        end;
                     {connected, true} ->
                         "Chat Mode: Type message to send | :exit to leave chat | :help for commands";
                     {connecting, _} ->
@@ -1053,6 +1062,33 @@ handle_normal_input(Input, UIState) ->
                         history_position = 0
                     }
             end;
+        {key, page_up} ->
+            %% Page Up - Scroll up in message history (show older messages)
+            CurrentScrollPos = UIState#ui_state.scroll_position,
+            Messages = UIState#ui_state.message_history,
+            TotalMessages = length(Messages),
+
+            %% Calculate message area height
+            ScreenHeight = UIState#ui_state.screen_height,
+            % Status bar, help bar, input line, separator
+            AreaHeight = ScreenHeight - 4,
+
+            %% Calculate max scroll position (prevent scrolling beyond available messages)
+            MaxScrollPos = max(0, TotalMessages - AreaHeight),
+
+            %% Scroll up by area height, but don't exceed max
+            NewScrollPos = min(MaxScrollPos, CurrentScrollPos + AreaHeight),
+            UIState#ui_state{scroll_position = NewScrollPos};
+        {key, page_down} ->
+            %% Page Down - Scroll down in message history (show newer messages)
+            CurrentScrollPos = UIState#ui_state.scroll_position,
+            ScreenHeight = UIState#ui_state.screen_height,
+            % Status bar, help bar, input line, separator
+            AreaHeight = ScreenHeight - 4,
+
+            %% Scroll down by area height, but don't go below 0
+            NewScrollPos = max(0, CurrentScrollPos - AreaHeight),
+            UIState#ui_state{scroll_position = NewScrollPos};
         _ ->
             %% Ignore other input
             UIState
@@ -2502,6 +2538,12 @@ input_handler(MainPid) ->
         % End key
         ?ceKEY_END ->
             MainPid ! {input, {key, end_key}};
+        % Page Up - Scroll up in message history
+        ?ceKEY_PGUP ->
+            MainPid ! {input, {key, page_up}};
+        % Page Down - Scroll down in message history
+        ?ceKEY_PGDOWN ->
+            MainPid ! {input, {key, page_down}};
         Char when Char >= 32, Char =< 126 ->
             %% Printable character
             MainPid ! {input, {char, Char}};
@@ -2655,7 +2697,11 @@ add_message(From, Message, UIState) ->
     NewMessage = {From, Message, lists:flatten(Timestamp)},
     CurrentMessages = UIState#ui_state.message_history,
 
-    UIState#ui_state{message_history = CurrentMessages ++ [NewMessage]}.
+    UIState#ui_state{
+        message_history = CurrentMessages ++ [NewMessage],
+        % Reset scroll to show newest messages
+        scroll_position = 0
+    }.
 
 %% @private
 %% Handle room_created response from server.
@@ -3925,7 +3971,15 @@ handle_help_command(Rest, UIState) ->
             HelpState22 = add_system_message(
                 "  Up/Down - Navigate command history", HelpState21
             ),
-            add_system_message("", HelpState22);
+            HelpState23 = add_system_message("", HelpState22),
+            HelpState24 = add_system_message("MESSAGE SCROLLING:", HelpState23),
+            HelpState25 = add_system_message(
+                "  Page Up   - Scroll up through message history", HelpState24
+            ),
+            HelpState26 = add_system_message(
+                "  Page Down - Scroll down through message history", HelpState25
+            ),
+            add_system_message("", HelpState26);
         %% Individual command help
         "connect" ->
             HelpState = add_system_message("COMMAND: connect", UIState),
@@ -4469,7 +4523,11 @@ add_system_message(Message, UIState) ->
     NewMessage = {"SYSTEM", Message, lists:flatten(Timestamp)},
     CurrentMessages = UIState#ui_state.message_history,
 
-    UIState#ui_state{message_history = CurrentMessages ++ [NewMessage]}.
+    UIState#ui_state{
+        message_history = CurrentMessages ++ [NewMessage],
+        % Reset scroll to show newest messages
+        scroll_position = 0
+    }.
 
 %% @private
 %% Handle X3DH encrypted message with proper field names.
