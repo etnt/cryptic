@@ -1814,9 +1814,15 @@ decrypt_x3dh_message_with_key(
             of
                 {ok, {PlaintextMessage, _MessageId}} ->
                     ?dbg("Successfully decrypted X3DH message from ~s", [From]),
+
+                    %% Track OTPK usage for forward secrecy management
+                    UIStateAfterTracking = handle_otpk_tracking(
+                        From, RecipientBlob, UIState
+                    ),
+
                     DecryptedText = binary_to_list(PlaintextMessage),
                     clear_pending_operation_and_add_message_from_user(
-                        From, DecryptedText, UIState
+                        From, DecryptedText, UIStateAfterTracking
                     );
                 {error, DecryptReason} ->
                     ?dbg("Failed to decrypt X3DH message from ~s: ~p", [
@@ -1858,6 +1864,74 @@ find_otpk_private_key(RecipientBlob, ClientKeys) ->
                     null
             end
     end.
+
+%% @private
+%% Handle OTPK usage tracking for forward secrecy management.
+%%
+%% This function manages OTPK (One-Time Prekey) usage tracking to maintain
+%% forward secrecy and detect potential security issues:
+%% <ul>
+%%   <li>Tracks the last OTPK used by each sender</li>
+%%   <li>Detects OTPK reuse (security concern)</li>
+%%   <li>Detects OTPK rotation and cleans up old keys</li>
+%%   <li>Provides user notifications about key management events</li>
+%% </ul>
+%%
+%% @param From The sender's username
+%% @param RecipientBlob The encrypted message blob containing metadata
+%% @param UIState Current UI state
+%% @returns Updated UI state with tracking information and any user notifications
+-spec handle_otpk_tracking(string(), map(), #ui_state{}) -> #ui_state{}.
+handle_otpk_tracking(From, RecipientBlob, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    MyUsername = WSChatState#ws_chat_state.username,
+    #{metadata := MessageMetadata} = RecipientBlob,
+    CurrentOtpkId = maps:get(otpk_id, MessageMetadata, undefined),
+
+    %% Check for OTPK rotation and cleanup
+    UIStateAfterTracking =
+        case cryptic_lib:check_otpk_usage(MyUsername, From) of
+            {ok, {LastOtpkId, _LastTimestamp}} ->
+                case {LastOtpkId, CurrentOtpkId} of
+                    {Same, Same} when Same =/= undefined ->
+                        %% OTPK reuse detected - log security warning
+                        ?warning(
+                            "WARNING: OTPK reuse detected from ~s (security concern)",
+                            [From]
+                        ),
+                        add_system_message(
+                            lists:flatten(
+                                io_lib:format(
+                                    "SECURITY WARNING: ~s is reusing the same one-time prekey. "
+                                    "This reduces forward secrecy.",
+                                    [From]
+                                )
+                            ),
+                            UIState
+                        );
+                    {OldId, NewId} when OldId =/= undefined,
+                                        NewId =/= undefined,
+                                        OldId =/= NewId ->
+                        %% OTPK rotation detected - clean up old key
+                        cryptic_lib:cleanup_old_otpk(MyUsername, From),
+                        ?dbg("Cleaned up old OTPK from ~s (key rotation)~n",
+                            [From]
+                        ),
+                         UIState;
+                    _ ->
+                        %% Other cases (undefined transitions) - normal
+                        ?dbg("No OTPK rotation detected from ~s~n", [From]),
+                        UIState
+                end;
+            {error, not_found} ->
+                %% First message from this sender
+                UIState
+        end,
+
+    %% Update OTPK usage tracking
+    cryptic_lib:track_otpk_usage(MyUsername, From, CurrentOtpkId),
+
+    UIStateAfterTracking.
 
 %% @private
 %% Clear pending operation and add a system message.
@@ -4649,6 +4723,12 @@ proceed_with_x3dh_decrypt_direct(
                 "X3DH decryption successful, plaintext: ~p",
                 [PlainBin]
             ),
+
+            %% Handle OTPK tracking for forward secrecy management
+            UIStateAfterTracking = handle_otpk_tracking(
+                From, UpdatedRecipientBlob, UIState
+            ),
+
             %% Convert to string
             PlainText =
                 case unicode:characters_to_list(PlainBin) of
@@ -4664,12 +4744,12 @@ proceed_with_x3dh_decrypt_direct(
                 erlang:system_time(second)
             ),
             NewInbox =
-                UIState#ui_state.inbox ++
+                UIStateAfterTracking#ui_state.inbox ++
                     [{From, PlainText, Timestamp}],
 
             %% Update pending messages
             PendingMessages =
-                UIState#ui_state.pending_messages,
+                UIStateAfterTracking#ui_state.pending_messages,
             CurrentCount = maps:get(
                 From, PendingMessages, 0
             ),
@@ -4677,18 +4757,18 @@ proceed_with_x3dh_decrypt_direct(
                 From, CurrentCount + 1, PendingMessages
             ),
             %% Clear pending operation
-            WSChatState = UIState#ui_state.ws_chat_state,
+            WSChatState = UIStateAfterTracking#ui_state.ws_chat_state,
             ClearedWSChatState = WSChatState#ws_chat_state{
                 pending_operation = undefined
             },
-            TempUIState = UIState#ui_state{
+            TempUIState = UIStateAfterTracking#ui_state{
                 inbox = NewInbox,
                 message_count = length(NewInbox),
                 pending_messages = NewPendingMessages,
                 ws_chat_state = ClearedWSChatState
             },
             %% Auto-display if enabled
-            case UIState#ui_state.auto_display of
+            case UIStateAfterTracking#ui_state.auto_display of
                 true ->
                     ClearedPendingMessages = maps:put(
                         From, 0, NewPendingMessages

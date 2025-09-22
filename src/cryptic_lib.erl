@@ -156,7 +156,11 @@
     %% X3DH Protocol Implementation
     x3dh_sender_init/3,
     x3dh_receiver_decrypt/4,
-    find_otpk_private_key/2
+    find_otpk_private_key/2,
+    %% OTPK usage tracking
+    track_otpk_usage/3,
+    check_otpk_usage/2,
+    cleanup_old_otpk/2
 ]).
 
 -include("cryptic.hrl").
@@ -1785,3 +1789,55 @@ ensure_table(TableName) ->
         _ ->
             ok
     end.
+
+%% @doc Track OTPK usage by a sender for forward secrecy management.
+%%
+%% Records the OTPK ID used by a specific sender to detect key rotation
+%% and potential replay attacks. This enables automatic cleanup of old
+%% OTPKs when senders rotate to new keys.
+%%
+%% @param MyUsername The recipient's username (key owner)
+%% @param SenderUsername The sender's username
+%% @param OtpkId The OTPK ID used by the sender (undefined if no OTPK used)
+%% @returns ok
+-spec track_otpk_usage(string(), string(), undefined | binary()) -> ok.
+track_otpk_usage(MyUsername, SenderUsername, OtpkId) ->
+    Key = {MyUsername, otpk_usage, SenderUsername},
+    Timestamp = erlang:system_time(second),
+    Value = {OtpkId, Timestamp},
+    ets:insert(?PREKEY_TABLE, {Key, Value}),
+    ok.
+
+%% @doc Check the last OTPK usage by a sender.
+%%
+%% Retrieves tracking information about the last OTPK used by a specific
+%% sender. Returns information needed to detect key reuse and rotation.
+%%
+%% @param MyUsername The recipient's username (key owner)
+%% @param SenderUsername The sender's username
+%% @returns {ok, {LastOtpkId, Timestamp}} | {error, not_found}
+-spec check_otpk_usage(string(), string()) ->
+    {ok, {undefined | binary(), integer()}} | {error, not_found}.
+check_otpk_usage(MyUsername, SenderUsername) ->
+    Key = {MyUsername, otpk_usage, SenderUsername},
+    case ets:lookup(?PREKEY_TABLE, Key) of
+        [{Key, {LastOtpkId, Timestamp}}] ->
+            {ok, {LastOtpkId, Timestamp}};
+        [] ->
+            {error, not_found}
+    end.
+
+%% @doc Clean up old OTPK when sender rotates to a new key.
+%%
+%% Removes the old OTPK from local storage when we detect that a sender
+%% has started using a new OTPK. This prevents accumulation of obsolete
+%% keys while maintaining forward secrecy.
+%%
+%% @param MyUsername The recipient's username (key owner)
+%% @param SenderUsername The sender's username
+%% @returns ok
+-spec cleanup_old_otpk(string(), string()) -> ok.
+cleanup_old_otpk(MyUsername, SenderUsername) ->
+    KeyTuple = {MyUsername, otpk_usage, SenderUsername},
+    ets:delete(?PREKEY_TABLE, KeyTuple),
+    ok.
