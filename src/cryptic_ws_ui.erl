@@ -793,20 +793,17 @@ process_command("connect", UIState) ->
             %% Step 1: Switch to passphrase input mode
             case os:getenv("CRYPTIC_CONFIG_DIR") of
                 false ->
-                    add_system_message(
-                        "Error: CRYPTIC_CONFIG_DIR environment variable not set",
-                        UIState
-                    );
+                    ?error("CRYPTIC_CONFIG_DIR environment variable not set~n",[]),
+                    UIState;
                 ConfigDir ->
-                    InitialState = add_system_message(
-                        "Starting secure connection...", UIState
-                    ),
-                    InitialState2 = add_system_message(
-                        "Enter passphrase for key decryption:", InitialState
-                    ),
+                    NewState =
+                        foldf(UIState,
+                            [add_sys_msg_f("Starting secure connection..."),
+                             add_sys_msg_f("Enter passphrase for key decryption:")
+                        ]),
 
                     %% Switch to passphrase input mode
-                    PassphraseState = InitialState2#ui_state{
+                    PassphraseState = NewState#ui_state{
                         passphrase_mode = true,
                         passphrase_config_dir = ConfigDir,
                         current_input = "",
@@ -943,6 +940,7 @@ process_command("send " ++ Rest, UIState) ->
                                             TrimmedToUser, Reason
                                         ]
                                     ),
+                                    ?error("~s~n", [ErrMsg]),
                                     add_system_message(
                                         lists:flatten(ErrMsg), UIState
                                     )
@@ -1334,10 +1332,6 @@ handle_websocket_message(Message, UIState) ->
                             UsersState,
                             Users
                         );
-                    <<"prekey">> ->
-                        %% Legacy prekey response - redirect to X3DH key bundle flow
-                        %% This ensures all message sending uses X3DH protocol
-                        handle_key_bundle_response(Data, UIState);
                     <<"key_bundle">> ->
                         %% Key bundle response - handle X3DH session establishment
                         handle_key_bundle_response(Data, UIState);
@@ -1460,17 +1454,16 @@ handle_key_bundle_response(Data, UIState) ->
 handle_key_bundle_for_sending(Data, SendOp, UIState) ->
     #{to_user := ToUser, message := Message} = SendOp,
     try
-        ?dbg("Processing key bundle response for sending", []),
         RecipientBundle = extract_and_build_recipient_bundle(Data),
         send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState)
     catch
-        _:Error ->
-            add_system_message(
+        _:Error:StackTrace ->
+            ErrStr = 
                 lists:flatten(
                     io_lib:format("Error processing key bundle: ~p", [Error])
                 ),
-                UIState
-            )
+            ?error("~s~n~p~n", [ErrStr, StackTrace]),
+            add_system_message(ErrStr, UIState)
     end.
 
 %% @private
@@ -1594,22 +1587,20 @@ send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState) ->
                         Message
                     );
                 {error, X3DHErr} ->
-                    add_system_message(
+                    ErrStr =
                         lists:flatten(
                             io_lib:format("X3DH key agreement failed: ~p", [
-                                X3DHErr
-                            ])
-                        ),
-                        UIState
-                    )
+                                X3DHErr])),
+                    ?error("~s~n", [ErrStr]),
+                    add_system_message(ErrStr, UIState)
             end;
         {error, ClientErr} ->
-            add_system_message(
+            ClientErrStr = 
                 lists:flatten(
                     io_lib:format("Client state error: ~p", [ClientErr])
                 ),
-                UIState
-            )
+            ?error("~s~n", [ClientErrStr]),
+            add_system_message(ClientErrStr, UIState)
     end.
 
 %% @private
@@ -1625,7 +1616,6 @@ send_x3dh_message_to_server(
         nonce := Nonce
     } = MessageBlob,
 
-    ?dbg("Metadata: ~p", [Metadata]),
     #{
         ephemeral_public := EphemeralPub,
         otpk_id := OtpkId
