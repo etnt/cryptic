@@ -668,6 +668,27 @@ handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
         users => [list_to_binary(U) || U <- Users]
     },
     {reply, Response};
+handle_command(#{<<"type">> := <<"key_status">>}, Username, _State) ->
+    case cryptic_lib:get_key_status(Username) of
+        {ok, KeyStatus} ->
+            Response = #{
+                type => <<"key_status">>,
+                status => KeyStatus
+            },
+            {reply, Response};
+        {error, not_found} ->
+            Response = #{
+                type => <<"key_status">>,
+                error => <<"No keys found for user">>,
+                status => #{
+                    username => list_to_binary(Username),
+                    has_identity_keys => false,
+                    has_signed_prekey => false,
+                    otpk_count => 0
+                }
+            },
+            {reply, Response}
+    end;
 %% Room management commands
 handle_command(#{<<"type">> := <<"create_room">>} = Command, Username, _State) ->
     Response = cryptic_room_handlers:handle_room_command(

@@ -69,14 +69,16 @@
 
 -import(
     cryptic_ui_screen,
-    [draw_screen/1
-    , draw_status_bar/1
-    , position_cursor/1
-    , format_message/4
-    , format_line/2
-    , get_visible_messages/3
-    , cleanup_ui/0
-]).
+    [
+        draw_screen/1,
+        draw_status_bar/1,
+        position_cursor/1,
+        format_message/4,
+        format_line/2,
+        get_visible_messages/3,
+        cleanup_ui/0
+    ]
+).
 
 -include_lib("cecho/include/cecho.hrl").
 -include("cryptic.hrl").
@@ -309,8 +311,6 @@ ui_main_loop(UIState) ->
 %%%===================================================================
 %%% Screen Drawing Functions
 %%%===================================================================
-
-
 
 %%%===================================================================
 %%% Input Handling
@@ -793,14 +793,21 @@ process_command("connect", UIState) ->
             %% Step 1: Switch to passphrase input mode
             case os:getenv("CRYPTIC_CONFIG_DIR") of
                 false ->
-                    ?error("CRYPTIC_CONFIG_DIR environment variable not set~n",[]),
+                    ?error(
+                        "CRYPTIC_CONFIG_DIR environment variable not set~n", []
+                    ),
                     UIState;
                 ConfigDir ->
                     NewState =
-                        foldf(UIState,
-                            [add_sys_msg_f("Starting secure connection..."),
-                             add_sys_msg_f("Enter passphrase for key decryption:")
-                        ]),
+                        foldf(
+                            UIState,
+                            [
+                                add_sys_msg_f("Starting secure connection..."),
+                                add_sys_msg_f(
+                                    "Enter passphrase for key decryption:"
+                                )
+                            ]
+                        ),
 
                     %% Switch to passphrase input mode
                     PassphraseState = NewState#ui_state{
@@ -879,6 +886,42 @@ process_command("list_users", UIState) ->
                         {error, Reason} ->
                             ErrMsg = io_lib:format(
                                 "Failed to request user list: ~p", [Reason]
+                            ),
+                            add_system_message(lists:flatten(ErrMsg), UIState)
+                    end;
+                _ ->
+                    add_system_message(
+                        "WebSocket client not available", UIState
+                    )
+            end;
+        _ ->
+            add_system_message("Not connected. Use 'connect' first.", UIState)
+    end;
+process_command("key_status", UIState) ->
+    %% Get key status from server
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.connection_status of
+        connected ->
+            case WSChatState#ws_chat_state.ws_client_state of
+                {ok, ClientState} ->
+                    KeyStatusCmd = #{type => <<"key_status">>},
+                    ?msg_out("UI sending key_status command: ~p", [KeyStatusCmd]),
+                    case
+                        cryptic_ws_client:send_command(
+                            ClientState#client_state.ws_client_pid, KeyStatusCmd
+                        )
+                    of
+                        ok ->
+                            add_system_message(
+                                "Requesting key status...", UIState
+                            );
+                        queued ->
+                            add_system_message(
+                                "Key status request queued...", UIState
+                            );
+                        {error, Reason} ->
+                            ErrMsg = io_lib:format(
+                                "Failed to request key status: ~p", [Reason]
                             ),
                             add_system_message(lists:flatten(ErrMsg), UIState)
                     end;
@@ -1332,6 +1375,9 @@ handle_websocket_message(Message, UIState) ->
                             UsersState,
                             Users
                         );
+                    <<"key_status">> ->
+                        %% Key status response
+                        handle_key_status_response(Data, UIState);
                     <<"key_bundle">> ->
                         %% Key bundle response - handle X3DH session establishment
                         handle_key_bundle_response(Data, UIState);
@@ -1458,7 +1504,7 @@ handle_key_bundle_for_sending(Data, SendOp, UIState) ->
         send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState)
     catch
         _:Error:StackTrace ->
-            ErrStr = 
+            ErrStr =
                 lists:flatten(
                     io_lib:format("Error processing key bundle: ~p", [Error])
                 ),
@@ -1590,12 +1636,14 @@ send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState) ->
                     ErrStr =
                         lists:flatten(
                             io_lib:format("X3DH key agreement failed: ~p", [
-                                X3DHErr])),
+                                X3DHErr
+                            ])
+                        ),
                     ?error("~s~n", [ErrStr]),
                     add_system_message(ErrStr, UIState)
             end;
         {error, ClientErr} ->
-            ClientErrStr = 
+            ClientErrStr =
                 lists:flatten(
                     io_lib:format("Client state error: ~p", [ClientErr])
                 ),
@@ -1864,6 +1912,106 @@ handle_user_status_response(Data, UIState) ->
             %% No pending operation or wrong type
             add_system_message(
                 "Received unexpected user status response", UIState
+            )
+    end.
+
+%% @doc Handle key status response from server.
+%%
+%% This function displays key information for the current user including:
+%% - Identity key status
+%% - Signed prekey information
+%% - One-time prekeys count
+%% - Key bundle creation timestamp
+handle_key_status_response(Data, UIState) ->
+    case maps:get(<<"status">>, Data, undefined) of
+        undefined ->
+            add_system_message("Invalid key status response", UIState);
+        Status ->
+            %% Format and display key status information
+            Username = maps:get(<<"username">>, Status, "unknown"),
+            HasIdentityKeys = maps:get(<<"has_identity_keys">>, Status, false),
+            HasSignedPrekey = maps:get(<<"has_signed_prekey">>, Status, false),
+            OtpkCount = maps:get(<<"otpk_count">>, Status, 0),
+
+            %% Build status message
+            StatusLines = [
+                "=== Key Status for " ++ Username ++ " ===",
+                "Identity Keys: " ++
+                    case HasIdentityKeys of
+                        true -> "[OK] Present";
+                        false -> "[NO] Missing"
+                    end,
+                "Signed Prekey: " ++
+                    case HasSignedPrekey of
+                        true -> "[OK] Present";
+                        false -> "[NO] Missing"
+                    end,
+                "One-time Prekeys: " ++ integer_to_list(OtpkCount) ++
+                    " available"
+            ],
+
+            %% Add timestamp information if available
+            TimestampLines =
+                case maps:get(<<"created_at">>, Status, undefined) of
+                    undefined ->
+                        [];
+                    CreatedAt when is_integer(CreatedAt) ->
+                        DateTime = calendar:system_time_to_rfc3339(CreatedAt),
+                        ["Key Bundle Created: " ++ DateTime];
+                    _ ->
+                        []
+                end,
+
+            %% Add signed prekey timestamp if available
+            SignedPrekeyLines =
+                case
+                    maps:get(<<"signed_prekey_timestamp">>, Status, undefined)
+                of
+                    undefined ->
+                        [];
+                    SPTimestamp when is_integer(SPTimestamp) ->
+                        SPDateTime = calendar:system_time_to_rfc3339(
+                            SPTimestamp
+                        ),
+                        ["Signed Prekey Created: " ++ SPDateTime];
+                    _ ->
+                        []
+                end,
+
+            %% Add status warnings if needed
+            WarningLines =
+                case {HasIdentityKeys, HasSignedPrekey, OtpkCount} of
+                    {false, false, 0} ->
+                        [
+                            "WARNING: No keys found - run key setup to enable encryption"
+                        ];
+                    {false, _, _} ->
+                        [
+                            "WARNING: Missing identity keys - encryption may not work"
+                        ];
+                    {_, false, _} ->
+                        [
+                            "WARNING: Missing signed prekey - encryption may not work"
+                        ];
+                    {true, true, 0} ->
+                        [
+                            "WARNING: No one-time prekeys available - consider uploading more"
+                        ];
+                    _ ->
+                        ["[OK] All keys present and ready for encryption"]
+                end,
+
+            AllLines =
+                StatusLines ++ TimestampLines ++ SignedPrekeyLines ++
+                    WarningLines,
+
+            %% Display all status lines
+            lists:foldl(
+                fun(Line, AccState) ->
+                    add_system_message(Line, AccState)
+                end,
+                UIState,
+                AllLines
             )
     end.
 
@@ -2226,7 +2374,6 @@ init_colors() ->
     cecho:init_pair(?COLOR_TIMESTAMP, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK),
     cecho:init_pair(?COLOR_INPUT, ?ceCOLOR_WHITE, ?ceCOLOR_BLACK),
     cecho:init_pair(?COLOR_SENT_MESSAGE, ?ceCOLOR_MAGENTA, ?ceCOLOR_BLACK).
-
 
 %% @private
 %% Add a user message to the message history.
@@ -3356,6 +3503,14 @@ handle_help_command(Rest, UIState) ->
                     add_sys_msg_f("  Usage:   list_users"),
                     add_sys_msg_f("  Example: list_users"),
                     add_sys_msg_f(""),
+                    add_sys_msg_f("key_status"),
+                    add_sys_msg_f("  Purpose: Display encryption key status"),
+                    add_sys_msg_f("  Usage:   key_status"),
+                    add_sys_msg_f("  Example: key_status"),
+                    add_sys_msg_f(
+                        "  Note:    Shows identity keys, prekeys, and OTPK count"
+                    ),
+                    add_sys_msg_f(""),
                     add_sys_msg_f("auto_display [on|off]"),
                     add_sys_msg_f(
                         "  Purpose: Toggle automatic message display"
@@ -3530,6 +3685,33 @@ handle_help_command(Rest, UIState) ->
                     )
                 ]
             );
+        "key_status" ->
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: key_status"),
+                    add_sys_msg_f(
+                        "  Purpose: Display encryption key status information"
+                    ),
+                    add_sys_msg_f("  Usage:   key_status"),
+                    add_sys_msg_f("  Example: key_status"),
+                    add_sys_msg_f("  Details:"),
+                    add_sys_msg_f("    - Shows if identity keys are present"),
+                    add_sys_msg_f(
+                        "    - Displays signed prekey status and timestamp"
+                    ),
+                    add_sys_msg_f(
+                        "    - Reports number of available one-time prekeys"
+                    ),
+                    add_sys_msg_f("    - Shows key bundle creation timestamp"),
+                    add_sys_msg_f(
+                        "    - Provides warnings for missing or low keys"
+                    ),
+                    add_sys_msg_f(
+                        "  Note:    Helps verify encryption readiness"
+                    )
+                ]
+            );
         _ ->
             %% Unknown help topic
             foldf(
@@ -3550,7 +3732,9 @@ handle_help_command(Rest, UIState) ->
                     add_sys_msg_f(
                         "            room_info, room_chat, send_room, room_history"
                     ),
-                    add_sys_msg_f("            list_users, auto_display, help"),
+                    add_sys_msg_f(
+                        "            list_users, key_status, auto_display, help"
+                    ),
                     add_sys_msg_f(""),
                     add_sys_msg_f("Type 'help' for general overview")
                 ]
@@ -4675,5 +4859,3 @@ take_word([C | Rest]) when C =:= $\s; C =:= $\t ->
 take_word([C | Rest]) ->
     {Word, Remaining} = take_word(Rest),
     {[C | Word], Remaining}.
-
-

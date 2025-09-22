@@ -661,6 +661,16 @@ handle_server_message(<<"key_bundle">>, Message, State) ->
             UIPid ! {websocket_message, {text, jsx:encode(Message)}}
     end,
     {noreply, State};
+handle_server_message(<<"key_status">>, Message, State) ->
+    %% Forward key status response to UI for display
+    ?info("Received key_status response, forwarding to UI", []),
+    case State#state.ui_pid of
+        undefined ->
+            ?warning("No UI PID set, cannot forward key_status", []);
+        UIPid ->
+            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
+    end,
+    {noreply, State};
 handle_server_message(Type, Message, State) ->
     ?warning("Unknown message type ~s: ~p", [Type, Message]),
     {noreply, State}.

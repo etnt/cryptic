@@ -149,6 +149,7 @@
     get_signed_prekey_with_signature/1,
     mark_otpk_consumed/2,
     get_available_otpks/1,
+    get_key_status/1,
     %% Identity keys management
     store_identity_keys/2,
     store_prekey_bundle/2,
@@ -1330,6 +1331,67 @@ get_available_otpks(Username) ->
         }
      || [PrekeyData] <- Matches, not maps:get(consumed, PrekeyData, false)
     ].
+
+%% @doc Get key status information for a user.
+%%
+%% Returns summary information about the keys stored for a user:
+%% - Identity key presence
+%% - Signed prekey information
+%% - One-time prekeys count
+%% - Key bundle creation timestamp
+%%
+%% @param Username The username to get key status for
+%% @returns {ok, map()} with key status information, or {error, not_found}
+-spec get_key_status(string()) -> {ok, map()} | {error, not_found}.
+get_key_status(Username) ->
+    %% Look for identity entry in PREKEY_TABLE
+    case ets:lookup(?PREKEY_TABLE, {Username, identity}) of
+        [{{Username, identity}, IdentityData}] ->
+            %% Count available OTPKs
+            AvailableOtpks = get_available_otpks(Username),
+            OtpkCount = length(AvailableOtpks),
+
+            %% Extract signed prekey timestamp
+            SignedPrekeyTimestamp = maps:get(
+                timestamp,
+                maps:get(signed_prekey, IdentityData, #{}),
+                erlang:system_time(second)
+            ),
+
+            %% Get creation timestamp
+            CreatedAt = maps:get(
+                created_at, IdentityData, erlang:system_time(second)
+            ),
+
+            %% Build status response
+            Status = #{
+                username => Username,
+                has_identity_keys => true,
+                has_signed_prekey => true,
+                signed_prekey_timestamp => SignedPrekeyTimestamp,
+                otpk_count => OtpkCount,
+                created_at => CreatedAt
+            },
+
+            {ok, Status};
+        [] ->
+            %% Check if user has any keys at all
+            Pattern = {{Username, '_', '_'}, '_'},
+            case ets:match(?PREKEY_TABLE, Pattern, 1) of
+                {[_], _} ->
+                    %% User has some keys but no complete identity
+                    {ok, #{
+                        username => Username,
+                        has_identity_keys => false,
+                        has_signed_prekey => false,
+                        otpk_count => 0,
+                        status => incomplete_setup
+                    }};
+                '$end_of_table' ->
+                    %% No keys found for user
+                    {error, not_found}
+            end
+    end.
 
 %% @doc Get next sequence number for a communication pair.
 %%
