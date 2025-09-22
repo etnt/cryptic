@@ -1956,7 +1956,12 @@ send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState) ->
                 {ok, {MessageBlob, MessageId}} ->
                     ?dbg("X3DH encryption successful: ~p", [MessageId]),
                     send_x3dh_message_to_server(
-                        MessageBlob, MessageId, ToUser, ClientState, UIState
+                        MessageBlob,
+                        MessageId,
+                        ToUser,
+                        ClientState,
+                        UIState,
+                        Message
                     );
                 {error, X3DHErr} ->
                     add_system_message(
@@ -1980,7 +1985,7 @@ send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState) ->
 %% @private
 %% Send the X3DH encrypted message to the server via WebSocket.
 send_x3dh_message_to_server(
-    MessageBlob, MessageId, ToUser, ClientState, UIState
+    MessageBlob, MessageId, ToUser, ClientState, UIState, OriginalMessage
 ) ->
     %% Unpack MessageBlob to match existing handler format
     #{
@@ -2020,15 +2025,7 @@ send_x3dh_message_to_server(
         )
     of
         ok ->
-            %% Clear pending operation and show success
-            clear_pending_operation_and_add_message(
-                lists:flatten(
-                    io_lib:format("Encrypted message sent to ~s using X3DH", [
-                        ToUser
-                    ])
-                ),
-                UIState
-            );
+            clear_pending_operation_and_show_success(ToUser, OriginalMessage, UIState);
         {error, SendErr} ->
             add_system_message(
                 lists:flatten(
@@ -2196,6 +2193,18 @@ clear_pending_operation_and_add_message_from_user(From, DecryptedText, UIState) 
     ClearedChatState = WSChatState#ws_chat_state{pending_operation = undefined},
     ClearedUIState = UIState#ui_state{ws_chat_state = ClearedChatState},
     add_message(From, DecryptedText, ClearedUIState).
+
+%% @private
+%% Clear pending operation and show success message.
+clear_pending_operation_and_show_success(ToUser, Message, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    ClearedChatState = WSChatState#ws_chat_state{
+        pending_operation = undefined
+    },
+    ClearedUIState = UIState#ui_state{ws_chat_state = ClearedChatState},
+    FromField = "You -> " ++ ToUser,
+    add_message(FromField, Message, ClearedUIState).
+
 
 %% @doc Handle user status response from the server.
 %%
@@ -3590,6 +3599,9 @@ parse_create_room_options([Part | Rest], Description, RoomType, Password) ->
             end
     end.
 
+foldf(InitAcc, FunList) ->
+    lists:foldl(fun(Fun, Acc) -> Fun(Acc) end, InitAcc, FunList).
+
 %% @private
 %% Handle help command with comprehensive command documentation.
 %% Format: help [command_name] or help [category]
@@ -3597,554 +3609,411 @@ handle_help_command(Rest, UIState) ->
     HelpTopic = string:strip(Rest),
     case HelpTopic of
         "" ->
-            %% General help overview
-            HelpState = add_system_message(
-                "=== CRYPTIC CHAT CLIENT HELP ===", UIState
-            ),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message(
-                "Type 'help <command>' for detailed command help", HelpState2
-            ),
-            HelpState4 = add_system_message(
-                "Type 'help <category>' for category help", HelpState3
-            ),
-            HelpState5 = add_system_message("", HelpState4),
-            HelpState6 = add_system_message("COMMAND CATEGORIES:", HelpState5),
-            HelpState7 = add_system_message(
-                "  connection  - Server connection commands", HelpState6
-            ),
-            HelpState8 = add_system_message(
-                "  messaging   - Direct messaging commands", HelpState7
-            ),
-            HelpState9 = add_system_message(
-                "  rooms       - Chat room commands", HelpState8
-            ),
-            HelpState10 = add_system_message(
-                "  utilities   - Utility and info commands", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "  editing     - Emacs-style line editing keys", HelpState10
-            ),
-            HelpState12 = add_system_message("", HelpState11),
-            HelpState13 = add_system_message("QUICK REFERENCE:", HelpState12),
-            HelpState14 = add_system_message(
-                "  connect                    - Connect to server", HelpState13
-            ),
-            HelpState15 = add_system_message(
-                "  send <user> <message>      - Send direct message",
-                HelpState14
-            ),
-            HelpState16 = add_system_message(
-                "  create_room <name>         - Create new room", HelpState15
-            ),
-            HelpState17 = add_system_message(
-                "  join_room <room>           - Join existing room", HelpState16
-            ),
-            HelpState18 = add_system_message(
-                "  room_chat <room>           - Enter room chat mode",
-                HelpState17
-            ),
-            HelpState19 = add_system_message(
-                "  list_rooms                 - List available rooms",
-                HelpState18
-            ),
-            HelpState20 = add_system_message(
-                "  list_users                 - List online users", HelpState19
-            ),
-            add_system_message(
-                "  help <topic>               - Get detailed help", HelpState20
+            foldf(
+                UIState,
+                [
+                    %% General help overview
+                    add_sys_msg_f("=== CRYPTIC CHAT CLIENT HELP ==="),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f(
+                        "Type 'help <command>' for detailed command help"
+                    ),
+                    add_sys_msg_f(
+                        "Type 'help <category>' for category help"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("COMMAND CATEGORIES:"),
+                    add_sys_msg_f(
+                        "  connection  - Server connection commands"
+                    ),
+                    add_sys_msg_f(
+                        "  messaging   - Direct messaging commands"
+                    ),
+                    add_sys_msg_f("  rooms       - Chat room commands"),
+                    add_sys_msg_f(
+                        "  utilities   - Utility and info commands"
+                    ),
+                    add_sys_msg_f(
+                        "  editing     - Emacs-style line editing keys"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("QUICK REFERENCE:"),
+                    add_sys_msg_f(
+                        "  connect                    - Connect to server"
+                    ),
+                    add_sys_msg_f(
+                        "  send <user> <message>      - Send direct message"
+                    ),
+                    add_sys_msg_f(
+                        "  create_room <name>         - Create new room"
+                    ),
+                    add_sys_msg_f(
+                        "  join_room <room>           - Join existing room"
+                    ),
+                    add_sys_msg_f(
+                        "  room_chat <room>           - Enter room chat mode"
+                    ),
+                    add_sys_msg_f(
+                        "  list_rooms                 - List available rooms"
+                    ),
+                    add_sys_msg_f(
+                        "  list_users                 - List online users"
+                    ),
+                    add_sys_msg_f(
+                        "  help <topic>               - Get detailed help"
+                    )
+                ]
             );
         "connection" ->
             %% Connection commands help
-            HelpState = add_system_message(
-                "=== CONNECTION COMMANDS ===", UIState
-            ),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message("connect", HelpState2),
-            HelpState4 = add_system_message(
-                "  Purpose: Connect to the Cryptic chat server", HelpState3
-            ),
-            HelpState5 = add_system_message("  Usage:   connect", HelpState4),
-            HelpState6 = add_system_message("  Example: connect", HelpState5),
-            HelpState7 = add_system_message(
-                "  Note:    Uses mTLS authentication with client certificates",
-                HelpState6
-            ),
-            HelpState8 = add_system_message("", HelpState7),
-            HelpState9 = add_system_message("disconnect", HelpState8),
-            HelpState10 = add_system_message(
-                "  Purpose: Disconnect from the chat server", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "  Usage:   disconnect", HelpState10
-            ),
-            HelpState12 = add_system_message(
-                "  Example: disconnect", HelpState11
-            ),
-            add_system_message(
-                "  Note:    Cleanly closes connection and exits chat modes",
-                HelpState12
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("=== CONNECTION COMMANDS ==="),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("connect"),
+                    add_sys_msg_f(
+                        "  Purpose: Connect to the Cryptic chat server"
+                    ),
+                    add_sys_msg_f("  Usage:   connect"),
+                    add_sys_msg_f("  Example: connect"),
+                    add_sys_msg_f(
+                        "  Note:    Uses mTLS authentication with client certificates"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("disconnect"),
+                    add_sys_msg_f("  Purpose: Disconnect from the chat server"),
+                    add_sys_msg_f("  Usage:   disconnect"),
+                    add_sys_msg_f("  Example: disconnect"),
+                    add_sys_msg_f(
+                        "  Note:    Cleanly closes connection and exits chat modes"
+                    )
+                ]
             );
         "messaging" ->
             %% Direct messaging help
-            HelpState = add_system_message(
-                "=== DIRECT MESSAGING COMMANDS ===", UIState
-            ),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message(
-                "send <user> <message>", HelpState2
-            ),
-            HelpState4 = add_system_message(
-                "  Purpose: Send a direct message to another user", HelpState3
-            ),
-            HelpState5 = add_system_message(
-                "  Usage:   send <username> <message_text>", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "  Example: send alice Hello, how are you?", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "  Example: send bob \"Message with spaces\"", HelpState6
-            ),
-            HelpState8 = add_system_message("", HelpState7),
-            HelpState9 = add_system_message("chat <user>", HelpState8),
-            HelpState10 = add_system_message(
-                "  Purpose: Enter direct chat mode with a user", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "  Usage:   chat <username>", HelpState10
-            ),
-            HelpState12 = add_system_message(
-                "  Example: chat alice", HelpState11
-            ),
-            HelpState13 = add_system_message(
-                "  Note:    In chat mode, type messages directly", HelpState12
-            ),
-            HelpState14 = add_system_message(
-                "           Type :exit to leave chat mode", HelpState13
-            ),
-            HelpState15 = add_system_message("", HelpState14),
-            HelpState16 = add_system_message("inbox [count]", HelpState15),
-            HelpState17 = add_system_message(
-                "  Purpose: View recent direct messages", HelpState16
-            ),
-            HelpState18 = add_system_message(
-                "  Usage:   inbox [number_of_messages]", HelpState17
-            ),
-            HelpState19 = add_system_message("  Example: inbox", HelpState18),
-            HelpState20 = add_system_message(
-                "  Example: inbox 20", HelpState19
-            ),
-            add_system_message(
-                "  Note:    Default count is 10 messages", HelpState20
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("=== DIRECT MESSAGING COMMANDS ==="),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("send <user> <message>"),
+                    add_sys_msg_f(
+                        "  Purpose: Send a direct message to another user"
+                    ),
+                    add_sys_msg_f("  Usage:   send <username> <message_text>"),
+                    add_sys_msg_f("  Example: send alice Hello, how are you?"),
+                    add_sys_msg_f(
+                        "  Example: send bob \"Message with spaces\""
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("chat <user>"),
+                    add_sys_msg_f(
+                        "  Purpose: Enter direct chat mode with a user"
+                    ),
+                    add_sys_msg_f("  Usage:   chat <username>"),
+                    add_sys_msg_f("  Example: chat alice"),
+                    add_sys_msg_f(
+                        "  Note:    In chat mode, type messages directly"
+                    ),
+                    add_sys_msg_f("           Type :exit to leave chat mode"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("inbox [count]"),
+                    add_sys_msg_f("  Purpose: View recent direct messages"),
+                    add_sys_msg_f("  Usage:   inbox [number_of_messages]"),
+                    add_sys_msg_f("  Example: inbox"),
+                    add_sys_msg_f("  Example: inbox 20"),
+                    add_sys_msg_f("  Note:    Default count is 10 messages")
+                ]
             );
         "rooms" ->
             %% Room commands help
-            HelpState = add_system_message(
-                "=== CHAT ROOM COMMANDS ===", UIState
-            ),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message(
-                "create_room <name> [description] [public|private] [password]",
-                HelpState2
-            ),
-            HelpState4 = add_system_message(
-                "  Purpose: Create a new chat room", HelpState3
-            ),
-            HelpState5 = add_system_message(
-                "  Usage:   create_room <room_name> [description] [type] [password]",
-                HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "  Example: create_room general", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "  Example: create_room team \"Team discussions\" private",
-                HelpState6
-            ),
-            HelpState8 = add_system_message(
-                "  Example: create_room secure \"Secret room\" private mypass123",
-                HelpState7
-            ),
-            HelpState9 = add_system_message("", HelpState8),
-            HelpState10 = add_system_message(
-                "join_room <room> [password]", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "  Purpose: Join an existing room", HelpState10
-            ),
-            HelpState12 = add_system_message(
-                "  Usage:   join_room <room_name_or_id> [password]", HelpState11
-            ),
-            HelpState13 = add_system_message(
-                "  Example: join_room general", HelpState12
-            ),
-            HelpState14 = add_system_message(
-                "  Example: join_room room-abc123 mypassword", HelpState13
-            ),
-            HelpState15 = add_system_message("", HelpState14),
-            HelpState16 = add_system_message("leave_room <room>", HelpState15),
-            HelpState17 = add_system_message(
-                "  Purpose: Leave a joined room", HelpState16
-            ),
-            HelpState18 = add_system_message(
-                "  Usage:   leave_room <room_name_or_id>", HelpState17
-            ),
-            HelpState19 = add_system_message(
-                "  Example: leave_room general", HelpState18
-            ),
-            HelpState20 = add_system_message("", HelpState19),
-            HelpState21 = add_system_message(
-                "list_rooms [filter]", HelpState20
-            ),
-            HelpState22 = add_system_message(
-                "  Purpose: List available rooms", HelpState21
-            ),
-            HelpState23 = add_system_message(
-                "  Usage:   list_rooms [public|private|joined|all]", HelpState22
-            ),
-            HelpState24 = add_system_message(
-                "  Example: list_rooms", HelpState23
-            ),
-            HelpState25 = add_system_message(
-                "  Example: list_rooms joined", HelpState24
-            ),
-            HelpState26 = add_system_message(
-                "  Note:    Default filter is 'public'", HelpState25
-            ),
-            HelpState27 = add_system_message("", HelpState26),
-            HelpState28 = add_system_message("room_info <room>", HelpState27),
-            HelpState29 = add_system_message(
-                "  Purpose: Get detailed room information", HelpState28
-            ),
-            HelpState30 = add_system_message(
-                "  Usage:   room_info <room_name_or_id>", HelpState29
-            ),
-            HelpState31 = add_system_message(
-                "  Example: room_info general", HelpState30
-            ),
-            HelpState32 = add_system_message("", HelpState31),
-            HelpState33 = add_system_message("room_chat <room>", HelpState32),
-            HelpState34 = add_system_message(
-                "  Purpose: Enter room chat mode", HelpState33
-            ),
-            HelpState35 = add_system_message(
-                "  Usage:   room_chat <room_name_or_id>", HelpState34
-            ),
-            HelpState36 = add_system_message(
-                "  Example: room_chat general", HelpState35
-            ),
-            HelpState37 = add_system_message(
-                "  Note:    Type messages directly, :exit to leave", HelpState36
-            ),
-            HelpState38 = add_system_message("", HelpState37),
-            HelpState39 = add_system_message(
-                "send_room <room> <message>", HelpState38
-            ),
-            HelpState40 = add_system_message(
-                "  Purpose: Send a message to a room", HelpState39
-            ),
-            HelpState41 = add_system_message(
-                "  Usage:   send_room <room_name_or_id> <message>", HelpState40
-            ),
-            HelpState42 = add_system_message(
-                "  Example: send_room general Hello everyone!", HelpState41
-            ),
-            HelpState43 = add_system_message("", HelpState42),
-            HelpState44 = add_system_message(
-                "room_history <room> [count]", HelpState43
-            ),
-            HelpState45 = add_system_message(
-                "  Purpose: View room message history", HelpState44
-            ),
-            HelpState46 = add_system_message(
-                "  Usage:   room_history <room_name_or_id> [message_count]",
-                HelpState45
-            ),
-            HelpState47 = add_system_message(
-                "  Example: room_history general", HelpState46
-            ),
-            add_system_message(
-                "  Example: room_history team-chat 20", HelpState47
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("=== CHAT ROOM COMMANDS ==="),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f(
+                        "create_room <name> [description] [public|private] [password]"
+                    ),
+                    add_sys_msg_f("  Purpose: Create a new chat room"),
+                    add_sys_msg_f(
+                        "  Usage:   create_room <room_name> [description] [type] [password]"
+                    ),
+                    add_sys_msg_f("  Example: create_room general"),
+                    add_sys_msg_f(
+                        "  Example: create_room team \"Team discussions\" private"
+                    ),
+                    add_sys_msg_f(
+                        "  Example: create_room secure \"Secret room\" private mypass123"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("join_room <room> [password]"),
+                    add_sys_msg_f("  Purpose: Join an existing room"),
+                    add_sys_msg_f(
+                        "  Usage:   join_room <room_name_or_id> [password]"
+                    ),
+                    add_sys_msg_f("  Example: join_room general"),
+                    add_sys_msg_f(
+                        "  Example: join_room room-abc123 mypassword"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("leave_room <room>"),
+                    add_sys_msg_f("  Purpose: Leave a joined room"),
+                    add_sys_msg_f("  Usage:   leave_room <room_name_or_id>"),
+                    add_sys_msg_f("  Example: leave_room general"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("list_rooms [filter]"),
+                    add_sys_msg_f("  Purpose: List available rooms"),
+                    add_sys_msg_f(
+                        "  Usage:   list_rooms [public|private|joined|all]"
+                    ),
+                    add_sys_msg_f("  Example: list_rooms"),
+                    add_sys_msg_f("  Example: list_rooms joined"),
+                    add_sys_msg_f("  Note:    Default filter is 'public'"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("room_info <room>"),
+                    add_sys_msg_f("  Purpose: Get detailed room information"),
+                    add_sys_msg_f("  Usage:   room_info <room_name_or_id>"),
+                    add_sys_msg_f("  Example: room_info general"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("room_chat <room>"),
+                    add_sys_msg_f("  Purpose: Enter room chat mode"),
+                    add_sys_msg_f("  Usage:   room_chat <room_name_or_id>"),
+                    add_sys_msg_f("  Example: room_chat general"),
+                    add_sys_msg_f(
+                        "  Note:    Type messages directly, :exit to leave"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("send_room <room> <message>"),
+                    add_sys_msg_f("  Purpose: Send a message to a room"),
+                    add_sys_msg_f(
+                        "  Usage:   send_room <room_name_or_id> <message>"
+                    ),
+                    add_sys_msg_f(
+                        "  Example: send_room general Hello everyone!"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("room_history <room> [count]"),
+                    add_sys_msg_f("  Purpose: View room message history"),
+                    add_sys_msg_f(
+                        "  Usage:   room_history <room_name_or_id> [message_count]"
+                    ),
+                    add_sys_msg_f("  Example: room_history general"),
+                    add_sys_msg_f("  Example: room_history team-chat 20")
+                ]
             );
         "utilities" ->
             %% Utility commands help
-            HelpState = add_system_message("=== UTILITY COMMANDS ===", UIState),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message("list_users", HelpState2),
-            HelpState4 = add_system_message(
-                "  Purpose: List all online users", HelpState3
-            ),
-            HelpState5 = add_system_message(
-                "  Usage:   list_users", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "  Example: list_users", HelpState5
-            ),
-            HelpState7 = add_system_message("", HelpState6),
-            HelpState8 = add_system_message(
-                "auto_display [on|off]", HelpState7
-            ),
-            HelpState9 = add_system_message(
-                "  Purpose: Toggle automatic message display", HelpState8
-            ),
-            HelpState10 = add_system_message(
-                "  Usage:   auto_display [on|off]", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "  Example: auto_display on", HelpState10
-            ),
-            HelpState12 = add_system_message(
-                "  Example: auto_display off", HelpState11
-            ),
-            HelpState13 = add_system_message(
-                "  Note:    Controls real-time message display", HelpState12
-            ),
-            HelpState14 = add_system_message("", HelpState13),
-            HelpState15 = add_system_message("help [topic]", HelpState14),
-            HelpState16 = add_system_message(
-                "  Purpose: Display help information", HelpState15
-            ),
-            HelpState17 = add_system_message(
-                "  Usage:   help [command_name|category]", HelpState16
-            ),
-            HelpState18 = add_system_message("  Example: help", HelpState17),
-            HelpState19 = add_system_message(
-                "  Example: help send", HelpState18
-            ),
-            add_system_message("  Example: help rooms", HelpState19);
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("=== UTILITY COMMANDS ==="),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("list_users"),
+                    add_sys_msg_f("  Purpose: List all online users"),
+                    add_sys_msg_f("  Usage:   list_users"),
+                    add_sys_msg_f("  Example: list_users"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("auto_display [on|off]"),
+                    add_sys_msg_f(
+                        "  Purpose: Toggle automatic message display"
+                    ),
+                    add_sys_msg_f("  Usage:   auto_display [on|off]"),
+                    add_sys_msg_f("  Example: auto_display on"),
+                    add_sys_msg_f("  Example: auto_display off"),
+                    add_sys_msg_f(
+                        "  Note:    Controls real-time message display"
+                    ),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("help [topic]"),
+                    add_sys_msg_f("  Purpose: Display help information"),
+                    add_sys_msg_f("  Usage:   help [command_name|category]"),
+                    add_sys_msg_f("  Example: help"),
+                    add_sys_msg_f("  Example: help send"),
+                    add_sys_msg_f("  Example: help rooms")
+                ]
+            );
         "editing" ->
             %% Emacs-style editing commands help
-            HelpState = add_system_message(
-                "=== EMACS-STYLE EDITING KEYS ===", UIState
-            ),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message("CURSOR MOVEMENT:", HelpState2),
-            HelpState4 = add_system_message(
-                "  Ctrl+A  - Move to beginning of line", HelpState3
-            ),
-            HelpState5 = add_system_message(
-                "  Ctrl+E  - Move to end of line", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "  Ctrl+B  - Move backward one character", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "  Ctrl+F  - Move forward one character", HelpState6
-            ),
-            HelpState8 = add_system_message("", HelpState7),
-            HelpState9 = add_system_message("EDITING OPERATIONS:", HelpState8),
-            HelpState10 = add_system_message(
-                "  Ctrl+D  - Delete character at cursor", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "  Ctrl+K  - Kill from cursor to end of line", HelpState10
-            ),
-            HelpState12 = add_system_message(
-                "  Ctrl+U  - Kill entire line", HelpState11
-            ),
-            HelpState13 = add_system_message(
-                "  Ctrl+W  - Kill word backward", HelpState12
-            ),
-            HelpState14 = add_system_message(
-                "  Ctrl+Y  - Yank (paste) from kill ring", HelpState13
-            ),
-            HelpState15 = add_system_message("", HelpState14),
-            HelpState16 = add_system_message(
-                "TRADITIONAL KEYS (still work):", HelpState15
-            ),
-            HelpState17 = add_system_message(
-                "  Home    - Move to beginning of line", HelpState16
-            ),
-            HelpState18 = add_system_message(
-                "  End     - Move to end of line", HelpState17
-            ),
-            HelpState19 = add_system_message(
-                "  Left    - Move backward one character", HelpState18
-            ),
-            HelpState20 = add_system_message(
-                "  Right   - Move forward one character", HelpState19
-            ),
-            HelpState21 = add_system_message(
-                "  Delete  - Delete character at cursor", HelpState20
-            ),
-            HelpState22 = add_system_message(
-                "  Up/Down - Navigate command history", HelpState21
-            ),
-            HelpState23 = add_system_message("", HelpState22),
-            HelpState24 = add_system_message("MESSAGE SCROLLING:", HelpState23),
-            HelpState25 = add_system_message(
-                "  Page Up   - Scroll up through message history", HelpState24
-            ),
-            HelpState26 = add_system_message(
-                "  Page Down - Scroll down through message history", HelpState25
-            ),
-            add_system_message("", HelpState26);
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("=== EMACS-STYLE EDITING KEYS ==="),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("CURSOR MOVEMENT:"),
+                    add_sys_msg_f("  Ctrl+A  - Move to beginning of line"),
+                    add_sys_msg_f("  Ctrl+E  - Move to end of line"),
+                    add_sys_msg_f("  Ctrl+B  - Move backward one character"),
+                    add_sys_msg_f("  Ctrl+F  - Move forward one character"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("EDITING OPERATIONS:"),
+                    add_sys_msg_f("  Ctrl+D  - Delete character at cursor"),
+                    add_sys_msg_f(
+                        "  Ctrl+K  - Kill from cursor to end of line"
+                    ),
+                    add_sys_msg_f("  Ctrl+U  - Kill entire line"),
+                    add_sys_msg_f("  Ctrl+W  - Kill word backward"),
+                    add_sys_msg_f("  Ctrl+Y  - Yank (paste) from kill ring"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("TRADITIONAL KEYS (still work):"),
+                    add_sys_msg_f("  Home    - Move to beginning of line"),
+                    add_sys_msg_f("  End     - Move to end of line"),
+                    add_sys_msg_f("  Left    - Move backward one character"),
+                    add_sys_msg_f("  Right   - Move forward one character"),
+                    add_sys_msg_f("  Delete  - Delete character at cursor"),
+                    add_sys_msg_f("  Up/Down - Navigate command history"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("MESSAGE SCROLLING:"),
+                    add_sys_msg_f(
+                        "  Page Up   - Scroll up through message history"
+                    ),
+                    add_sys_msg_f(
+                        "  Page Down - Scroll down through message history"
+                    ),
+                    add_sys_msg_f("")
+                ]
+            );
         %% Individual command help
         "connect" ->
-            HelpState = add_system_message("COMMAND: connect", UIState),
-            HelpState2 = add_system_message(
-                "  Purpose: Connect to the Cryptic chat server using mTLS",
-                HelpState
-            ),
-            HelpState3 = add_system_message("  Usage:   connect", HelpState2),
-            HelpState4 = add_system_message("  Example: connect", HelpState3),
-            HelpState5 = add_system_message(
-                "  Details: Uses client certificates for authentication",
-                HelpState4
-            ),
-            add_system_message(
-                "  Note:    Must be connected before using other commands",
-                HelpState5
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: connect"),
+                    add_sys_msg_f(
+                        "  Purpose: Connect to the Cryptic chat server using mTLS"
+                    ),
+                    add_sys_msg_f("  Usage:   connect"),
+                    add_sys_msg_f("  Example: connect"),
+                    add_sys_msg_f(
+                        "  Details: Uses client certificates for authentication"
+                    ),
+                    add_sys_msg_f(
+                        "  Note:    Must be connected before using other commands"
+                    )
+                ]
             );
         "disconnect" ->
-            HelpState = add_system_message("COMMAND: disconnect", UIState),
-            HelpState2 = add_system_message(
-                "  Purpose: Disconnect from the chat server", HelpState
-            ),
-            HelpState3 = add_system_message(
-                "  Usage:   disconnect", HelpState2
-            ),
-            HelpState4 = add_system_message(
-                "  Example: disconnect", HelpState3
-            ),
-            add_system_message(
-                "  Note:    Automatically exits any active chat modes",
-                HelpState4
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: disconnect"),
+                    add_sys_msg_f("  Purpose: Disconnect from the chat server"),
+                    add_sys_msg_f("  Usage:   disconnect"),
+                    add_sys_msg_f("  Example: disconnect"),
+                    add_sys_msg_f(
+                        "  Note:    Automatically exits any active chat modes"
+                    )
+                ]
             );
         "send" ->
-            HelpState = add_system_message("COMMAND: send", UIState),
-            HelpState2 = add_system_message(
-                "  Purpose: Send a direct message to another user", HelpState
-            ),
-            HelpState3 = add_system_message(
-                "  Usage:   send <username> <message>", HelpState2
-            ),
-            HelpState4 = add_system_message("  Examples:", HelpState3),
-            HelpState5 = add_system_message(
-                "    send alice Hello there!", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "    send bob \"Message with spaces\"", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "    send charlie How's the project going?", HelpState6
-            ),
-            add_system_message(
-                "  Note:    Use quotes for messages with multiple words",
-                HelpState7
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: send"),
+                    add_sys_msg_f(
+                        "  Purpose: Send a direct message to another user"
+                    ),
+                    add_sys_msg_f("  Usage:   send <username> <message>"),
+                    add_sys_msg_f("  Examples:"),
+                    add_sys_msg_f("    send alice Hello there!"),
+                    add_sys_msg_f("    send bob \"Message with spaces\""),
+                    add_sys_msg_f("    send charlie How's the project going?"),
+                    add_sys_msg_f(
+                        "  Note:    Use quotes for messages with multiple words"
+                    )
+                ]
             );
         "chat" ->
-            HelpState = add_system_message("COMMAND: chat", UIState),
-            HelpState2 = add_system_message(
-                "  Purpose: Enter direct chat mode with a specific user",
-                HelpState
-            ),
-            HelpState3 = add_system_message(
-                "  Usage:   chat <username>", HelpState2
-            ),
-            HelpState4 = add_system_message(
-                "  Example: chat alice", HelpState3
-            ),
-            HelpState5 = add_system_message("  In chat mode:", HelpState4),
-            HelpState6 = add_system_message(
-                "    - Type messages directly to send", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "    - Type :exit to leave chat mode", HelpState6
-            ),
-            add_system_message(
-                "    - Type :help for chat mode commands", HelpState7
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: chat"),
+                    add_sys_msg_f(
+                        "  Purpose: Enter direct chat mode with a specific user"
+                    ),
+                    add_sys_msg_f("  Usage:   chat <username>"),
+                    add_sys_msg_f("  Example: chat alice"),
+                    add_sys_msg_f("  In chat mode:"),
+                    add_sys_msg_f("    - Type messages directly to send"),
+                    add_sys_msg_f("    - Type :exit to leave chat mode"),
+                    add_sys_msg_f("    - Type :help for chat mode commands")
+                ]
             );
         "create_room" ->
-            HelpState = add_system_message("COMMAND: create_room", UIState),
-            HelpState2 = add_system_message(
-                "  Purpose: Create a new chat room", HelpState
-            ),
-            HelpState3 = add_system_message(
-                "  Usage:   create_room <name> [description] [public|private] [password]",
-                HelpState2
-            ),
-            HelpState4 = add_system_message("  Examples:", HelpState3),
-            HelpState5 = add_system_message(
-                "    create_room general", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "    create_room team \"Team discussions\"", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "    create_room project \"Project chat\" private", HelpState6
-            ),
-            HelpState8 = add_system_message(
-                "    create_room secure \"Secret room\" private mypass123",
-                HelpState7
-            ),
-            HelpState9 = add_system_message("  Parameters:", HelpState8),
-            HelpState10 = add_system_message(
-                "    name        - Room name (required)", HelpState9
-            ),
-            HelpState11 = add_system_message(
-                "    description - Room description (optional)", HelpState10
-            ),
-            HelpState12 = add_system_message(
-                "    type        - 'public' or 'private' (default: public)",
-                HelpState11
-            ),
-            add_system_message(
-                "    password    - Room password for private rooms (optional)",
-                HelpState12
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: create_room"),
+                    add_sys_msg_f("  Purpose: Create a new chat room"),
+                    add_sys_msg_f(
+                        "  Usage:   create_room <name> [description] [public|private] [password]"
+                    ),
+                    add_sys_msg_f("  Examples:"),
+                    add_sys_msg_f("    create_room general"),
+                    add_sys_msg_f("    create_room team \"Team discussions\""),
+                    add_sys_msg_f(
+                        "    create_room project \"Project chat\" private"
+                    ),
+                    add_sys_msg_f(
+                        "    create_room secure \"Secret room\" private mypass123"
+                    ),
+                    add_sys_msg_f("  Parameters:"),
+                    add_sys_msg_f("    name        - Room name (required)"),
+                    add_sys_msg_f(
+                        "    description - Room description (optional)"
+                    ),
+                    add_sys_msg_f(
+                        "    type        - 'public' or 'private' (default: public)"
+                    ),
+                    add_sys_msg_f(
+                        "    password    - Room password for private rooms (optional)"
+                    )
+                ]
             );
         "join_room" ->
-            HelpState = add_system_message("COMMAND: join_room", UIState),
-            HelpState2 = add_system_message(
-                "  Purpose: Join an existing chat room", HelpState
-            ),
-            HelpState3 = add_system_message(
-                "  Usage:   join_room <room_name_or_id> [password]", HelpState2
-            ),
-            HelpState4 = add_system_message("  Examples:", HelpState3),
-            HelpState5 = add_system_message(
-                "    join_room general", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "    join_room work", HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "    join_room private-room mypassword", HelpState6
-            ),
-            add_system_message(
-                "  Note:    Can use room name or ID; password required for private rooms",
-                HelpState7
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("COMMAND: join_room"),
+                    add_sys_msg_f("  Purpose: Join an existing chat room"),
+                    add_sys_msg_f(
+                        "  Usage:   join_room <room_name_or_id> [password]"
+                    ),
+                    add_sys_msg_f("  Examples:"),
+                    add_sys_msg_f("    join_room general"),
+                    add_sys_msg_f("    join_room work"),
+                    add_sys_msg_f("    join_room private-room mypassword"),
+                    add_sys_msg_f(
+                        "  Note:    Can use room name or ID; password required for private rooms"
+                    )
+                ]
             );
         _ ->
             %% Unknown help topic
-            HelpState = add_system_message(
-                "Unknown help topic: '" ++ HelpTopic ++ "'", UIState
-            ),
-            HelpState2 = add_system_message("", HelpState),
-            HelpState3 = add_system_message(
-                "Available help topics:", HelpState2
-            ),
-            HelpState4 = add_system_message(
-                "  Categories: connection, messaging, rooms, utilities, editing",
-                HelpState3
-            ),
-            HelpState5 = add_system_message(
-                "  Commands: connect, disconnect, send, chat, inbox", HelpState4
-            ),
-            HelpState6 = add_system_message(
-                "            create_room, join_room, leave_room, list_rooms",
-                HelpState5
-            ),
-            HelpState7 = add_system_message(
-                "            room_info, room_chat, send_room, room_history",
-                HelpState6
-            ),
-            HelpState8 = add_system_message(
-                "            list_users, auto_display, help", HelpState7
-            ),
-            HelpState9 = add_system_message("", HelpState8),
-            add_system_message("Type 'help' for general overview", HelpState9)
+            foldf(
+                UIState,
+                [
+                    add_sys_msg_f("Unknown help topic: '" ++ HelpTopic ++ "'"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("Available help topics:"),
+                    add_sys_msg_f(
+                        "  Categories: connection, messaging, rooms, utilities, editing"
+                    ),
+                    add_sys_msg_f(
+                        "  Commands: connect, disconnect, send, chat, inbox"
+                    ),
+                    add_sys_msg_f(
+                        "            create_room, join_room, leave_room, list_rooms"
+                    ),
+                    add_sys_msg_f(
+                        "            room_info, room_chat, send_room, room_history"
+                    ),
+                    add_sys_msg_f("            list_users, auto_display, help"),
+                    add_sys_msg_f(""),
+                    add_sys_msg_f("Type 'help' for general overview")
+                ]
+            )
     end.
 
 %% @private
@@ -4528,6 +4397,14 @@ add_system_message(Message, UIState) ->
         % Reset scroll to show newest messages
         scroll_position = 0
     }.
+
+%% @private
+%% Return a function that adds a specific system message to UI state.
+%% This is useful for passing as a callback.
+%% @param Msg The system message text
+%% @returns Function that takes UIState and returns updated UIState
+add_sys_msg_f(Msg) ->
+    fun(UIState) -> add_system_message(Msg, UIState) end.
 
 %% @private
 %% Handle X3DH encrypted message with proper field names.
