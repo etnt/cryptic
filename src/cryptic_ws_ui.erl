@@ -1687,6 +1687,22 @@ send_x3dh_message_to_server(
         metadata => base64:encode(erlang:term_to_binary(Metadata))
     },
     ?msg_out("UI sending X3DH message to ~s: ~p", [ToUser, X3DHSendCmd]),
+
+    %% Add warning if no OTPK was available for this message
+    UIStateWithWarning =
+        case OtpkId of
+            undefined ->
+                Warning = lists:flatten(
+                    io_lib:format(
+                        "WARNING: Message to ~s sent with reduced forward secrecy (no one-time prekey available)",
+                        [ToUser]
+                    )
+                ),
+                add_system_message(Warning, UIState);
+            _ ->
+                UIState
+        end,
+
     case
         cryptic_ws_client:send_command(
             ClientState#client_state.ws_client_pid, X3DHSendCmd
@@ -1694,7 +1710,7 @@ send_x3dh_message_to_server(
     of
         ok ->
             clear_pending_operation_and_show_success(
-                ToUser, OriginalMessage, UIState
+                ToUser, OriginalMessage, UIStateWithWarning
             );
         {error, SendErr} ->
             add_system_message(
@@ -1703,7 +1719,7 @@ send_x3dh_message_to_server(
                         SendErr
                     ])
                 ),
-                UIState
+                UIStateWithWarning
             )
     end.
 

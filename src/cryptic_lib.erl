@@ -1542,11 +1542,14 @@ x3dh_sender_init(SenderKeys, RecipientBundle, Message) ->
                 ?info("X3DH Alice DH3 result: ~p", [DH3]),
 
                 %% DH4: Ephemeral × One-Time Prekey (optional)
+                %% Note: When no OTPK is available, X3DH can still proceed but with
+                %% reduced forward secrecy. We set otpk_id to undefined to avoid
+                %% passing null atoms to base64:encode later in the flow.
                 {DH4, OtpkId} =
                     case maps:get(one_time_prekey, RecipientBundle, null) of
                         null ->
                             ?info("X3DH Alice DH4: OTPK is null, no DH4", []),
-                            {<<>>, null};
+                            {<<>>, undefined};
                         #{id := OtpkIdBin, public := OtpkPub} ->
                             DH4Val = scalarmult(EphemeralPriv, OtpkPub),
                             ?info("X3DH Alice DH4 result: ~p", [DH4Val]),
