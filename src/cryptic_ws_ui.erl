@@ -897,6 +897,46 @@ process_command("list_users", UIState) ->
         _ ->
             add_system_message("Not connected. Use 'connect' first.", UIState)
     end;
+process_command("fetch_messages", UIState) ->
+    %% Manually fetch messages from server (for troubleshooting)
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.connection_status of
+        connected ->
+            case WSChatState#ws_chat_state.ws_client_state of
+                {ok, ClientState} ->
+                    GetMessagesCmd = #{type => <<"get_messages">>},
+                    ?msg_out("UI sending get_messages command: ~p", [
+                        GetMessagesCmd
+                    ]),
+                    case
+                        cryptic_ws_client:send_command(
+                            ClientState#client_state.ws_client_pid,
+                            GetMessagesCmd
+                        )
+                    of
+                        ok ->
+                            add_system_message(
+                                "Checking server for pending messages...",
+                                UIState
+                            );
+                        queued ->
+                            add_system_message(
+                                "Get messages request queued...", UIState
+                            );
+                        {error, Reason} ->
+                            ErrMsg = io_lib:format(
+                                "Failed to fetch messages: ~p", [Reason]
+                            ),
+                            add_system_message(lists:flatten(ErrMsg), UIState)
+                    end;
+                _ ->
+                    add_system_message(
+                        "WebSocket client not available", UIState
+                    )
+            end;
+        _ ->
+            add_system_message("Not connected. Use 'connect' first.", UIState)
+    end;
 process_command("key_status", UIState) ->
     %% Get key status from server
     WSChatState = UIState#ui_state.ws_chat_state,
@@ -1909,15 +1949,18 @@ handle_otpk_tracking(From, RecipientBlob, UIState) ->
                             ),
                             UIState
                         );
-                    {OldId, NewId} when OldId =/= undefined,
-                                        NewId =/= undefined,
-                                        OldId =/= NewId ->
+                    {OldId, NewId} when
+                        OldId =/= undefined,
+                        NewId =/= undefined,
+                        OldId =/= NewId
+                    ->
                         %% OTPK rotation detected - clean up old key
                         cryptic_lib:cleanup_old_otpk(MyUsername, From),
-                        ?dbg("Cleaned up old OTPK from ~s (key rotation)~n",
+                        ?dbg(
+                            "Cleaned up old OTPK from ~s (key rotation)~n",
                             [From]
                         ),
-                         UIState;
+                        UIState;
                     _ ->
                         %% Other cases (undefined transitions) - normal
                         ?dbg("No OTPK rotation detected from ~s~n", [From]),
@@ -3601,6 +3644,16 @@ handle_help_command(Rest, UIState) ->
                         "  Note:    Shows identity keys, prekeys, and OTPK count"
                     ),
                     add_sys_msg_f(""),
+                    add_sys_msg_f("fetch_messages"),
+                    add_sys_msg_f(
+                        "  Purpose: Manually fetch pending messages from server"
+                    ),
+                    add_sys_msg_f("  Usage:   fetch_messages"),
+                    add_sys_msg_f("  Example: fetch_messages"),
+                    add_sys_msg_f(
+                        "  Note:    Messages are automatically fetched on connect"
+                    ),
+                    add_sys_msg_f(""),
                     add_sys_msg_f("auto_display [on|off]"),
                     add_sys_msg_f(
                         "  Purpose: Toggle automatic message display"
@@ -4372,8 +4425,10 @@ process_x3dh_with_client_keys(
             maps:get(sender_identity_sign_public, Metadata, undefined)
         }
     of
-        {SenderIdDHPub, SenderIdPub} when SenderIdDHPub == undefined orelse
-                                          SenderIdPub == undefined ->
+        {SenderIdDHPub, SenderIdPub} when
+            SenderIdDHPub == undefined orelse
+                SenderIdPub == undefined
+        ->
             ?error("No sender_identity in metadata, exiting!~n", []),
             throw(no_sender_id_in_metadata);
         %%
@@ -4402,7 +4457,6 @@ build_recipient_blob(DecodedComponents) ->
         ciphertext => maps:get(ciphertext, DecodedComponents),
         nonce => maps:get(nonce, DecodedComponents)
     }.
-
 
 %% @private
 %% Proceed with X3DH decryption directly using sender's identity key from metadata.

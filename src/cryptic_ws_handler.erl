@@ -401,7 +401,8 @@ handle_command(
         _:Error ->
             {error, io_lib:format("Invalid prekey bundle format: ~p", [Error])}
     end;
-handle_command(  %% FIXME PROBABLY OBSOLETE !!!
+%% FIXME PROBABLY OBSOLETE !!!
+handle_command(
     #{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State
 ) ->
     User = binary_to_list(UserB),
@@ -952,17 +953,48 @@ extract_cn_from_rdn([
 extract_cn_from_rdn([_ | Rest]) ->
     extract_cn_from_rdn(Rest).
 
-%% @doc Register user connection in ETS table
+%% @doc Register user connection and deliver pending messages
 %%
-%% Stores the mapping between username and WebSocket process PID
-%% in the user_connections ETS table for connection tracking and
-%% message routing purposes.
+%% This function:
+%% 1. Registers the user's WebSocket connection in the ETS table
+%% 2. Automatically fetches and delivers any pending messages stored for the user
+%% 3. Cleans up delivered messages from storage
+%%
+%% This ensures users receive messages that arrived while they were offline
+%% as soon as they connect, without requiring explicit action.
 %%
 %% @param Username The authenticated username
 %% @param Pid The WebSocket handler process PID
 %% @returns ok (ETS insert always succeeds)
 register_user_connection(Username, Pid) ->
-    ets:insert(user_connections, {Username, Pid}).
+    %% Register the connection
+    ets:insert(user_connections, {Username, Pid}),
+
+    %% Fetch and deliver any pending messages
+    PendingMessages = cryptic_lib:get_messages(Username),
+    case PendingMessages of
+        [] ->
+            %% No pending messages
+            ok;
+        Messages ->
+            %% Deliver each pending message
+            lists:foreach(
+                fun(MessageBlob) ->
+                    %% Extract sender from message blob
+                    From = maps:get(from, MessageBlob, "system"),
+
+                    %% Send the stored message to the user
+                    Pid ! {message, From, MessageBlob}
+                end,
+                Messages
+            ),
+
+            %% Log delivery
+            ?msg_out("Delivered ~p pending messages to ~s", [
+                length(Messages), Username
+            ])
+    end,
+    ok.
 
 %% @doc Find user connection by username
 %%
