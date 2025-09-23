@@ -401,7 +401,7 @@ handle_command(
         _:Error ->
             {error, io_lib:format("Invalid prekey bundle format: ~p", [Error])}
     end;
-handle_command(
+handle_command(  %% FIXME PROBABLY OBSOLETE !!!
     #{<<"type">> := <<"get_prekey">>, <<"user">> := UserB}, _Username, _State
 ) ->
     User = binary_to_list(UserB),
@@ -499,105 +499,6 @@ handle_command(
             },
             {reply, Response}
     end;
-handle_command(
-    #{
-        <<"type">> := <<"send_message">>,
-        <<"to">> := ToUserB,
-        <<"ephemeral">> := EphB64,
-        <<"nonce">> := NonceB64,
-        <<"cipher">> := CipherB64
-    },
-    Username,
-    _State
-) ->
-    ToUser = binary_to_list(ToUserB),
-
-    %% Create message blob
-    MessageBlob = #{
-        from => Username,
-        to => ToUser,
-        ephemeral => EphB64,
-        nonce => NonceB64,
-        cipher => CipherB64,
-        timestamp => erlang:system_time(second)
-    },
-
-    %% Store message
-    cryptic_lib:store_message(ToUser, MessageBlob),
-
-    %% Try to deliver immediately if user is online
-    case find_user_connection(ToUser) of
-        {ok, Pid} ->
-            Pid ! {message, Username, MessageBlob};
-        not_found ->
-            % Message stored for later retrieval
-            ok
-    end,
-
-    {reply, #{
-        type => <<"message_sent">>,
-        success => true,
-        message => <<"Message sent">>
-    }};
-%% Handle secure message format (Step 1 implementation)
-handle_command(
-    #{
-        <<"type">> := <<"send_message_secure">>,
-        <<"to">> := ToUserB,
-        <<"ephemeral">> := EphB64,
-        <<"nonce">> := NonceB64,
-        <<"cipher">> := CipherB64,
-        <<"sender_key_id">> := SenderKeyIdB64,
-        <<"timestamp">> := ClientTimestamp,
-        <<"sequence">> := Sequence
-    },
-    Username,
-    _State
-) ->
-    ToUser = binary_to_list(ToUserB),
-
-    %% Validate timestamp (reject messages older than 5 minutes or from future)
-    ServerTime = erlang:system_time(second),
-    case abs(ServerTime - ClientTimestamp) < 300 of
-        false ->
-            {reply, #{
-                type => <<"error">>,
-                error => <<"invalid_timestamp">>,
-                message => <<"Message timestamp too old or from future">>
-            }};
-        true ->
-            %% Create secure message blob with metadata
-            MessageBlob = #{
-                from => Username,
-                to => ToUser,
-                ephemeral => EphB64,
-                nonce => NonceB64,
-                cipher => CipherB64,
-                sender_key_id => SenderKeyIdB64,
-                client_timestamp => ClientTimestamp,
-                server_timestamp => ServerTime,
-                sequence => Sequence,
-                message_format => <<"secure_v1">>
-            },
-
-            %% Store message
-            cryptic_lib:store_message(ToUser, MessageBlob),
-
-            %% Try to deliver immediately if user is online
-            case find_user_connection(ToUser) of
-                {ok, Pid} ->
-                    Pid ! {message, Username, MessageBlob};
-                not_found ->
-                    % Message stored for later retrieval
-                    ok
-            end,
-
-            {reply, #{
-                type => <<"message_sent">>,
-                success => true,
-                message => <<"Secure message sent">>
-            }}
-    end;
 %% Handle X3DH protocol messages (SESSION-MESSAGE-FLOW.md implementation)
 handle_command(
     #{
@@ -631,16 +532,14 @@ handle_command(
         server_timestamp => erlang:system_time(second)
     },
 
-    %% Store message
-    cryptic_lib:store_message(ToUser, MessageBlob),
-
     %% Try to deliver immediately if user is online
     case find_user_connection(ToUser) of
         {ok, Pid} ->
+            %% User is online - deliver immediately without storing
             Pid ! {message, Username, MessageBlob};
         not_found ->
-            % Message stored for later retrieval
-            ok
+            %% User is offline - store message for later retrieval
+            cryptic_lib:store_message(ToUser, MessageBlob)
     end,
 
     {reply, #{
