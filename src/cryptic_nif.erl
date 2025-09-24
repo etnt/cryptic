@@ -428,7 +428,7 @@ kdf_derive(_Length, _SubkeyId, _Context, _MasterKey) ->
 %% </ul>
 %%
 %% @param IKM Input keying material (e.g., ECDH shared secret)
-%% @param Salt Salt value for extraction phase (can be empty <<>>)
+%% @param Salt Salt value for extraction phase (can be an empty binary)
 %% @param Info Context and application-specific information
 %% @param Length Length of output keying material (1-32 bytes)
 %% @returns Derived key material of specified length

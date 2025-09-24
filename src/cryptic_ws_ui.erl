@@ -33,14 +33,14 @@
 %%%
 %%% ```
 %%% +--------------------------------------------------+
-%%% | Status Bar (server, user cert, chat mode)       |
+%%% | Status Bar (server, user cert, chat mode)        |
 %%% +--------------------------------------------------+
 %%% |                                                  |
 %%% |            Message Display Area                  |
-%%% |         (scrollable message history)            |
+%%% |         (scrollable message history)             |
 %%% |                                                  |
 %%% +--------------------------------------------------+
-%%% | Help Bar (context-sensitive commands)           |
+%%% | Help Bar (context-sensitive commands)            |
 %%% +--------------------------------------------------+
 %%% | > Input Line                                     |
 %%% +--------------------------------------------------+

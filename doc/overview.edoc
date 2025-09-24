@@ -144,14 +144,14 @@ The system implements a secure messaging platform using:
 
 === Starting the Server ===
 <pre>
-$ erl -pa _build/default/lib/*/ebin
-1> cryptic_server:start_websocket_mtls().
+# Use the following script
+./scripts/start-server.sh
 </pre>
 
 === Starting a Client ===
 <pre>
-$ erl -pa _build/default/lib/*/ebin  
-1> cryptic_ws_ui:start().
+# Use the following script for the client: `alice'
+./scripts/start-client.sh alice
 </pre>
 
 === Basic Usage ===
