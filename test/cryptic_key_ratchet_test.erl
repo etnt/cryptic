@@ -53,7 +53,9 @@ key_ratchet_test_() ->
         {"Message key derivation", fun test_message_key_derivation/0},
         {"Full ratchet simulation", fun test_full_ratchet_simulation/0},
         {"Key uniqueness properties", fun test_key_uniqueness/0},
-        {"Ratchet performance test", fun test_ratchet_performance/0}
+        {"Ratchet performance test", fun test_ratchet_performance/0},
+        {"Performance comparison vs Erlang HKDF",
+            fun test_performance_comparison/0}
     ]}.
 
 %%% ============================================================================
@@ -260,6 +262,89 @@ test_ratchet_performance() ->
     % Performance should be reasonable (>1000 ops/sec)
     ?assert(ChainOpsPerSec > 1000),
     ?assert(MessageOpsPerSec > 1000).
+
+%% @doc Compare performance of native vs Erlang HKDF implementations
+test_performance_comparison() ->
+    IKM = cryptic_nif:rand_bytes(32),
+    Salt = <<"performance_test">>,
+    Info = <<"chain_key_derivation">>,
+    NumOperations = 5000,
+
+    io:format(user, "~n=== HKDF Performance Comparison ===~n", []),
+
+    % Benchmark native HKDF-SHA256
+    {NativeTime, _NativeKeys} = timer:tc(fun() ->
+        [
+            cryptic_nif:hkdf_sha256(
+                IKM, Salt, <<Info/binary, (integer_to_binary(N))/binary>>, 32
+            )
+         || N <- lists:seq(1, NumOperations)
+        ]
+    end),
+    NativeOpsPerSec = (NumOperations * 1000000) div NativeTime,
+
+    % Benchmark Erlang HKDF-SHA256
+    {ErlangTime, _ErlangKeys} = timer:tc(fun() ->
+        [
+            cryptic_lib:hkdf_sha256(
+                IKM, Salt, <<Info/binary, (integer_to_binary(N))/binary>>, 32
+            )
+         || N <- lists:seq(1, NumOperations)
+        ]
+    end),
+    ErlangOpsPerSec = (NumOperations * 1000000) div ErlangTime,
+
+    % Benchmark native Blake2b KDF for comparison
+    MasterKey = cryptic_nif:rand_bytes(32),
+    Context = <<"chain">>,
+    {Blake2bTime, _Blake2bKeys} = timer:tc(fun() ->
+        [
+            cryptic_nif:kdf_derive(32, N, Context, MasterKey)
+         || N <- lists:seq(1, NumOperations)
+        ]
+    end),
+    Blake2bOpsPerSec = (NumOperations * 1000000) div Blake2bTime,
+
+    % Calculate speedup ratios
+    NativeSpeedup = NativeOpsPerSec / ErlangOpsPerSec,
+    Blake2bSpeedup = Blake2bOpsPerSec / ErlangOpsPerSec,
+
+    % Display results
+    io:format(user, "~nNative HKDF-SHA256:  ~p ops/sec~n", [NativeOpsPerSec]),
+    io:format(user, "Erlang HKDF-SHA256:  ~p ops/sec~n", [ErlangOpsPerSec]),
+    io:format(user, "Native Blake2b KDF:  ~p ops/sec~n", [Blake2bOpsPerSec]),
+    io:format(user, "~n", []),
+    io:format(user, "Native HKDF speedup: ~.2fx faster than Erlang~n", [
+        NativeSpeedup
+    ]),
+    io:format(user, "Blake2b KDF speedup: ~.2fx faster than Erlang~n", [
+        Blake2bSpeedup
+    ]),
+    io:format(user, "Blake2b vs Native HKDF: ~.2fx faster~n", [
+        Blake2bOpsPerSec / NativeOpsPerSec
+    ]),
+
+    % Verify correctness - same inputs should produce same outputs
+    TestIKM = <<"test_ikm">>,
+    TestSalt = <<"test_salt">>,
+    TestInfo = <<"test_info">>,
+
+    NativeResult = cryptic_nif:hkdf_sha256(TestIKM, TestSalt, TestInfo, 32),
+    ErlangResult = cryptic_lib:hkdf_sha256(TestIKM, TestSalt, TestInfo, 32),
+
+    % Both should produce the same result (verify correctness)
+    ?assertEqual(ErlangResult, NativeResult),
+
+    % Performance assertions
+
+    % Native should be reasonably fast
+    ?assert(NativeOpsPerSec > 1000),
+    % Erlang should work but be slower
+    ?assert(ErlangOpsPerSec > 100),
+    % Native should be faster than Erlang
+    ?assert(NativeSpeedup > 1.0),
+    % Blake2b should be fastest
+    ?assert(Blake2bOpsPerSec > NativeOpsPerSec).
 
 %%% ============================================================================
 %%% Helper Functions
