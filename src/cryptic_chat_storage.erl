@@ -23,7 +23,7 @@
 %% CREATE TABLE messages (
 %%     id INTEGER PRIMARY KEY AUTOINCREMENT,
 %%     from_user TEXT NOT NULL,
-%%     to_user TEXT NOT NULL, 
+%%     to_user TEXT NOT NULL,
 %%     message TEXT NOT NULL,
 %%     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
 %%     message_type TEXT DEFAULT 'text',
@@ -71,7 +71,7 @@
     init_storage/0,
     init_storage/1,
     close_storage/0,
-    
+
     %% Message history management
     save_message/4,
     save_message/5,
@@ -83,7 +83,7 @@
     mark_message_read/1,
     search_messages/1,
     search_messages/2,
-    
+
     %% Contact management
     add_contact/1,
     add_contact/2,
@@ -96,20 +96,25 @@
     set_contact_favorite/2,
     block_contact/1,
     unblock_contact/1,
-    
+
     %% User profile management
     save_user_profile/4,
     get_user_profile/1,
     update_last_login/1,
     get_current_user/0,
-    
+
     %% Offline message queueing
     queue_message/2,
     get_queued_messages/0,
     get_queued_messages/1,
     remove_queued_message/1,
     increment_retry_count/1,
-    
+
+    %% Double Ratchet state management
+    store_ratchet_state/2,
+    get_ratchet_state/1,
+    delete_ratchet_state/1,
+
     %% Utility functions
     get_storage_path/0,
     backup_storage/0,
@@ -138,7 +143,7 @@ init_storage() ->
 %% @doc Initialize the storage system with custom database path.
 %%
 %% Creates the SQLite database and all required tables if they don't exist.
-%% 
+%%
 %% @param DbPath Path to the SQLite database file
 %% @returns `ok' on success, `{error, term()}' on failure
 -spec init_storage(string()) -> ok | {error, term()}.
@@ -147,14 +152,15 @@ init_storage(DbPath) ->
         %% Ensure the database directory exists
         DbDir = filename:dirname(DbPath),
         case DbDir of
-            "." -> ok;
-            _ -> 
+            "." ->
+                ok;
+            _ ->
                 case filelib:ensure_dir(DbPath) of
                     ok -> ok;
                     {error, Reason} -> throw({ensure_dir_failed, Reason})
                 end
         end,
-        
+
         %% For now, use ETS as a simple in-memory storage
         %% TODO: Replace with actual SQLite when esqlite3 is available
         case ets:info(cryptic_messages) of
@@ -162,11 +168,12 @@ init_storage(DbPath) ->
                 ets:new(cryptic_messages, [named_table, ordered_set, public]),
                 ets:new(cryptic_contacts, [named_table, set, public]),
                 ets:new(cryptic_profiles, [named_table, set, public]),
-                ets:new(cryptic_outbox, [named_table, ordered_set, public]);
+                ets:new(cryptic_outbox, [named_table, ordered_set, public]),
+                ets:new(cryptic_ratchet_states, [named_table, set, public]);
             _ ->
                 ok
         end,
-        
+
         %% Store the database path for future reference
         put(cryptic_db_path, DbPath),
         ok
@@ -201,21 +208,25 @@ close_storage() ->
 %% Stores a message with automatic timestamp generation.
 %%
 %% @param FromUser The sender's username
-%% @param ToUser The recipient's username  
+%% @param ToUser The recipient's username
 %% @param Message The message content
 %% @param MessageType The type of message ('text', 'file', etc.)
 %% @returns `ok' on success, `{error, term()}' on failure
--spec save_message(string(), string(), string(), string()) -> ok | {error, term()}.
+-spec save_message(string(), string(), string(), string()) ->
+    ok | {error, term()}.
 save_message(FromUser, ToUser, Message, MessageType) ->
     Timestamp = calendar:universal_time(),
     save_message(FromUser, ToUser, Message, MessageType, Timestamp).
 
 %% @doc Save a message with explicit timestamp.
--spec save_message(string(), string(), string(), string(), calendar:datetime()) -> ok | {error, term()}.
+-spec save_message(string(), string(), string(), string(), calendar:datetime()) ->
+    ok | {error, term()}.
 save_message(FromUser, ToUser, Message, MessageType, Timestamp) ->
     try
         MessageId = generate_message_id(),
-        MessageRecord = {MessageId, FromUser, ToUser, Message, MessageType, Timestamp, false},
+        MessageRecord =
+            {MessageId, FromUser, ToUser, Message, MessageType, Timestamp,
+                false},
         ets:insert(cryptic_messages, MessageRecord),
         ok
     catch
@@ -230,28 +241,41 @@ save_message(FromUser, ToUser, Message, MessageType, Timestamp) ->
 %% @returns `{ok, [Message]}' with list of messages, or `{error, term()}'
 -spec get_conversation(string(), string()) -> {ok, [term()]} | {error, term()}.
 get_conversation(User1, User2) ->
-    get_conversation(User1, User2, 100). % Default limit
+    % Default limit
+    get_conversation(User1, User2, 100).
 
 %% @doc Get conversation history with message limit.
--spec get_conversation(string(), string(), pos_integer()) -> {ok, [term()]} | {error, term()}.
+-spec get_conversation(string(), string(), pos_integer()) ->
+    {ok, [term()]} | {error, term()}.
 get_conversation(User1, User2, Limit) ->
     try
         AllMessages = ets:tab2list(cryptic_messages),
-        ConversationMessages = lists:filter(fun({_Id, From, To, _Msg, _Type, _Time, _Read}) ->
-            (From =:= User1 andalso To =:= User2) orelse
-            (From =:= User2 andalso To =:= User1)
-        end, AllMessages),
-        
+        ConversationMessages = lists:filter(
+            fun({_Id, From, To, _Msg, _Type, _Time, _Read}) ->
+                (From =:= User1 andalso To =:= User2) orelse
+                    (From =:= User2 andalso To =:= User1)
+            end,
+            AllMessages
+        ),
+
         %% Sort by timestamp and limit
-        SortedMessages = lists:sort(fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
-            T1 =< T2
-        end, ConversationMessages),
-        
-        LimitedMessages = case length(SortedMessages) > Limit of
-            true -> lists:nthtail(length(SortedMessages) - Limit, SortedMessages);
-            false -> SortedMessages
-        end,
-        
+        SortedMessages = lists:sort(
+            fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
+                T1 =< T2
+            end,
+            ConversationMessages
+        ),
+
+        LimitedMessages =
+            case length(SortedMessages) > Limit of
+                true ->
+                    lists:nthtail(
+                        length(SortedMessages) - Limit, SortedMessages
+                    );
+                false ->
+                    SortedMessages
+            end,
+
         {ok, LimitedMessages}
     catch
         _:Error ->
@@ -263,10 +287,14 @@ get_conversation(User1, User2, Limit) ->
 get_recent_messages(Limit) ->
     try
         AllMessages = ets:tab2list(cryptic_messages),
-        SortedMessages = lists:sort(fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
-            T1 >= T2  % Descending order (newest first)
-        end, AllMessages),
-        
+        SortedMessages = lists:sort(
+            fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
+                % Descending order (newest first)
+                T1 >= T2
+            end,
+            AllMessages
+        ),
+
         LimitedMessages = lists:sublist(SortedMessages, Limit),
         {ok, LimitedMessages}
     catch
@@ -275,18 +303,26 @@ get_recent_messages(Limit) ->
     end.
 
 %% @doc Get recent messages for a specific user.
--spec get_recent_messages(string(), pos_integer()) -> {ok, [term()]} | {error, term()}.
+-spec get_recent_messages(string(), pos_integer()) ->
+    {ok, [term()]} | {error, term()}.
 get_recent_messages(Username, Limit) ->
     try
         AllMessages = ets:tab2list(cryptic_messages),
-        UserMessages = lists:filter(fun({_Id, From, To, _Msg, _Type, _Time, _Read}) ->
-            From =:= Username orelse To =:= Username
-        end, AllMessages),
-        
-        SortedMessages = lists:sort(fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
-            T1 >= T2  % Descending order (newest first)
-        end, UserMessages),
-        
+        UserMessages = lists:filter(
+            fun({_Id, From, To, _Msg, _Type, _Time, _Read}) ->
+                From =:= Username orelse To =:= Username
+            end,
+            AllMessages
+        ),
+
+        SortedMessages = lists:sort(
+            fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
+                % Descending order (newest first)
+                T1 >= T2
+            end,
+            UserMessages
+        ),
+
         LimitedMessages = lists:sublist(SortedMessages, Limit),
         {ok, LimitedMessages}
     catch
@@ -300,15 +336,21 @@ get_unread_messages(ToUser) ->
     try
         AllMessages = ets:tab2list(cryptic_messages),
         % Filter for messages TO the user that are unread
-        UnreadMessages = lists:filter(fun({_Id, _From, To, _Msg, _Type, _Time, ReadStatus}) ->
-            To =:= ToUser andalso ReadStatus =:= false
-        end, AllMessages),
-        
+        UnreadMessages = lists:filter(
+            fun({_Id, _From, To, _Msg, _Type, _Time, ReadStatus}) ->
+                To =:= ToUser andalso ReadStatus =:= false
+            end,
+            AllMessages
+        ),
+
         % Sort by timestamp (newest first)
-        SortedMessages = lists:sort(fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
-            T1 >= T2
-        end, UnreadMessages),
-        
+        SortedMessages = lists:sort(
+            fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
+                T1 >= T2
+            end,
+            UnreadMessages
+        ),
+
         {ok, SortedMessages}
     catch
         _:Error ->
@@ -335,25 +377,33 @@ mark_message_read(MessageId) ->
 %% @doc Search messages by content.
 -spec search_messages(string()) -> {ok, [term()]} | {error, term()}.
 search_messages(SearchTerm) ->
-    search_messages(SearchTerm, 50). % Default limit
+    % Default limit
+    search_messages(SearchTerm, 50).
 
 %% @doc Search messages by content with limit.
--spec search_messages(string(), pos_integer()) -> {ok, [term()]} | {error, term()}.
+-spec search_messages(string(), pos_integer()) ->
+    {ok, [term()]} | {error, term()}.
 search_messages(SearchTerm, Limit) ->
     try
         AllMessages = ets:tab2list(cryptic_messages),
         LowerSearchTerm = string:lowercase(SearchTerm),
-        
-        MatchingMessages = lists:filter(fun({_Id, _From, _To, Msg, _Type, _Time, _Read}) ->
-            LowerMsg = string:lowercase(Msg),
-            string:find(LowerMsg, LowerSearchTerm) =/= nomatch
-        end, AllMessages),
-        
+
+        MatchingMessages = lists:filter(
+            fun({_Id, _From, _To, Msg, _Type, _Time, _Read}) ->
+                LowerMsg = string:lowercase(Msg),
+                string:find(LowerMsg, LowerSearchTerm) =/= nomatch
+            end,
+            AllMessages
+        ),
+
         %% Sort by timestamp (newest first) and limit
-        SortedMessages = lists:sort(fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
-            T1 >= T2
-        end, MatchingMessages),
-        
+        SortedMessages = lists:sort(
+            fun({_, _, _, _, _, T1, _}, {_, _, _, _, _, T2, _}) ->
+                T1 >= T2
+            end,
+            MatchingMessages
+        ),
+
         LimitedMessages = lists:sublist(SortedMessages, Limit),
         {ok, LimitedMessages}
     catch
@@ -376,7 +426,8 @@ add_contact(Username, Alias) ->
     add_contact(Username, Alias, undefined).
 
 %% @doc Add a contact with username, alias, and public key.
--spec add_contact(string(), string(), binary() | undefined) -> ok | {error, term()}.
+-spec add_contact(string(), string(), binary() | undefined) ->
+    ok | {error, term()}.
 add_contact(Username, Alias, PublicKey) ->
     try
         Timestamp = calendar:universal_time(),
@@ -399,8 +450,10 @@ update_contact(Username, Updates) ->
                 NewLastSeen = proplists:get_value(last_seen, Updates, LastSeen),
                 NewFavorite = proplists:get_value(favorite, Updates, Favorite),
                 NewBlocked = proplists:get_value(blocked, Updates, Blocked),
-                
-                UpdatedRecord = {Username, NewAlias, NewPubKey, NewLastSeen, NewFavorite, NewBlocked},
+
+                UpdatedRecord =
+                    {Username, NewAlias, NewPubKey, NewLastSeen, NewFavorite,
+                        NewBlocked},
                 ets:insert(cryptic_contacts, UpdatedRecord),
                 ok;
             [] ->
@@ -471,11 +524,13 @@ unblock_contact(Username) ->
 %%%===================================================================
 
 %% @doc Save user profile with keypair.
--spec save_user_profile(string(), binary(), binary(), string()) -> ok | {error, term()}.
+-spec save_user_profile(string(), binary(), binary(), string()) ->
+    ok | {error, term()}.
 save_user_profile(Username, PrivateKey, PublicKey, ServerUrl) ->
     try
         Timestamp = calendar:universal_time(),
-        ProfileRecord = {Username, PrivateKey, PublicKey, ServerUrl, Timestamp, undefined},
+        ProfileRecord =
+            {Username, PrivateKey, PublicKey, ServerUrl, Timestamp, undefined},
         ets:insert(cryptic_profiles, ProfileRecord),
         ok
     catch
@@ -503,7 +558,9 @@ update_last_login(Username) ->
         case ets:lookup(cryptic_profiles, Username) of
             [{Username, PrivKey, PubKey, ServerUrl, CreatedAt, _LastLogin}] ->
                 Timestamp = calendar:universal_time(),
-                UpdatedRecord = {Username, PrivKey, PubKey, ServerUrl, CreatedAt, Timestamp},
+                UpdatedRecord =
+                    {Username, PrivKey, PubKey, ServerUrl, CreatedAt,
+                        Timestamp},
                 ets:insert(cryptic_profiles, UpdatedRecord),
                 ok;
             [] ->
@@ -524,21 +581,25 @@ get_current_user() ->
                 {error, no_profiles};
             Profiles ->
                 %% Find profile with most recent login
-                MostRecent = lists:foldl(fun
-                    ({User, _, _, _, _, undefined}, Acc) ->
-                        case Acc of
-                            undefined -> {User, {{1970,1,1},{0,0,0}}};
-                            _ -> Acc
-                        end;
-                    ({User, _, _, _, _, LastLogin}, undefined) ->
-                        {User, LastLogin};
-                    ({User, _, _, _, _, LastLogin}, {_AccUser, AccLogin}) ->
-                        case LastLogin > AccLogin of
-                            true -> {User, LastLogin};
-                            false -> {_AccUser, AccLogin}
-                        end
-                end, undefined, Profiles),
-                
+                MostRecent = lists:foldl(
+                    fun
+                        ({User, _, _, _, _, undefined}, Acc) ->
+                            case Acc of
+                                undefined -> {User, {{1970, 1, 1}, {0, 0, 0}}};
+                                _ -> Acc
+                            end;
+                        ({User, _, _, _, _, LastLogin}, undefined) ->
+                            {User, LastLogin};
+                        ({User, _, _, _, _, LastLogin}, {_AccUser, AccLogin}) ->
+                            case LastLogin > AccLogin of
+                                true -> {User, LastLogin};
+                                false -> {_AccUser, AccLogin}
+                            end
+                    end,
+                    undefined,
+                    Profiles
+                ),
+
                 case MostRecent of
                     undefined -> {error, no_current_user};
                     {User, _} -> {ok, User}
@@ -583,9 +644,12 @@ get_queued_messages() ->
 get_queued_messages(ToUser) ->
     try
         AllMessages = ets:tab2list(cryptic_outbox),
-        UserMessages = lists:filter(fun({_Id, To, _Msg, _Time, _Retry, _LastAttempt}) ->
-            To =:= ToUser
-        end, AllMessages),
+        UserMessages = lists:filter(
+            fun({_Id, To, _Msg, _Time, _Retry, _LastAttempt}) ->
+                To =:= ToUser
+            end,
+            AllMessages
+        ),
         {ok, UserMessages}
     catch
         _:Error ->
@@ -610,7 +674,9 @@ increment_retry_count(MessageId) ->
         case ets:lookup(cryptic_outbox, MessageId) of
             [{MessageId, ToUser, Message, CreatedAt, RetryCount, _LastAttempt}] ->
                 Timestamp = calendar:universal_time(),
-                UpdatedRecord = {MessageId, ToUser, Message, CreatedAt, RetryCount + 1, Timestamp},
+                UpdatedRecord =
+                    {MessageId, ToUser, Message, CreatedAt, RetryCount + 1,
+                        Timestamp},
                 ets:insert(cryptic_outbox, UpdatedRecord),
                 ok;
             [] ->
@@ -645,14 +711,16 @@ backup_storage(_SourcePath) ->
         %% Create backup directory if it doesn't exist
         BackupDir = ?BACKUP_DIR,
         filelib:ensure_dir(filename:join(BackupDir, "dummy")),
-        
+
         %% Generate backup filename with timestamp
-        {{Y,M,D},{H,Min,S}} = calendar:universal_time(),
-        Timestamp = io_lib:format("~4..0w~2..0w~2..0w_~2..0w~2..0w~2..0w", 
-                                  [Y,M,D,H,Min,S]),
+        {{Y, M, D}, {H, Min, S}} = calendar:universal_time(),
+        Timestamp = io_lib:format(
+            "~4..0w~2..0w~2..0w_~2..0w~2..0w~2..0w",
+            [Y, M, D, H, Min, S]
+        ),
         BackupName = io_lib:format("cryptic_chat_backup_~s.db", [Timestamp]),
         BackupPath = filename:join(BackupDir, lists:flatten(BackupName)),
-        
+
         %% For ETS tables, we'll save to a file format
         %% Note: SourcePath parameter is currently unused as we backup from ETS tables
         save_ets_backup(BackupPath),
@@ -670,7 +738,7 @@ get_storage_stats() ->
         ContactCount = ets:info(cryptic_contacts, size),
         ProfileCount = ets:info(cryptic_profiles, size),
         QueuedCount = ets:info(cryptic_outbox, size),
-        
+
         Stats = [
             {message_count, MessageCount},
             {contact_count, ContactCount},
@@ -703,9 +771,10 @@ save_ets_backup(BackupPath) ->
             {messages, ets:tab2list(cryptic_messages)},
             {contacts, ets:tab2list(cryptic_contacts)},
             {profiles, ets:tab2list(cryptic_profiles)},
-            {outbox, ets:tab2list(cryptic_outbox)}
+            {outbox, ets:tab2list(cryptic_outbox)},
+            {ratchet_states, ets:tab2list(cryptic_ratchet_states)}
         ],
-        
+
         case file:write_file(BackupPath, term_to_binary(BackupData)) of
             ok -> ok;
             {error, Reason} -> throw({write_backup_failed, Reason})
@@ -713,4 +782,63 @@ save_ets_backup(BackupPath) ->
     catch
         throw:Error -> throw(Error);
         _:Error -> throw({backup_save_failed, Error})
+    end.
+
+%%%===================================================================
+%%% Double Ratchet State Management
+%%%===================================================================
+
+%% @doc Store Double Ratchet state for a conversation.
+%%
+%% Persists the serialized ratchet state in ETS storage.
+%%
+%% @param ConversationId Unique conversation identifier
+%% @param SerializedState Serialized ratchet state binary
+%% @returns `ok' on success, `{error, term()}' on failure
+-spec store_ratchet_state(string(), binary()) -> ok | {error, term()}.
+store_ratchet_state(ConversationId, SerializedState) ->
+    try
+        %% Store in ETS table: {ConversationId, SerializedState, Timestamp}
+        Timestamp = erlang:system_time(second),
+        ets:insert(
+            cryptic_ratchet_states, {ConversationId, SerializedState, Timestamp}
+        ),
+        ok
+    catch
+        _:Error -> {error, {store_ratchet_state_failed, Error}}
+    end.
+
+%% @doc Retrieve Double Ratchet state for a conversation.
+%%
+%% Loads the serialized ratchet state from ETS storage.
+%%
+%% @param ConversationId Unique conversation identifier
+%% @returns `{ok, SerializedState}' on success, `{error, not_found}' if not found
+-spec get_ratchet_state(string()) ->
+    {ok, binary()} | {error, not_found | term()}.
+get_ratchet_state(ConversationId) ->
+    try
+        case ets:lookup(cryptic_ratchet_states, ConversationId) of
+            [{_Id, SerializedState, _Timestamp}] ->
+                {ok, SerializedState};
+            [] ->
+                {error, not_found}
+        end
+    catch
+        _:Error -> {error, {get_ratchet_state_failed, Error}}
+    end.
+
+%% @doc Delete Double Ratchet state for a conversation.
+%%
+%% Removes the ratchet state from storage.
+%%
+%% @param ConversationId Unique conversation identifier
+%% @returns `ok' on success, `{error, term()}' on failure
+-spec delete_ratchet_state(string()) -> ok | {error, term()}.
+delete_ratchet_state(ConversationId) ->
+    try
+        ets:delete(cryptic_ratchet_states, ConversationId),
+        ok
+    catch
+        _:Error -> {error, {delete_ratchet_state_failed, Error}}
     end.

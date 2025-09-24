@@ -187,18 +187,25 @@ websocket_handle(_Data, State) ->
 %% @param State The current WebSocket state
 %% @returns {Replies, State} with optional response frames to send to client
 websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
-    %% Incoming message from another user
-    Response = #{
-        type => <<"message">>,
-        from => list_to_binary(FromUser),
-        to => list_to_binary(Username),
-        message => Message
-    },
-    ResponseJson = jsx:encode(Response),
-    ?msg_out("Forwarding message from ~s to ~s: ~s", [
-        FromUser, Username, ResponseJson
-    ]),
-    {[{text, ResponseJson}], State};
+    %% Handle incoming messages - check if it's a Double Ratchet message
+    case maps:get(message_type, Message, <<"text">>) of
+        <<"ratchet">> ->
+            %% Process Double Ratchet message
+            handle_incoming_ratchet_message(FromUser, Message, Username, State);
+        _ ->
+            %% Regular message or X3DH message - forward as-is
+            Response = #{
+                type => <<"message">>,
+                from => list_to_binary(FromUser),
+                to => list_to_binary(Username),
+                message => Message
+            },
+            ResponseJson = jsx:encode(Response),
+            ?msg_out("Forwarding message from ~s to ~s: ~s", [
+                FromUser, Username, ResponseJson
+            ]),
+            {[{text, ResponseJson}], State}
+    end;
 websocket_info({room_notification, Notification}, State) ->
     %% Incoming room message notification
     ?dbg("DEBUG WS: Received room_notification: ~p", [Notification]),
@@ -548,6 +555,198 @@ handle_command(
         success => true,
         message => <<"X3DH message sent">>
     }};
+%% Handle Double Ratchet protocol messages (efficient ongoing messaging after X3DH)
+handle_command(
+    #{
+        <<"type">> := <<"send_message_ratchet">>,
+        <<"to">> := ToUserB,
+        <<"message_id">> := MessageIdB64,
+        <<"dh_public">> := DhPublicB64,
+        <<"dh_step">> := DhStep,
+        <<"prev_chain_length">> := PrevChainLength,
+        <<"msg_number">> := MsgNumber,
+        <<"ciphertext">> := CiphertextB64,
+        <<"nonce">> := NonceB64
+    },
+    Username,
+    _State
+) ->
+    ToUser = binary_to_list(ToUserB),
+
+    %% Create Double Ratchet message blob
+    MessageBlob = #{
+        from => Username,
+        to => ToUser,
+        message_type => <<"ratchet">>,
+        message_id => MessageIdB64,
+        dh_public => DhPublicB64,
+        dh_step => DhStep,
+        prev_chain_length => PrevChainLength,
+        msg_number => MsgNumber,
+        ciphertext => CiphertextB64,
+        nonce => NonceB64,
+        server_timestamp => erlang:system_time(second)
+    },
+
+    %% Try to deliver immediately if user is online
+    case find_user_connection(ToUser) of
+        {ok, Pid} ->
+            %% User is online - deliver immediately without storing
+            Pid ! {message, Username, MessageBlob};
+        not_found ->
+            %% User is offline - store message for later retrieval
+            cryptic_lib:store_message(ToUser, MessageBlob)
+    end,
+
+    {reply, #{
+        type => <<"message_sent">>,
+        success => true,
+        message => <<"Double Ratchet message sent">>
+    }};
+%% Handle Double Ratchet initialization after successful X3DH
+handle_command(
+    #{
+        <<"type">> := <<"init_ratchet">>,
+        <<"peer">> := PeerUserB,
+        <<"x3dh_shared_secret">> := SharedSecretB64,
+        <<"role">> := Role,
+        <<"peer_dh_public">> := PeerDhPublicB64
+    },
+    Username,
+    _State
+) ->
+    PeerUser = binary_to_list(PeerUserB),
+
+    try
+        %% Decode X3DH shared secret
+        SharedSecret = base64:decode(SharedSecretB64),
+        PeerDhPublic = base64:decode(PeerDhPublicB64),
+
+        %% Initialize Double Ratchet state based on role
+        RatchetState =
+            case Role of
+                <<"sender">> ->
+                    cryptic_double_ratchet:init_sender(
+                        SharedSecret, PeerDhPublic
+                    );
+                <<"receiver">> ->
+                    cryptic_double_ratchet:init_receiver(
+                        SharedSecret, PeerDhPublic, 32
+                    )
+            end,
+
+        %% Store ratchet state for this conversation
+        ConversationId = create_conversation_id(Username, PeerUser),
+        store_ratchet_state(ConversationId, RatchetState),
+
+        {reply, #{
+            type => <<"ratchet_initialized">>,
+            success => true,
+            conversation_id => list_to_binary(ConversationId)
+        }}
+    catch
+        error:Reason ->
+            {reply, #{
+                type => <<"ratchet_init_error">>,
+                success => false,
+                error => atom_to_binary(Reason, utf8)
+            }}
+    end;
+%% Handle Double Ratchet message encryption and sending
+handle_command(
+    #{
+        <<"type">> := <<"send_ratchet_message">>,
+        <<"to">> := ToUserB,
+        <<"plaintext">> := PlaintextB64
+    },
+    Username,
+    _State
+) ->
+    ToUser = binary_to_list(ToUserB),
+    ConversationId = create_conversation_id(Username, ToUser),
+
+    try
+        %% Decode the plaintext message
+        Plaintext = base64:decode(PlaintextB64),
+
+        %% Load ratchet state for this conversation
+        case get_ratchet_state(ConversationId) of
+            {ok, RatchetState} ->
+                %% Encrypt message using Double Ratchet
+                case
+                    cryptic_double_ratchet:encrypt_message(
+                        Plaintext, RatchetState
+                    )
+                of
+                    {ok, RatchetMessage, NewRatchetState} ->
+                        %% Update stored ratchet state
+                        update_ratchet_state(ConversationId, NewRatchetState),
+
+                        %% Create message blob for transmission
+                        MessageId = generate_unique_message_id(),
+                        MessageBlob = #{
+                            from => Username,
+                            to => ToUser,
+                            message_type => <<"ratchet">>,
+                            message_id => list_to_binary(MessageId),
+                            dh_public => base64:encode(
+                                maps:get(dh_public, RatchetMessage)
+                            ),
+                            dh_step => maps:get(dh_step, RatchetMessage),
+                            prev_chain_length => maps:get(
+                                prev_chain_length, RatchetMessage
+                            ),
+                            msg_number => maps:get(msg_number, RatchetMessage),
+                            ciphertext => base64:encode(
+                                maps:get(ciphertext, RatchetMessage)
+                            ),
+                            nonce => base64:encode(
+                                maps:get(nonce, RatchetMessage)
+                            ),
+                            server_timestamp => erlang:system_time(second)
+                        },
+
+                        %% Try to deliver immediately if user is online
+                        case find_user_connection(ToUser) of
+                            {ok, Pid} ->
+                                %% User is online - deliver immediately
+                                Pid ! {message, Username, MessageBlob};
+                            not_found ->
+                                %% User is offline - store message for later retrieval
+                                cryptic_lib:store_message(ToUser, MessageBlob)
+                        end,
+
+                        {reply, #{
+                            type => <<"ratchet_message_sent">>,
+                            success => true,
+                            message_id => list_to_binary(MessageId)
+                        }};
+                    {error, Reason} ->
+                        {reply, #{
+                            type => <<"ratchet_send_error">>,
+                            success => false,
+                            error => <<"encryption_failed">>,
+                            reason => atom_to_binary(Reason, utf8)
+                        }}
+                end;
+            {error, not_found} ->
+                {reply, #{
+                    type => <<"ratchet_send_error">>,
+                    success => false,
+                    error => <<"no_ratchet_state">>,
+                    message =>
+                        <<"Initialize ratchet first with init_ratchet command">>
+                }}
+        end
+    catch
+        error:SendReason ->
+            {reply, #{
+                type => <<"ratchet_send_error">>,
+                success => false,
+                error => <<"processing_failed">>,
+                reason => atom_to_binary(SendReason, utf8)
+            }}
+    end;
 %% Handle encrypted room messages (proper E2EE implementation)
 %% messages to currently connected users.
 %%
@@ -925,6 +1124,171 @@ extract_cn_from_sequence([RDN | Rest]) ->
         {ok, CN} -> {ok, CN};
         error -> extract_cn_from_sequence(Rest)
     end.
+
+%%% Double Ratchet Message Processing %%%
+
+%% @doc Handle incoming Double Ratchet message
+%%
+%% Processes an encrypted Double Ratchet message by:
+%% 1. Loading the ratchet state for this conversation
+%% 2. Decrypting the message using the ratchet protocol
+%% 3. Updating and storing the new ratchet state
+%% 4. Forwarding the decrypted message to the recipient
+%%
+%% @param FromUser Sender username
+%% @param Message Double Ratchet message blob
+%% @param ToUser Recipient username
+%% @param State WebSocket state
+%% @returns {Replies, State} with response frames
+handle_incoming_ratchet_message(FromUser, Message, ToUser, State) ->
+    ConversationId = create_conversation_id(FromUser, ToUser),
+
+    try
+        %% Load ratchet state for this conversation
+        case get_ratchet_state(ConversationId) of
+            {ok, RatchetState} ->
+                %% Extract Double Ratchet message components
+                DhPublic = base64:decode(maps:get(dh_public, Message)),
+                DhStep = maps:get(dh_step, Message),
+                PrevChainLength = maps:get(prev_chain_length, Message),
+                MsgNumber = maps:get(msg_number, Message),
+                Ciphertext = base64:decode(maps:get(ciphertext, Message)),
+                Nonce = base64:decode(maps:get(nonce, Message)),
+
+                %% Create ratchet message structure
+                RatchetMessage = #{
+                    dh_public => DhPublic,
+                    dh_step => DhStep,
+                    prev_chain_length => PrevChainLength,
+                    msg_number => MsgNumber,
+                    ciphertext => Ciphertext,
+                    nonce => Nonce
+                },
+
+                %% Decrypt message using Double Ratchet
+                case
+                    cryptic_double_ratchet:decrypt_message(
+                        RatchetMessage, RatchetState
+                    )
+                of
+                    {ok, Plaintext, NewRatchetState} ->
+                        %% Update stored ratchet state
+                        update_ratchet_state(ConversationId, NewRatchetState),
+
+                        %% Forward decrypted message to recipient
+                        Response = #{
+                            type => <<"message_decrypted">>,
+                            from => list_to_binary(FromUser),
+                            to => list_to_binary(ToUser),
+                            message_id => maps:get(
+                                message_id, Message, <<"unknown">>
+                            ),
+                            plaintext => Plaintext,
+                            timestamp => maps:get(server_timestamp, Message)
+                        },
+                        ResponseJson = jsx:encode(Response),
+                        ?msg_out("Decrypted ratchet message from ~s: ~p", [
+                            FromUser, Plaintext
+                        ]),
+                        {[{text, ResponseJson}], State};
+                    {error, decrypt_error} ->
+                        %% Decryption failed - send error response
+                        ErrorResponse = #{
+                            type => <<"message_error">>,
+                            from => list_to_binary(FromUser),
+                            error => <<"decryption_failed">>,
+                            message_id => maps:get(
+                                message_id, Message, <<"unknown">>
+                            )
+                        },
+                        {[{text, jsx:encode(ErrorResponse)}], State}
+                end;
+            {error, not_found} ->
+                %% No ratchet state - this shouldn't happen for established conversations
+                ErrorResponse = #{
+                    type => <<"message_error">>,
+                    from => list_to_binary(FromUser),
+                    error => <<"no_ratchet_state">>,
+                    message_id => maps:get(message_id, Message, <<"unknown">>)
+                },
+                {[{text, jsx:encode(ErrorResponse)}], State}
+        end
+    catch
+        error:Reason ->
+            %% Handle any processing errors
+            ProcessingErrorResponse = #{
+                type => <<"message_error">>,
+                from => list_to_binary(FromUser),
+                error => <<"processing_failed">>,
+                reason => atom_to_binary(Reason, utf8),
+                message_id => maps:get(message_id, Message, <<"unknown">>)
+            },
+            {[{text, jsx:encode(ProcessingErrorResponse)}], State}
+    end.
+
+%%% Utility Functions %%%
+
+%% @doc Generate a unique message identifier
+%%
+%% Creates a timestamp-based unique message ID.
+%%
+%% @returns Unique message ID string
+generate_unique_message_id() ->
+    {Mega, Sec, Micro} = erlang:timestamp(),
+    lists:flatten(io_lib:format("~w_~w_~w", [Mega, Sec, Micro])).
+
+%%% Double Ratchet State Management Functions %%%
+
+%% @doc Create a unique conversation identifier for two users
+%%
+%% Creates a deterministic conversation ID that is the same regardless
+%% of which user creates it (Alice-Bob = Bob-Alice).
+%%
+%% @param User1 First user in the conversation
+%% @param User2 Second user in the conversation
+%% @returns Unique conversation ID string
+create_conversation_id(User1, User2) ->
+    %% Sort users to ensure consistent ID regardless of order
+    SortedUsers = lists:sort([User1, User2]),
+    string:join(SortedUsers, "-").
+
+%% @doc Store Double Ratchet state for a conversation
+%%
+%% Persists the ratchet state to storage for later retrieval.
+%%
+%% @param ConversationId Unique conversation identifier
+%% @param RatchetState Double Ratchet state record
+%% @returns ok | {error, Reason}
+store_ratchet_state(ConversationId, RatchetState) ->
+    %% Serialize the ratchet state
+    SerializedState = cryptic_double_ratchet:serialize_state(RatchetState),
+
+    %% Store in chat storage (extending existing storage system)
+    cryptic_chat_storage:store_ratchet_state(ConversationId, SerializedState).
+
+%% @doc Retrieve Double Ratchet state for a conversation
+%%
+%% Loads the ratchet state from storage.
+%%
+%% @param ConversationId Unique conversation identifier
+%% @returns {ok, RatchetState} | {error, not_found}
+get_ratchet_state(ConversationId) ->
+    case cryptic_chat_storage:get_ratchet_state(ConversationId) of
+        {ok, SerializedState} ->
+            {ok, cryptic_double_ratchet:deserialize_state(SerializedState)};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @doc Update Double Ratchet state for a conversation
+%%
+%% Updates the stored ratchet state after message processing.
+%%
+%% @param ConversationId Unique conversation identifier
+%% @param NewRatchetState Updated ratchet state
+%% @returns ok | {error, Reason}
+update_ratchet_state(ConversationId, NewRatchetState) ->
+    store_ratchet_state(ConversationId, NewRatchetState).
 
 %% @doc Extract Common Name from single RDN entry
 %%
