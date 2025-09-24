@@ -55,7 +55,9 @@
     aead_decrypt/4,
     rand_bytes/1,
     ed25519_sk_to_x25519_sk/1,
-    ed25519_pk_to_x25519_pk/1
+    ed25519_pk_to_x25519_pk/1,
+    kdf_derive/4,
+    hkdf_sha256/4
 ]).
 
 -on_load(init/0).
@@ -345,4 +347,91 @@ ed25519_sk_to_x25519_sk(_Ed25519SecretKey) ->
 %% @returns X25519 public key (32-byte binary)
 %% @throws {error, atom()} | {nif_not_loaded, atom()}
 ed25519_pk_to_x25519_pk(_Ed25519PublicKey) ->
+    erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc Derive key material using libsodium's KDF (Blake2b-based)
+%%
+%% High-performance key derivation using libsodium's crypto_kdf_derive_from_key
+%% function. This is optimized for symmetric key ratcheting where many keys
+%% need to be derived quickly from a master key.
+%%
+%% == Ratcheting Usage ==
+%%
+%% ```
+%% % Initialize with root key
+%% RootKey = cryptic_nif:rand_bytes(32),
+%% Context = <<"ratchet">>,
+%%
+%% % Derive chain keys with incrementing IDs
+%% ChainKey1 = cryptic_nif:kdf_derive(32, 1, Context, RootKey),
+%% ChainKey2 = cryptic_nif:kdf_derive(32, 2, Context, RootKey),
+%% MessageKey1 = cryptic_nif:kdf_derive(32, 1, <<"msg">>, ChainKey1).
+%% '''
+%%
+%% == Performance Notes ==
+%%
+%% <ul>
+%%%   <li>Faster than HKDF-SHA256 for high-frequency operations</li>
+%%%   <li>Uses Blake2b internally which is optimized for speed</li>
+%%%   <li>Perfect for Double Ratchet message key derivation</li>
+%%%   <li>Constant-time operation prevents timing attacks</li>
+%% </ul>
+%%
+%% == Security Properties ==
+%%
+%% <ul>
+%%%   <li>Cryptographically secure key separation by SubkeyId</li>
+%%%   <li>Context provides domain separation (max 8 bytes)</li>
+%%%   <li>Different SubkeyId values produce independent keys</li>
+%%%   <li>Cannot derive master key from any derived keys</li>
+%% </ul>
+%%
+%% @param Length Length of derived key in bytes (1-64)
+%% @param SubkeyId Unique identifier for this derived key (0-2^64-1)
+%% @param Context Domain separation context (max 8 bytes)
+%% @param MasterKey Master key material (32 bytes)
+%% @returns Derived key binary of specified length
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+kdf_derive(_Length, _SubkeyId, _Context, _MasterKey) ->
+    erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc HKDF-SHA256 key derivation (RFC 5869 compliant)
+%%
+%% Standard HKDF-SHA256 implementation for compatibility with existing
+%% protocols and systems that specifically require RFC 5869 HKDF.
+%% For new applications, consider kdf_derive/4 which is faster.
+%%
+%% == Protocol Compatibility ==
+%%
+%% ```
+%% % X3DH shared secret expansion
+%% SharedSecret = cryptic_nif:scalarmult(PrivKey, PubKey),
+%% Salt = <<"X3DH">>,
+%% Info = <<"encryption_key">>,
+%% EncKey = cryptic_nif:hkdf_sha256(SharedSecret, Salt, Info, 32).
+%% '''
+%%
+%% == RFC 5869 Process ==
+%%
+%% <ol>
+%%%   <li>Extract: PRK = HMAC-SHA256(Salt, IKM)</li>
+%%%   <li>Expand: OKM = HMAC-SHA256(PRK, Info || Counter)</li>
+%% </ol>
+%%
+%% == Security Notes ==
+%%
+%% <ul>
+%%%   <li>Salt should be random or at least unique per protocol run</li>
+%%%   <li>Info provides context and domain separation</li>
+%%%   <li>Same IKM+Salt+Info always produces same output (deterministic)</li>
+%%%   <li>Current implementation supports up to 32-byte output</li>
+%% </ul>
+%%
+%% @param IKM Input keying material (e.g., ECDH shared secret)
+%% @param Salt Salt value for extraction phase (can be empty <<>>)
+%% @param Info Context and application-specific information
+%% @param Length Length of output keying material (1-32 bytes)
+%% @returns Derived key material of specified length
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+hkdf_sha256(_IKM, _Salt, _Info, _Length) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).

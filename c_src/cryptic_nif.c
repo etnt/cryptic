@@ -394,6 +394,121 @@ static ERL_NIF_TERM ed25519_pk_to_x25519_pk(ErlNifEnv *env, int argc, const ERL_
 }
 
 /**
+ * @brief Derive key material using HKDF with Blake2b
+ *
+ * Performs key derivation using libsodium's crypto_kdf_derive_from_key function,
+ * which implements HKDF with Blake2b as the underlying hash function. This is
+ * optimized for high-performance key ratcheting operations.
+ *
+ * @param env Erlang NIF environment
+ * @param argc Number of arguments (must be 4)
+ * @param argv Array containing [Length, SubkeyId, Context, MasterKey]
+ * @return Derived key binary or atom 'error'/'badarg'
+ *
+ * @note SubkeyId should be unique for each derived key from the same master key.
+ *       Context provides domain separation (max 8 bytes).
+ *       MasterKey must be exactly 32 bytes.
+ * @security Uses libsodium's constant-time implementation for side-channel resistance.
+ */
+static ERL_NIF_TERM kdf_derive(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    int length;
+    unsigned long subkey_id;
+    ErlNifBinary context, master_key;
+
+    if (!enif_get_int(env, argv[0], &length) ||
+        !enif_get_ulong(env, argv[1], &subkey_id) ||
+        !enif_inspect_binary(env, argv[2], &context) ||
+        !enif_inspect_binary(env, argv[3], &master_key) ||
+        length < 1 || length > crypto_kdf_BYTES_MAX ||
+        context.size > crypto_kdf_CONTEXTBYTES ||
+        master_key.size != crypto_kdf_KEYBYTES)
+    {
+        return enif_make_badarg(env);
+    }
+
+    // Pad context to required length if necessary
+    unsigned char padded_context[crypto_kdf_CONTEXTBYTES];
+    memset(padded_context, 0, crypto_kdf_CONTEXTBYTES);
+    memcpy(padded_context, context.data, context.size);
+
+    ERL_NIF_TERM result;
+    unsigned char *derived_key = enif_make_new_binary(env, length, &result);
+
+    if (crypto_kdf_derive_from_key(derived_key, length, subkey_id,
+                                   (const char *)padded_context, master_key.data) != 0)
+    {
+        return enif_make_atom(env, "error");
+    }
+
+    return result;
+}
+
+/**
+ * @brief Perform HKDF-SHA256 key derivation
+ *
+ * Implements RFC 5869 HKDF using SHA256 for compatibility with existing
+ * protocols and systems that specifically require HKDF-SHA256.
+ *
+ * @param env Erlang NIF environment
+ * @param argc Number of arguments (must be 4)
+ * @param argv Array containing [IKM, Salt, Info, Length]
+ * @return Derived key binary or atom 'error'/'badarg'
+ *
+ * @note This provides compatibility with standard HKDF-SHA256 implementations.
+ *       For new protocols, consider using kdf_derive/4 which is faster.
+ * @security Uses constant-time operations to prevent timing attacks.
+ */
+static ERL_NIF_TERM hkdf_sha256(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    ErlNifBinary ikm, salt, info;
+    int length;
+
+    if (!enif_inspect_binary(env, argv[0], &ikm) ||
+        !enif_inspect_binary(env, argv[1], &salt) ||
+        !enif_inspect_binary(env, argv[2], &info) ||
+        !enif_get_int(env, argv[3], &length) ||
+        length < 1 || length > 255 * 32) // HKDF-SHA256 limit
+    {
+        return enif_make_badarg(env);
+    }
+
+    // HKDF Extract: PRK = HMAC(salt, ikm)
+    unsigned char prk[32]; // SHA256 output size
+    crypto_auth_hmacsha256_state extract_state;
+
+    crypto_auth_hmacsha256_init(&extract_state, salt.data, salt.size);
+    crypto_auth_hmacsha256_update(&extract_state, ikm.data, ikm.size);
+    crypto_auth_hmacsha256_final(&extract_state, prk);
+
+    // HKDF Expand: OKM = HMAC(prk, info || 0x01)
+    // For simplicity, this implements single iteration (length <= 32)
+    if (length > 32)
+    {
+        return enif_make_badarg(env); // Multi-iteration not implemented
+    }
+
+    unsigned char okm[32];
+    crypto_auth_hmacsha256_state expand_state;
+    unsigned char counter = 1;
+
+    crypto_auth_hmacsha256_init(&expand_state, prk, sizeof(prk));
+    crypto_auth_hmacsha256_update(&expand_state, info.data, info.size);
+    crypto_auth_hmacsha256_update(&expand_state, &counter, 1);
+    crypto_auth_hmacsha256_final(&expand_state, okm);
+
+    ERL_NIF_TERM result;
+    unsigned char *result_data = enif_make_new_binary(env, length, &result);
+    memcpy(result_data, okm, length);
+
+    // Clear sensitive data
+    sodium_memzero(prk, sizeof(prk));
+    sodium_memzero(okm, sizeof(okm));
+
+    return result;
+}
+
+/**
  * @brief NIF function export table
  *
  * Defines the mapping between Erlang function names and C implementations.
@@ -406,7 +521,9 @@ static ErlNifFunc nif_funcs[] = {
     {"aead_decrypt", 4, aead_decrypt, 0},
     {"rand_bytes", 1, rand_bytes, 0},
     {"ed25519_sk_to_x25519_sk", 1, ed25519_sk_to_x25519_sk, 0},
-    {"ed25519_pk_to_x25519_pk", 1, ed25519_pk_to_x25519_pk, 0}};
+    {"ed25519_pk_to_x25519_pk", 1, ed25519_pk_to_x25519_pk, 0},
+    {"kdf_derive", 4, kdf_derive, 0},
+    {"hkdf_sha256", 4, hkdf_sha256, 0}};
 
 /**
  * @brief NIF module initialization macro
