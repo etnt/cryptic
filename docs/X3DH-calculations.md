@@ -1,4 +1,4 @@
-# X3DH Keys, Notation and Calculations
+# X3DH Keys, Notation, Calculations and Double-Ratchet
 
 X3DH is not “just more Diffie–Hellman”—it is a protocol for asynchronous,
 authenticated key exchange with strong forward secrecy, designed to work
@@ -35,6 +35,10 @@ It will show:
 All keys are **Curve25519 (Montgomery curve) public/private pairs**.
 
 The Diffie–Hellman function is **ECDH(priv, pub) → 32-byte shared secret**.
+
+*ECDH* stands for: *Elliptic-Curve Diffie–Hellman*
+
+*ephemeral* simply means: *temporary and short-lived*.
 
 ### Mathematical meaning
 
@@ -134,3 +138,90 @@ Alice computes the four (or three) X25519 operations:
   DH4 = ECDH(ek_A_priv, OPK_B_pub)
 ```
 
+**Key derivation** is done by concatenating the DH calculations and
+use that as input to the *HMAC-based Key Derivation Function* (**HKDF**)
+together with some Salt and a info label string. This will produce the
+Shared-Key (SK).
+
+```
+SK_input = DH1 || DH2 || DH3 || DH4
+SK = HKDF( SK_input, Salt, Info)
+```
+
+Both clients are doing the same calculations and obtains exactly the
+same SK, which then s used to decrypt the first message and start a
+Double Ratchet session.
+
+**Summary table**:
+
+| Step     |	Alice computes            | Bob computes               |
+|----------|----------------------------|----------------------------|
+| DH1      | ECDH(ik_A_priv, SPK_B_pub) | ECDH(spk_B_priv, IK_A_pub) |
+| DH2      | ECDH(ek_A_priv, IK_B_pub)	| ECDH(ik_B_priv, EK_A_pub)  |
+| DH3	     | ECDH(ek_A_priv, SPK_B_pub) | ECDH(spk_B_priv, EK_A_pub) |
+| DH4      | ECDH(ek_A_priv, OPK_B_pub) | ECDH(opk_B_priv, EK_A_pub) |
+| SK_input | concat(DH1,DH2,DH3,DH4)    | concat(DH1,DH2,DH3,DH4)    |
+| HKDF  	 | HKDF(SK_input, Salt, Info) | HKDF(SK_input, Salt, Info) |
+
+## Double-Ratchet
+
+The Double Ratchet algorithm takes that initial shared secret and turns it
+into a continually evolving sequence of keys—one per message.
+
+It’s called Double because there are two types of ratchets:
+  1. **DH ratchet** – occasional fresh Diffie–Hellman steps when a new
+     ephemeral key from the peer arrives,
+  2. **Symmetric-key ratchet** – per-message key derivation using a hash chain.
+
+These combine to produce new message keys continuously, even if the
+original X3DH key was long ago compromised.
+
+So, X3DH just gives you the first root key so you can start the Double Ratchet.
+After that, the Double Ratchet itself keeps producing fresh message keys.
+
+```
+# CK0 is obtained from the initial X3DH calculations
+(CK1, MK1) = HKDF(CK0, "label")
+# Encrypt M1 with MK1
+(CK2, MK2) = HKDF(CK1, "label")
+# Encrypt M2 with MK2
+...etc...
+```
+
+So a new **Symmetric-key** is generated for each message sent and, typically,
+a new ephemeral DH-key is introduced when a response is received.
+
+Example (MK is the Symmetric-Key, EpK is the ephemeral DH key):
+
+```
+Alice -> Bob: encrypt(Msg1, MK1, EpK1)
+Alice -> Bob: encrypt(Msg2, MK2, EpK1)
+Alice -> Bob: encrypt(Msg3, MK3, EpK1)
+Alice <- Bob: ...getting a response...
+Alice -> Bob: encrypt(Msg4, MK4, EpK2)
+...etc...
+```
+
+In a Double Ratchet conversation it’s perfectly normal for some messages to
+be dropped or arrive out of order. The protocol was designed to cope with that.
+
+Each party keeps two independent hash chains of keys:
+
+| Chain           |	Purpose                                         |
+|-----------------|-------------------------------------------------|
+| Sending chain	  | Derives one-time keys for messages you send.    |
+| Receiving chain	| Derives one-time keys for messages you receive. |
+
+Only the receiving chain is affected if messages get lost.
+
+If you expect message #7 but only #9 arrives, you don’t know which message
+keys #7 and #8 would have used yet.
+
+To avoid losing the ability to decrypt late messages, the receiver:
+  1. Derives the intermediate message keys (#7, #8) in order as soon as
+     it notices a gap.
+  2. Stores those keys (encrypted in memory) in a “skipped-message-key” cache.
+  3. When the missing messages eventually show up, it looks up their key in
+     the cache and decrypts.
+
+These saved keys are discarded as soon as they are used, or if they get too old.
