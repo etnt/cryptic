@@ -365,7 +365,7 @@ handle_passphrase_input(Input, UIState) ->
             %% Cancel passphrase input
             NewUIState = UIState#ui_state{
                 passphrase_mode = false,
-                passphrase_config_dir = undefined,
+                cryptic_dir = undefined,
                 current_input = "",
                 cursor_position = 0
             },
@@ -386,12 +386,12 @@ handle_passphrase_input(Input, UIState) ->
         {key, 10} ->
             %% Enter pressed - process passphrase
             Passphrase = list_to_binary(UIState#ui_state.current_input),
-            ConfigDir = UIState#ui_state.passphrase_config_dir,
+            ConfigDir = UIState#ui_state.cryptic_dir,
 
             %% Exit passphrase mode
             NormalUIState = UIState#ui_state{
                 passphrase_mode = false,
-                passphrase_config_dir = undefined,
+                cryptic_dir = undefined,
                 current_input = "",
                 cursor_position = 0
             },
@@ -812,7 +812,7 @@ process_command("connect", UIState) ->
                     %% Switch to passphrase input mode
                     PassphraseState = NewState#ui_state{
                         passphrase_mode = true,
-                        passphrase_config_dir = ConfigDir,
+                        cryptic_dir = ConfigDir,
                         current_input = "",
                         cursor_position = 0
                     },

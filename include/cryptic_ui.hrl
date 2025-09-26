@@ -81,8 +81,8 @@
 
     % Whether in passphrase input mode
     passphrase_mode = false :: boolean(),
-    % Config directory for key loading
-    passphrase_config_dir :: string() | undefined,
+    % Local directory for key loading, etc
+    cryptic_dir :: string() | undefined,
 
     %% Emacs-style editing
 

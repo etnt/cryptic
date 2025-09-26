@@ -20,7 +20,7 @@ echo "  Event Handlers: $CRYPTIC_EVENT_HANDLERS"
 echo ""
 
 echo "🚀 Starting Cryptic application with WebSocket mTLS..."
-erl -pa _build/default/lib/*/ebin -eval "
+erl -sname server@localhost -pa _build/default/lib/*/ebin -eval "
 application:ensure_all_started(cryptic),
 timer:sleep(1000),
 inet:i(),

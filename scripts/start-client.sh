@@ -8,22 +8,22 @@ cd "$(dirname "$0")/.."
 USERNAME="${1:-alice}"
 
 # Create user-specific config directory
-CRYPTIC_CONFIG_DIR="$HOME/.cryptic/$USERNAME"
-if [ ! -d "$CRYPTIC_CONFIG_DIR" ]; then
-    echo "📁 Creating config directory: $CRYPTIC_CONFIG_DIR"
-    mkdir -p "$CRYPTIC_CONFIG_DIR"
-    chmod 700 "$CRYPTIC_CONFIG_DIR"
+CRYPTIC_DIR="$HOME/.cryptic/$USERNAME"
+if [ ! -d "$CRYPTIC_DIR" ]; then
+    echo "📁 Creating Cryptic directory: $CRYPTIC_DIR"
+    mkdir -p "$CRYPTIC_DIR"
+    chmod 700 "$CRYPTIC_DIR"
 else
-    echo "� Using existing config directory: $CRYPTIC_CONFIG_DIR"
+    echo "� Using existing Cryptic directory: $CRYPTIC_DIR"
 fi
 
 # Export the config directory environment variable
-export CRYPTIC_CONFIG_DIR
+export CRYPTIC_DIR
 
 echo "�🚀 Starting Cryptic WebSocket mTLS Client UI..."
 echo "   Username: $USERNAME"
 echo "   Server: ${SERVER:-localhost}"
-echo "   Config Dir: $CRYPTIC_CONFIG_DIR"
+echo "   Config Dir: $CRYPTIC_DIR"
 echo ""
 
 # Set default certificate paths if not already set
@@ -55,6 +55,6 @@ if [ ! -f "$CRYPTIC_CLIENT_KEY" ]; then
 fi
 
 echo "🔌 Starting Cryptic WebSocket UI..."
-erl -pa _build/default/lib/*/ebin -eval "
+erl -sname ${USERNAME}@localhost -pa _build/default/lib/*/ebin -eval "
 cryptic_ws_ui:start(\"$USERNAME\", \"localhost\").
 " -noinput

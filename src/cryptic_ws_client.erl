@@ -140,7 +140,7 @@ start_link(Username, ServerHost) ->
 %% @param Config Configuration map with optional overrides
 %% @returns `{ok, Pid}' on success, `{error, Reason}' on failure
 start_link(Username, ServerHost, Config) ->
-    gen_server:start_link(?MODULE, {Username, ServerHost, Config}, []).
+    gen_server:start_link(?MODULE, {self(), Username, ServerHost, Config}, []).
 
 %% @doc Send a command to the WebSocket server.
 %%
@@ -211,7 +211,7 @@ set_ui_pid(Pid, UiPid) ->
 %%
 %% @param {Username, ServerHost, Config} Initialization parameters
 %% @returns `{ok, State, {continue, connect}}' on success, `{stop, Reason}' on error
-init({Username, ServerHost, Config}) ->
+init({UIPid, Username, ServerHost, Config}) ->
     %% Get certificate paths from environment variables or config
     CertFile =
         case os:getenv("CRYPTIC_CLIENT_CERT") of
@@ -245,6 +245,7 @@ init({Username, ServerHost, Config}) ->
                     "Set CRYPTIC_CA_CERT environment variable or provide ca_file in config"}};
         {Cert, Key, CA} ->
             State = #state{
+                ui_pid = UIPid,
                 username = Username,
                 server_host = ServerHost,
                 server_port = maps:get(port, Config, 8443),
@@ -278,7 +279,7 @@ handle_continue(connect, State) ->
 %% @doc Handle synchronous calls to the gen_server.
 %%
 %% Processes various client operations including command sending,
-%% UI PID registration, and shutdown requests.
+%% UI PID registration, and shutdown requests<.
 %%
 %% @param Request The call request
 %% @param From The caller's reference

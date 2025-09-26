@@ -123,8 +123,8 @@
 ]).
 
 %% Default storage path
--define(DEFAULT_DB_PATH, "cryptic_chat.db").
--define(BACKUP_DIR, "backups").
+-define(DEFAULT_DB_PATH, "cryptic_db").
+-define(BACKUP_DIR, "cryptic_backups").
 
 %%%===================================================================
 %%% Database Initialization
@@ -138,7 +138,13 @@
 %% @returns `ok' on success, `{error, term()}' on failure
 -spec init_storage() -> ok | {error, term()}.
 init_storage() ->
-    init_storage(?DEFAULT_DB_PATH).
+    DBdir = case os:getenv("CRYPTIC_DIR") of
+                false ->
+                    filename:join([".", ?DEFAULT_DB_PATH]);
+                CrypticDir ->
+                    filename:join([CrypticDir, ?DEFAULT_DB_PATH])
+            end,
+    init_storage(DBdir).
 
 %% @doc Initialize the storage system with custom database path.
 %%
@@ -163,9 +169,8 @@ init_storage(DbPath) ->
 
         %% For now, use ETS as a simple in-memory storage
         %% TODO: Replace with actual SQLite when esqlite3 is available
-        case ets:info(cryptic_messages) of
+        case ets:info(cryptic_contacts) of
             undefined ->
-                ets:new(cryptic_messages, [named_table, ordered_set, public]),
                 ets:new(cryptic_contacts, [named_table, set, public]),
                 ets:new(cryptic_profiles, [named_table, set, public]),
                 ets:new(cryptic_outbox, [named_table, ordered_set, public]),
