@@ -1124,16 +1124,6 @@ handle_incoming_ratchet_message(FromUser, Message, ToUser, State) ->
             {[{text, jsx:encode(ProcessingErrorResponse)}], State}
     end.
 
-%%% Utility Functions %%%
-
-%% @doc Generate a unique message identifier
-%%
-%% Creates a timestamp-based unique message ID.
-%%
-%% @returns Unique message ID string
-
-
-%%% Double Ratchet State Management Functions %%%
 
 %% @doc Create a unique conversation identifier for two users
 %%

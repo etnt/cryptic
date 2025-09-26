@@ -379,23 +379,6 @@ kdf_derive_chain_key(RootKey, Context) ->
 %%% Message Processing Functions
 %%% ============================================================================
 
-%% @doc Encrypt an outgoing message using the sending chain
-%%
-%% This is the main function for encrypting messages to send. It uses only
-%% the sending chain and leaves the receiving chain completely unchanged.
-%% The function performs the following steps:
-%%
-%% 1. Derive message key from current sending chain
-%% 2. Expand message key into encryption components
-%% 3. Encrypt the plaintext using ChaCha20-Poly1305
-%% 4. Create Double Ratchet message header
-%% 5. Advance sending chain for next message
-%% 6. Securely clean up temporary key material
-%%
-%% @param Plaintext The message to encrypt (binary)
-%% @param State Current ratchet state
-%% @returns {Message, NewState} where Message can be transmitted
-
 %% @doc Activate sending chain for a receiver
 %%
 %% When a receiver wants to send their first message, they need to activate

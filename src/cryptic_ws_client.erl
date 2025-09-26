@@ -279,7 +279,7 @@ handle_continue(connect, State) ->
 %% @doc Handle synchronous calls to the gen_server.
 %%
 %% Processes various client operations including command sending,
-%% UI PID registration, and shutdown requests<.
+%% UI PID registration, and shutdown requests.
 %%
 %% @param Request The call request
 %% @param From The caller's reference
