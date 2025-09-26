@@ -35,6 +35,7 @@
     % Public API
     init_sender/2,
     init_receiver/2,
+    activate_sending_chain/1,
 
     % Message processing
     encrypt_message/2,
@@ -45,6 +46,7 @@
     advance_sending_chain/2,
     advance_receiving_chain/2,
     kdf_mk/1,
+    kdf_derive_chain_key/2,
 
     % State management
     serialize_state/1,
@@ -52,7 +54,10 @@
 
     % Utilities and debugging
     get_state_info/1,
-    cleanup_expired_keys/1
+    cleanup_expired_keys/1,
+    
+    % Test helpers (for simulating X3DH handshake)
+    set_remote_dh_key/2
 ]).
 
 -include("cryptic.hrl").
@@ -188,9 +193,9 @@ init_sender(RootKey, {DHPublic, DHPrivate}) when
     byte_size(DHPublic) =:= 32,
     byte_size(DHPrivate) =:= 32
 ->
-    ?dbg("Initializing Double Ratchet sender with DH keypair.~n", []),
-    ?dbg("RootKey size: ~p bytes, DHPublic: ~p bytes, DHPrivate: ~p bytes~n",
-         [byte_size(RootKey), byte_size(DHPublic), byte_size(DHPrivate)]),
+    % ?dbg("Initializing Double Ratchet sender with DH keypair.~n", []),
+    % ?dbg("RootKey size: ~p bytes, DHPublic: ~p bytes, DHPrivate: ~p bytes~n",
+    %      [byte_size(RootKey), byte_size(DHPublic), byte_size(DHPrivate)]),
 
     Now = erlang:system_time(millisecond),
 
@@ -199,13 +204,12 @@ init_sender(RootKey, {DHPublic, DHPrivate}) when
         root_key = RootKey,
 
         % Derive initial sending chain directly from X3DH root key
-        send_chain_key = kdf_derive_chain_key(RootKey, <<"send">>),
+        send_chain_key = kdf_derive_chain_key(RootKey, <<"init">>),
         send_msg_number = 0,
 
-        % Receiving chain starts empty
-
-        % Will be set on first DH ratchet
-        recv_chain_key = <<0:256>>,
+        % Receiving chain must be set up to receive Bob's reply
+        % Bob will use "resp" context for his sending chain
+        recv_chain_key = kdf_derive_chain_key(RootKey, <<"resp">>),
         recv_msg_number = 0,
         prev_recv_chain_length = 0,
 
@@ -225,18 +229,18 @@ init_sender(RootKey, {DHPublic, DHPrivate}) when
 
         % Chain state
         sending_chain_active = true,
-        % Will be activated on first received message
-        receiving_chain_active = false,
+        % Activate receiving chain to receive Bob's replies
+        receiving_chain_active = true,
 
         % Metadata
         created_at = Now,
         last_updated = Now
     },
 
-    ?dbg("Double Ratchet sender initialized - sending chain active, receiving chain inactive.~n", []),
-    ?dbg("Initial send_chain_key derived, DH ratchet step: ~p~n", [0]),
+    % ?dbg("Double Ratchet sender initialized - sending chain active, receiving chain inactive.~n", []),
+    % ?dbg("Initial send_chain_key derived, DH ratchet step: ~p~n", [0]),
 
-    State.
+    {ok, State}.
 
 %% @doc Initialize receiver side of Double Ratchet (after X3DH key agreement)
 %%
@@ -253,9 +257,9 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
     byte_size(DHPublic) =:= 32,
     byte_size(DHPrivate) =:= 32
 ->
-    ?dbg("Initializing Double Ratchet receiver with DH keypair.~n", []),
-    ?dbg("RootKey size: ~p bytes, DHPublic: ~p bytes, DHPrivate: ~p bytes.~n", 
-         [byte_size(RootKey), byte_size(DHPublic), byte_size(DHPrivate)]),
+    % ?dbg("Initializing Double Ratchet receiver with DH keypair.~n", []),
+    % ?dbg("RootKey size: ~p bytes, DHPublic: ~p bytes, DHPrivate: ~p bytes.~n", 
+    %      [byte_size(RootKey), byte_size(DHPublic), byte_size(DHPrivate)]),
 
     Now = erlang:system_time(millisecond),
 
@@ -268,7 +272,7 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
         send_msg_number = 0,
 
         % Derive initial receiving chain to match Alice's sending chain
-        recv_chain_key = kdf_derive_chain_key(RootKey, <<"send">>),
+        recv_chain_key = kdf_derive_chain_key(RootKey, <<"init">>),
         recv_msg_number = 0,
         prev_recv_chain_length = 0,
 
@@ -297,10 +301,10 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
         last_updated = Now
     },
 
-    ?dbg("Double Ratchet receiver initialized - receiving chain active, sending chain inactive.~n", []),
-    ?dbg("Initial recv_chain_key derived to match sender's send_chain, DH ratchet step: ~p~n", [0]),
+    % ?dbg("Double Ratchet receiver initialized - receiving chain active, sending chain inactive.~n", []),
+    % ?dbg("Initial recv_chain_key derived to match sender's send_chain, DH ratchet step: ~p~n", [0]),
 
-    State.
+    {ok, State}.
 
 %%% ============================================================================
 %%% Key Derivation Functions (High-Performance Native NIFs)
@@ -321,9 +325,11 @@ kdf_rk(RootKey, DhOutput) ->
     MixedKey = crypto:exor(RootKey, DhOutput),
 
     NewRootKey = cryptic_nif:kdf_derive(32, 0, <<"root">>, MixedKey),
-    SendChainKey = cryptic_nif:kdf_derive(32, 1, <<"send">>, MixedKey),
-    RecvChainKey = cryptic_nif:kdf_derive(32, 2, <<"recv">>, MixedKey),
-    {NewRootKey, SendChainKey, RecvChainKey}.
+    % Derive separate chain keys for initiator and responder directions
+    % This maintains proper separation between Alice's and Bob's chains
+    InitChainKey = cryptic_nif:kdf_derive(32, 1, <<"init">>, MixedKey),
+    RespChainKey = cryptic_nif:kdf_derive(32, 2, <<"resp">>, MixedKey),
+    {NewRootKey, InitChainKey, RespChainKey}.
 
 %% @doc Advance sending chain key and derive message key for outgoing message
 %%
@@ -389,28 +395,99 @@ kdf_derive_chain_key(RootKey, Context) ->
 %% @param Plaintext The message to encrypt (binary)
 %% @param State Current ratchet state
 %% @returns {Message, NewState} where Message can be transmitted
+
+%% @doc Activate sending chain for a receiver
+%%
+%% When a receiver wants to send their first message, they need to activate
+%% their sending chain. This function performs the necessary DH ratchet step:
+%% 1. Generates a new DH keypair for the receiver
+%% 2. Performs a self-ratchet to activate the sending chain
+%% 3. Updates the state to allow message encryption
+%%
+%% This is called automatically when encrypt_message fails with sending_chain_not_active.
+%%
+%% @param State Current ratchet state (receiver with inactive sending chain)
+%% @returns {ok, ActivatedState} or {error, Reason}
+activate_sending_chain(State = #ratchet_state{}) ->
+    % ?dbg("Activating sending chain for receiver", []),
+    
+    case State#ratchet_state.sending_chain_active of
+        true ->
+            % Already active
+            {ok, State};
+        false ->
+            % Check if we have remote DH key to perform proper DH ratchet
+            case State#ratchet_state.dh_remote of
+                undefined ->
+                    % No remote DH key yet - cannot activate sending chain
+                    {error, no_remote_dh_key};
+                _RemoteDHPub ->
+                    % Bob's first reply should NOT perform a DH ratchet step
+                    % The DH ratchet happens when Alice wants to send her second message
+                    % For now, Bob just uses his X3DH-derived sending chain
+                    
+                    CurrentRootKey = State#ratchet_state.root_key,
+                    
+                    % Derive Bob's sending chain from the same X3DH root key (context "resp")
+                    % This ensures Bob's sending chain matches what Alice expects for decryption
+                    NewSendChainKey = kdf_derive_chain_key(CurrentRootKey, <<"resp">>),
+                    
+                    % Update state with activated sending chain (no DH ratchet yet)
+                    Now = erlang:system_time(millisecond),
+                    ActivatedState = State#ratchet_state{
+                        % Keep same DH keypair for now - no ratchet step yet
+                        send_chain_key = NewSendChainKey,
+                        send_msg_number = 0,
+                        sending_chain_active = true,
+                        % Don't increment dh_ratchet_step - that happens when Alice receives this
+                        last_updated = Now
+                    },
+                    
+                    % ?dbg("Sending chain activated - DH step: ~p, can now encrypt messages", 
+                    %      [ActivatedState#ratchet_state.dh_ratchet_step]),
+                    {ok, ActivatedState}
+            end
+    end.
+
 encrypt_message(Plaintext, State = #ratchet_state{}) ->
-    ?dbg("encrypt_message - plaintext size: ~p bytes, sending_chain_active: ~p~n",
-         [byte_size(Plaintext), State#ratchet_state.sending_chain_active]),
+    % ?dbg("encrypt_message - plaintext size: ~p bytes, sending_chain_active: ~p~n",
+    %      [byte_size(Plaintext), State#ratchet_state.sending_chain_active]),
 
     % Ensure we have an active sending chain
     case State#ratchet_state.sending_chain_active of
         false ->
-            {error, sending_chain_not_active};
+            % Try to activate sending chain automatically
+            case activate_sending_chain(State) of
+                {ok, ActivatedState} ->
+                    % ?dbg("Sending chain activated automatically, encrypting message", []),
+                    encrypt_message_impl(Plaintext, ActivatedState);
+                {error, ActivateErr} ->
+                    {error, {sending_chain_activation_failed, ActivateErr}}
+            end;
         true ->
             encrypt_message_impl(Plaintext, State)
     end.
 
 %% @doc Internal implementation of message encryption
 encrypt_message_impl(Plaintext, State) ->
-    % 1. Use the independent sending chain for outgoing messages
-    CurrentSendingChain = State#ratchet_state.send_chain_key,
-    CurrentMsgNum = State#ratchet_state.send_msg_number,
+    % 1. Check if we need to perform DH ratchet step before sending
+    % This happens when we're starting to send after receiving messages (direction change)
+    StateAfterRatchet = 
+        case should_perform_dh_ratchet_on_send(State) of
+            true ->
+                perform_dh_ratchet_on_send(State);
+            false ->
+                State
+        end,
+    
+    % 2. Use the (possibly updated) sending chain for outgoing messages
+    CurrentSendingChain = StateAfterRatchet#ratchet_state.send_chain_key,
+    CurrentMsgNum = StateAfterRatchet#ratchet_state.send_msg_number,
 
-    ?dbg("encrypt_message_impl - current msg_number: ~p, DH ratchet step: ~p~n",
-         [CurrentMsgNum, State#ratchet_state.dh_ratchet_step]),
+    % ?dbg("encrypt_message_impl - current msg_number: ~p, DH ratchet step: ~p~n",
+    %      [CurrentMsgNum, StateAfterRatchet#ratchet_state.dh_ratchet_step]),
 
-    % 2. Derive message key from sending chain (does NOT affect receiving chain)
+    % 3. Derive message key from sending chain (does NOT affect receiving chain)
     {NewSendChainKey, MessageKey} = advance_sending_chain(
         CurrentSendingChain, CurrentMsgNum
     ),
@@ -423,14 +500,14 @@ encrypt_message_impl(Plaintext, State) ->
     {CipherText, Nonce} = cryptic_nif:aead_encrypt(Plaintext, EncKey, <<>>),
 
     % 5. Create message with Double Ratchet header
-    {DHPublic, _DHPrivate} = State#ratchet_state.dh_self,
+    {DHPublic, _DHPrivate} = StateAfterRatchet#ratchet_state.dh_self,
     Message = #{
         % DH ratchet information
         dh_public => DHPublic,
-        dh_step => State#ratchet_state.dh_ratchet_step,
+        dh_step => StateAfterRatchet#ratchet_state.dh_ratchet_step,
 
         % Sending chain information
-        prev_chain_length => State#ratchet_state.prev_recv_chain_length,
+        prev_chain_length => StateAfterRatchet#ratchet_state.prev_recv_chain_length,
         msg_number => CurrentMsgNum,
 
         % Encrypted payload
@@ -440,10 +517,10 @@ encrypt_message_impl(Plaintext, State) ->
 
     % 6. Update ONLY sending chain state (receiving chain unchanged)
     Now = erlang:system_time(millisecond),
-    NewState = State#ratchet_state{
+    NewState = StateAfterRatchet#ratchet_state{
         send_chain_key = NewSendChainKey,
         send_msg_number = CurrentMsgNum + 1,
-        % Note: receiving chain and DH keys stay the same
+        % Note: receiving chain stays the same, DH keys may have been updated by ratchet
         sending_chain_active = true,
         last_updated = Now
     },
@@ -452,8 +529,8 @@ encrypt_message_impl(Plaintext, State) ->
     % Note: In a real implementation, we'd use sodium_memzero or similar
     % For now, we rely on Erlang's garbage collection
 
-    ?dbg("encrypt_message_impl complete - new msg_number: ~p, ciphertext size: ~p bytes~n",
-         [CurrentMsgNum + 1, byte_size(CipherText)]),
+    % ?dbg("encrypt_message_impl complete - new msg_number: ~p, ciphertext size: ~p bytes~n",
+    %      [CurrentMsgNum + 1, byte_size(CipherText)]),
 
     {ok, Message, NewState}.
 
@@ -467,8 +544,8 @@ encrypt_message_impl(Plaintext, State) ->
 %% @param State Current ratchet state
 %% @returns {ok, Plaintext, NewState} or {error, Reason}
 decrypt_message(Message, State = #ratchet_state{}) ->
-    ?dbg("decrypt_message - receiving_chain_active: ~p, current recv_msg_number: ~p~n",
-         [State#ratchet_state.receiving_chain_active, State#ratchet_state.recv_msg_number]),
+    % ?dbg("decrypt_message - receiving_chain_active: ~p, current recv_msg_number: ~p~n",
+    %      [State#ratchet_state.receiving_chain_active, State#ratchet_state.recv_msg_number]),
 
     try
         decrypt_message_impl(Message, State)
@@ -485,17 +562,15 @@ decrypt_message_impl(Message, State) ->
     IncomingDHStep = maps:get(dh_step, Message),
     IncomingMsgNum = maps:get(msg_number, Message),
 
-    ?dbg("decrypt_message_impl - incoming msg_number: ~p, DH step: ~p, remote DH: ~p~n",
-         [IncomingMsgNum, IncomingDHStep,
-          case State#ratchet_state.dh_remote of undefined -> undefined; _ -> "set" end]),
+    % ?dbg("decrypt_message_impl - incoming msg_number: ~p, DH step: ~p, remote DH: ~p~n",
+    %      [IncomingMsgNum, IncomingDHStep,
+    %       case State#ratchet_state.dh_remote of undefined -> undefined; _ -> "set" end]),
 
     % 1. Determine if DH-ratchet step is needed
     DHRatchetNeeded =
         case State#ratchet_state.dh_remote of
-            % First message received
-
-            % No DH ratchet needed for X3DH-derived chains
-            undefined -> false;
+            % First message received - check DH step to determine if ratchet needed
+            undefined -> IncomingDHStep > State#ratchet_state.dh_ratchet_step;
             RemoteDH -> IncomingDHPub =/= RemoteDH
         end,
 
@@ -677,12 +752,18 @@ perform_dh_ratchet_step(Message, State) ->
     {_OwnDHPub, OwnDHPriv} = State#ratchet_state.dh_self,
 
     % 2. Compute new DH shared secret
+    % CRITICAL: This must match exactly what the sender used in activate_sending_chain
+    % The sender used: scalarmult(OldDHPriv, RemoteDHPub)
+    % So Alice (receiver) should use: scalarmult(AliceDHPriv, BobNewDHPub)
     DHOutput = cryptic_nif:scalarmult(OwnDHPriv, NewRemoteDHPub),
 
     % 3. Derive new root key and chain keys using high-performance KDF
-    {NewRootKey, NewSendChainKey, NewRecvChainKey} = kdf_rk(
+    {NewRootKey, InitChainKey, RespChainKey} = kdf_rk(
         State#ratchet_state.root_key, DHOutput
     ),
+    % Alice uses init chain for future sending, resp chain for receiving Bob's messages
+    NewSendChainKey = InitChainKey,
+    NewRecvChainKey = RespChainKey,
 
     % 4. Generate new DH keypair for future sending
     {NewOwnDHPub, NewOwnDHPriv} = cryptic_nif:gen_keypair(),
@@ -906,3 +987,92 @@ process_delayed_message(Message, State) ->
                     {ok, Plaintext, NewState}
             end
     end.
+
+%%% ============================================================================
+%%% DH Ratchet on Send Functions
+%%% ============================================================================
+
+%% @doc Determine if we should perform a DH ratchet step before sending
+%%
+%% According to the Double Ratchet protocol, we should perform a DH ratchet when:
+%% 1. We have received messages from the other party (recv_msg_number > 0)
+%% 2. AND we're about to send our first message in response (send_msg_number = 0)
+%% 3. AND we have the remote party's DH key
+%% 
+%% This represents a "direction change" - we were receiving, now we start sending.
+should_perform_dh_ratchet_on_send(State) ->
+    HasReceivedMessages = State#ratchet_state.recv_msg_number > 0,
+    FirstSendInDirection = State#ratchet_state.send_msg_number == 0,
+    HasRemoteDH = State#ratchet_state.dh_remote =/= undefined,
+    
+    HasReceivedMessages andalso FirstSendInDirection andalso HasRemoteDH.
+
+%% @doc Perform DH ratchet step before sending (generate new ephemeral key)
+%%
+%% This function implements the core DH ratchet operation when sending:
+%% 1. Generate a new ephemeral DH keypair 
+%% 2. Compute shared secret with remote party's current DH key
+%% 3. Derive new root key and sending chain key
+%% 4. Update state with new DH step
+%%
+%% This ensures forward secrecy and break-in recovery properties.
+perform_dh_ratchet_on_send(State) ->
+    % 1. Generate new ephemeral DH keypair for this ratchet step
+    {NewDHPub, NewDHPriv} = cryptic_nif:gen_keypair(),
+    
+    % 2. Get current remote DH key and our old private key
+    RemoteDHPub = State#ratchet_state.dh_remote,
+    
+    % 3. Compute DH shared secret using our NEW private key and their current public key
+    DHOutput = cryptic_nif:scalarmult(NewDHPriv, RemoteDHPub),
+    
+    % 4. Perform root key derivation (DH ratchet)
+    {NewRootKey, _InitChainKey, RespChainKey} = kdf_rk(
+        State#ratchet_state.root_key, DHOutput
+    ),
+    % Bob (responder) uses the responder chain for sending after DH ratchet
+    % Alice will derive the same responder chain for receiving Bob's messages
+    NewSendChainKey = RespChainKey,
+    
+    % 5. Update state with new DH ratchet step
+    Now = erlang:system_time(millisecond),
+    NewState = State#ratchet_state{
+        % Update to new root key from DH ratchet
+        root_key = NewRootKey,
+        
+        % Use new DH keypair (our new ephemeral key)
+        dh_self = {NewDHPub, NewDHPriv},
+        
+        % Use new sending chain from DH ratchet
+        send_chain_key = NewSendChainKey,
+        % Reset send message counter for new chain
+        send_msg_number = 0,
+        
+        % Increment DH ratchet step counter
+        dh_ratchet_step = State#ratchet_state.dh_ratchet_step + 1,
+        
+        % Update metadata
+        last_updated = Now
+    },
+    
+    NewState.
+
+%%% ============================================================================
+%%% Test Helper Functions
+%%% ============================================================================
+
+%% @doc Set remote DH key (for simulating X3DH handshake in tests)
+%%
+%% In a real implementation, both parties would know each other's initial
+%% DH keys from the X3DH handshake. This helper function allows tests to
+%% simulate that state.
+%%
+%% @param State Current ratchet state
+%% @param RemoteDHPub Remote party's DH public key (32 bytes)
+%% @returns Updated state with remote DH key set
+set_remote_dh_key(State, RemoteDHPub) when byte_size(RemoteDHPub) =:= 32 ->
+    Now = erlang:system_time(millisecond),
+    State#ratchet_state{
+        dh_remote = RemoteDHPub,
+        last_updated = Now
+    }.

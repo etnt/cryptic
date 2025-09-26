@@ -61,6 +61,9 @@
 %%% @since 2025-09-13
 -module(cryptic_ws_ui).
 
+%% Suppress warnings for unused functions that are part of complete ratchet implementation
+-compile([{nowarn_unused_function, [send_x3dh_encrypted_message/4, clear_ratchet_state_from_ui/2]}]).
+
 %% Public API
 -export([start/1, start/2]).
 
@@ -190,7 +193,15 @@ start(Username, ServerHost) ->
         cert_config = CertConfig,
         connection_status = disconnected,
         keypair = undefined,
-        client_keys = undefined
+        client_keys = undefined,
+        ws_client_state = undefined,
+        pending_operation = undefined,
+        ratchet_sessions = #{},
+        ratchet_preferences = #{
+            auto_init => true,
+            prefer_ratchet => true,
+            show_ratchet_status => true
+        }
     },
 
     %% Create initial UI state
@@ -768,7 +779,7 @@ process_command("quit", UIState) ->
     case WSChatState#ws_chat_state.ws_client_state of
         undefined ->
             ok;
-        {ok, ClientState} ->
+        ClientState when is_record(ClientState, client_state) ->
             cryptic_ws_client:stop(ClientState#client_state.ws_client_pid);
         _ ->
             ok
@@ -791,10 +802,10 @@ process_command("connect", UIState) ->
             add_system_message("Connection already in progress", UIState);
         disconnected ->
             %% Step 1: Switch to passphrase input mode
-            case os:getenv("CRYPTIC_CONFIG_DIR") of
+            case os:getenv("CRYPTIC_DIR") of
                 false ->
                     ?error(
-                        "CRYPTIC_CONFIG_DIR environment variable not set~n", []
+                        "CRYPTIC_DIR environment variable not set~n", []
                     ),
                     UIState;
                 ConfigDir ->
@@ -831,7 +842,7 @@ process_command("disconnect", UIState) ->
         connected ->
             %% Disconnect from server
             case WSChatState#ws_chat_state.ws_client_state of
-                {ok, ClientState} ->
+                ClientState when is_record(ClientState, client_state) ->
                     %% Stop WebSocket client
                     cryptic_ws_client:stop(
                         ClientState#client_state.ws_client_pid
@@ -867,7 +878,7 @@ process_command("list_users", UIState) ->
     case WSChatState#ws_chat_state.connection_status of
         connected ->
             case WSChatState#ws_chat_state.ws_client_state of
-                {ok, ClientState} ->
+                ClientState when is_record(ClientState, client_state) ->
                     ListUsersCmd = #{type => <<"list_users">>},
                     ?msg_out("UI sending list_users command: ~p", [ListUsersCmd]),
                     case
@@ -903,7 +914,7 @@ process_command("fetch_messages", UIState) ->
     case WSChatState#ws_chat_state.connection_status of
         connected ->
             case WSChatState#ws_chat_state.ws_client_state of
-                {ok, ClientState} ->
+                ClientState when is_record(ClientState, client_state) ->
                     GetMessagesCmd = #{type => <<"get_messages">>},
                     ?msg_out("UI sending get_messages command: ~p", [
                         GetMessagesCmd
@@ -943,7 +954,7 @@ process_command("key_status", UIState) ->
     case WSChatState#ws_chat_state.connection_status of
         connected ->
             case WSChatState#ws_chat_state.ws_client_state of
-                {ok, ClientState} ->
+                ClientState when is_record(ClientState, client_state) ->
                     KeyStatusCmd = #{type => <<"key_status">>},
                     ?msg_out("UI sending key_status command: ~p", [KeyStatusCmd]),
                     case
@@ -981,51 +992,35 @@ process_command("send " ++ Rest, UIState) ->
             case string:split(Rest, " ", leading) of
                 [ToUser, Message] ->
                     case WSChatState#ws_chat_state.ws_client_state of
-                        {ok, ClientState} ->
+                        ClientState when is_record(ClientState, client_state) ->
                             FromUser = WSChatState#ws_chat_state.username,
                             TrimmedToUser = string:trim(ToUser),
                             TrimmedMessage = string:trim(Message),
 
-                            %% Start the secure send process: get prekey, then encrypt and send
-                            %% Don't show status message, will show "You -> user: message" on success
-
-                            %% First, get the recipient's prekey
-                            GetKeyBundleCmd = #{
-                                type => <<"get_key_bundle">>,
-                                user => list_to_binary(TrimmedToUser)
-                            },
-                            ?msg_out("UI requesting key bundle for ~s: ~p", [
-                                TrimmedToUser, GetKeyBundleCmd
-                            ]),
+                            %% Check if we have an existing ratchet session first
+                            ConversationId = create_conversation_id(FromUser, TrimmedToUser),
                             case
-                                cryptic_ws_client:send_command(
-                                    ClientState#client_state.ws_client_pid,
-                                    GetKeyBundleCmd
+                                check_ratchet_session_exists(
+                                    ConversationId, WSChatState
                                 )
                             of
-                                ok ->
-                                    %% Store the pending message for when we get the prekey response
-                                    PendingMsg = #{
-                                        type => send_encrypted,
-                                        to_user => TrimmedToUser,
-                                        message => TrimmedMessage,
-                                        from_user => FromUser
-                                    },
-                                    NewWSChatState = WSChatState#ws_chat_state{
-                                        pending_operation = PendingMsg
-                                    },
-                                    UIState#ui_state{
-                                        ws_chat_state = NewWSChatState
-                                    };
-                                {error, Reason} ->
-                                    ErrMsg = io_lib:format(
-                                        "Failed to get prekey for ~s: ~p", [
-                                            TrimmedToUser, Reason
-                                        ]
+                                {ok, ratchet_available} ->
+                                    ?dbg(
+                                        "Using existing ratchet session for ~s",
+                                        [TrimmedToUser]
                                     ),
-                                    ?error("~s~n", [ErrMsg]),
-                                    add_system_message(
-                                        lists:flatten(ErrMsg), UIState
+                                    send_message_via_ratchet(
+                                        TrimmedToUser, TrimmedMessage, UIState
+                                    );
+                                {error, _Reason} ->
+                                    ?dbg(
+                                        "No ratchet session found for ~s, using X3DH",
+                                        [TrimmedToUser]
+                                    ),
+                                    %% Fall back to X3DH key exchange for new conversations
+                                    send_message_via_x3dh_fallback(
+                                        TrimmedToUser, TrimmedMessage, FromUser, 
+                                        ClientState, WSChatState, UIState
                                     )
                             end;
                         _ ->
@@ -1303,7 +1298,7 @@ process_chat_command(Message, UIState) ->
             add_system_message("Error: No chat target set", UIState);
         {connected, ToUser} ->
             case WSChatState#ws_chat_state.ws_client_state of
-                {ok, ClientState} ->
+                ClientState when is_record(ClientState, client_state) ->
                     FromUser = WSChatState#ws_chat_state.username,
                     TrimmedMessage = string:trim(Message),
 
@@ -1491,6 +1486,7 @@ handle_websocket_message(Message, UIState) ->
                     <<"room_message_sent">> ->
                         %% Room message sent confirmation
                         handle_room_message_sent_response(Data, UIState);
+
                     _ ->
                         %% Unknown message type
                         add_system_message(
@@ -1541,7 +1537,7 @@ handle_key_bundle_for_sending(Data, SendOp, UIState) ->
     #{to_user := ToUser, message := Message} = SendOp,
     try
         RecipientBundle = extract_and_build_recipient_bundle(Data),
-        send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState)
+        send_x3dh_encrypted_message_with_ratchet_preparation(RecipientBundle, ToUser, Message, UIState)
     catch
         _:Error:StackTrace ->
             ErrStr =
@@ -1653,7 +1649,7 @@ extract_and_build_recipient_bundle(Data) ->
 send_x3dh_encrypted_message(RecipientBundle, ToUser, Message, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
     case WSChatState#ws_chat_state.ws_client_state of
-        {ok, ClientState} ->
+        ClientState when is_record(ClientState, client_state) ->
             SenderKeys = WSChatState#ws_chat_state.client_keys,
 
             %% Perform X3DH and encrypt message
@@ -1845,24 +1841,28 @@ decrypt_x3dh_message_with_key(
             ),
 
             case
-                cryptic_lib:x3dh_receiver_decrypt(
+                cryptic_lib:x3dh_receiver_decrypt_with_session_key(
                     ClientKeys,
                     RecipientBlob,
                     AliceSigningKey,
                     OtpkPrivateKey
                 )
             of
-                {ok, {PlaintextMessage, _MessageId}} ->
-                    ?dbg("Successfully decrypted X3DH message from ~s", [From]),
+                {ok, {PlaintextMessage, _MessageId, SessionKey}} ->
+                    ?info("Successfully decrypted X3DH message from ~s, got session key for ratchet init", [From]),
 
                     %% Track OTPK usage for forward secrecy management
                     UIStateAfterTracking = handle_otpk_tracking(
                         From, RecipientBlob, UIState
                     ),
 
+                    %% Automatically initialize ratchet session with X3DH shared secret (receiver role)
+                    ?info("Automatically initializing ratchet session for ~s with X3DH shared secret (receiver)", [From]),
+                    UIStateWithRatchet = handle_x3dh_success_with_ratchet_init(SessionKey, From, receiver, UIStateAfterTracking),
+
                     DecryptedText = binary_to_list(PlaintextMessage),
                     clear_pending_operation_and_add_message_from_user(
-                        From, DecryptedText, UIStateAfterTracking
+                        From, DecryptedText, UIStateWithRatchet
                     );
                 {error, DecryptReason} ->
                     ?dbg("Failed to decrypt X3DH message from ~s: ~p", [
@@ -2006,7 +2006,8 @@ clear_pending_operation_and_show_success(ToUser, Message, UIState) ->
     },
     ClearedUIState = UIState#ui_state{ws_chat_state = ClearedChatState},
     FromField = "You -> " ++ ToUser,
-    add_message(FromField, Message, ClearedUIState).
+    UIStateWithMessage = add_message(FromField, Message, ClearedUIState),
+    UIStateWithMessage.
 
 %% @doc Handle user status response from the server.
 %%
@@ -2139,13 +2140,16 @@ handle_key_status_response(Data, UIState) ->
                     WarningLines,
 
             %% Display all status lines
-            lists:foldl(
+            UIStateWithKeys = lists:foldl(
                 fun(Line, AccState) ->
                     add_system_message(Line, AccState)
                 end,
                 UIState,
                 AllLines
-            )
+            ),
+
+            %% Add Double Ratchet session status
+            show_ratchet_sessions_summary(UIStateWithKeys)
     end.
 
 %% @doc Handle prekey received from WebSocket client for immediate encryption.
@@ -2186,7 +2190,7 @@ handle_prekey_for_send_encrypted(User, _PrekeyB64, SendOp, UIState) ->
             %% Redirect to X3DH flow - request full key bundle instead of single prekey
             WSChatState = UIState#ui_state.ws_chat_state,
             case WSChatState#ws_chat_state.ws_client_state of
-                {ok, ClientState} ->
+                ClientState when is_record(ClientState, client_state) ->
                     %% Request key bundle for X3DH protocol
                     KeyBundleCmd = #{
                         type => <<"get_key_bundle">>,
@@ -2226,6 +2230,7 @@ handle_prekey_for_send_encrypted(User, _PrekeyB64, SendOp, UIState) ->
 %%
 %% This function decrypts incoming encrypted messages and adds them to the inbox.
 handle_encrypted_message_received(Message, UIState) ->
+    ?dbg("handle_encrypted_message_received called with Message: ~p~n", [Message]),
     try
         From = binary_to_list(maps:get(<<"from">>, Message)),
 
@@ -2236,20 +2241,34 @@ handle_encrypted_message_received(Message, UIState) ->
                     "Received message without message field", UIState
                 );
             NestedMessage ->
-                %% Check if this is an X3DH encrypted message
-                case maps:get(<<"message_type">>, NestedMessage, undefined) of
+                %% For unified messages, we need to extract the actual message payload
+                %% which is nested deeper in the structure
+                ActualMessage = case maps:get(<<"type">>, NestedMessage, undefined) of
+                    <<"encrypted_message_received">> ->
+                        %% This is a unified encrypted message, extract the actual payload
+                        maps:get(<<"message">>, NestedMessage, NestedMessage);
+                    _ ->
+                        %% Direct message format
+                        NestedMessage
+                end,
+                
+                %% Check message type and route accordingly
+                case maps:get(<<"type">>, ActualMessage, maps:get(<<"message_type">>, ActualMessage, undefined)) of
+                    <<"ratchet">> ->
+                        %% Handle Double Ratchet message
+                        handle_ratchet_message_unified(From, ActualMessage, UIState);
                     <<"x3dh">> ->
                         %% Handle X3DH message with correct field names
                         case
                             {
                                 maps:get(
                                     <<"ephemeral_public">>,
-                                    NestedMessage,
+                                    ActualMessage,
                                     undefined
                                 ),
-                                maps:get(<<"nonce">>, NestedMessage, undefined),
+                                maps:get(<<"nonce">>, ActualMessage, undefined),
                                 maps:get(
-                                    <<"ciphertext">>, NestedMessage, undefined
+                                    <<"ciphertext">>, ActualMessage, undefined
                                 )
                             }
                         of
@@ -2271,7 +2290,7 @@ handle_encrypted_message_received(Message, UIState) ->
                             {EphemeralPubB64, NonceB64, CiphertextB64} ->
                                 handle_x3dh_message(
                                     From,
-                                    NestedMessage,
+                                    ActualMessage,
                                     EphemeralPubB64,
                                     NonceB64,
                                     CiphertextB64,
@@ -2283,10 +2302,10 @@ handle_encrypted_message_received(Message, UIState) ->
                         case
                             {
                                 maps:get(
-                                    <<"ephemeral">>, NestedMessage, undefined
+                                    <<"ephemeral">>, ActualMessage, undefined
                                 ),
-                                maps:get(<<"nonce">>, NestedMessage, undefined),
-                                maps:get(<<"cipher">>, NestedMessage, undefined)
+                                maps:get(<<"nonce">>, ActualMessage, undefined),
+                                maps:get(<<"cipher">>, ActualMessage, undefined)
                             }
                         of
                             {undefined, _, _} ->
@@ -2305,7 +2324,7 @@ handle_encrypted_message_received(Message, UIState) ->
                             {EphemeralB64, NonceB64, CipherB64} ->
                                 handle_legacy_encrypted_message(
                                     From,
-                                    NestedMessage,
+                                    ActualMessage,
                                     EphemeralB64,
                                     NonceB64,
                                     CipherB64,
@@ -2854,7 +2873,7 @@ handle_room_message(Data, UIState) ->
                     %% Request sender's public key from server
                     WSChatState = UIState#ui_state.ws_chat_state,
                     case WSChatState#ws_chat_state.ws_client_state of
-                        {ok, _ClientState} ->
+                        _ClientState when is_record(_ClientState, client_state) ->
                             %% Legacy room message format not supported - room messages should use X3DH
                             ErrMsg = io_lib:format(
                                 "Room message from ~s uses legacy encryption format. "
@@ -2945,8 +2964,7 @@ handle_create_room_command(Rest, UIState) ->
                         end,
 
                     %% Send WebSocket message
-                    {ok, ClientState} =
-                        WSChatState#ws_chat_state.ws_client_state,
+                    ClientState = WSChatState#ws_chat_state.ws_client_state,
                     cryptic_ws_client:send_command(
                         ClientState#client_state.ws_client_pid, FinalCommand
                     ),
@@ -3017,8 +3035,7 @@ handle_join_room_command(Rest, UIState) ->
                                 }
                         end,
 
-                    {ok, ClientState} =
-                        WSChatState#ws_chat_state.ws_client_state,
+                    ClientState = WSChatState#ws_chat_state.ws_client_state,
 
                     cryptic_ws_client:send_command(
                         ClientState#client_state.ws_client_pid, FinalCommand
@@ -3056,8 +3073,7 @@ handle_leave_room_command(Rest, UIState) ->
                         <<"room_id">> => list_to_binary(RoomId)
                     },
 
-                    {ok, ClientState} =
-                        WSChatState#ws_chat_state.ws_client_state,
+                    ClientState = WSChatState#ws_chat_state.ws_client_state,
 
                     cryptic_ws_client:send_command(
                         ClientState#client_state.ws_client_pid, Command
@@ -3118,11 +3134,14 @@ handle_list_rooms_command(Rest, UIState) ->
                 <<"filter">> => list_to_binary(Filter)
             },
 
-            {ok, ClientState} = WSChatState#ws_chat_state.ws_client_state,
-
-            cryptic_ws_client:send_command(
-                ClientState#client_state.ws_client_pid, Command
-            ),
+            case WSChatState#ws_chat_state.ws_client_state of
+                ClientState when is_record(ClientState, client_state) ->
+                    cryptic_ws_client:send_command(
+                        ClientState#client_state.ws_client_pid, Command
+                    );
+                _ ->
+                    ok
+            end,
 
             add_system_message("Listing " ++ Filter ++ " rooms...", UIState);
         _ ->
@@ -3165,8 +3184,7 @@ handle_room_info_command(Rest, UIState) ->
                         <<"room_id">> => list_to_binary(ActualRoomId)
                     },
 
-                    {ok, ClientState} =
-                        WSChatState#ws_chat_state.ws_client_state,
+                    ClientState = WSChatState#ws_chat_state.ws_client_state,
 
                     cryptic_ws_client:send_command(
                         ClientState#client_state.ws_client_pid, Command
@@ -3270,8 +3288,7 @@ handle_send_room_command(Rest, UIState) ->
                                         CachedId
                                 end,
 
-                            {ok, ClientState} =
-                                WSChatState#ws_chat_state.ws_client_state,
+                            ClientState = WSChatState#ws_chat_state.ws_client_state,
 
                             %% Send encrypted room message (proper E2EE implementation)
                             case
@@ -3369,8 +3386,7 @@ handle_room_history_command(Rest, UIState) ->
                         <<"since">> => Since
                     },
 
-                    {ok, ClientState} =
-                        WSChatState#ws_chat_state.ws_client_state,
+                    ClientState = WSChatState#ws_chat_state.ws_client_state,
 
                     cryptic_ws_client:send_command(
                         ClientState#client_state.ws_client_pid, Command
@@ -4178,7 +4194,7 @@ upload_prekey_bundle_and_finalize(
             %% All steps completed successfully
             SuccessWSChatState = WSChatState#ws_chat_state{
                 connection_status = connected,
-                ws_client_state = {ok, ClientState}
+                ws_client_state = ClientState
             },
             SuccessUIState = UIState#ui_state{
                 ws_chat_state = SuccessWSChatState
@@ -4202,7 +4218,7 @@ upload_prekey_bundle_and_finalize(
             %% Prekey bundle upload queued
             SuccessWSChatState = WSChatState#ws_chat_state{
                 connection_status = connected,
-                ws_client_state = {ok, ClientState}
+                ws_client_state = ClientState
             },
             SuccessUIState = UIState#ui_state{
                 ws_chat_state = SuccessWSChatState
@@ -4518,16 +4534,16 @@ proceed_with_x3dh_decrypt_direct(
     ),
 
     case
-        cryptic_lib:x3dh_receiver_decrypt(
+        cryptic_lib:x3dh_receiver_decrypt_with_session_key(
             ClientKeys,
             UpdatedRecipientBlob,
             SenderIdPub,
             OtpkPrivateKey
         )
     of
-        {ok, {PlainBin, _MessageId}} ->
+        {ok, {PlainBin, _MessageId, SessionKey}} ->
             ?info(
-                "X3DH decryption successful, plaintext: ~p",
+                "X3DH decryption successful, plaintext: ~p, got session key for ratchet init",
                 [PlainBin]
             ),
 
@@ -4535,6 +4551,10 @@ proceed_with_x3dh_decrypt_direct(
             UIStateAfterTracking = handle_otpk_tracking(
                 From, UpdatedRecipientBlob, UIState
             ),
+
+            %% Automatically initialize ratchet session with X3DH shared secret (receiver role)
+            ?info("Automatically initializing ratchet session for ~s with X3DH shared secret (receiver)", [From]),
+            UIStateWithRatchet = handle_x3dh_success_with_ratchet_init(SessionKey, From, receiver, UIStateAfterTracking),
 
             %% Convert to string
             PlainText =
@@ -4551,12 +4571,12 @@ proceed_with_x3dh_decrypt_direct(
                 erlang:system_time(second)
             ),
             NewInbox =
-                UIStateAfterTracking#ui_state.inbox ++
+                UIStateWithRatchet#ui_state.inbox ++
                     [{From, PlainText, Timestamp}],
 
             %% Update pending messages
             PendingMessages =
-                UIStateAfterTracking#ui_state.pending_messages,
+                UIStateWithRatchet#ui_state.pending_messages,
             CurrentCount = maps:get(
                 From, PendingMessages, 0
             ),
@@ -4564,18 +4584,18 @@ proceed_with_x3dh_decrypt_direct(
                 From, CurrentCount + 1, PendingMessages
             ),
             %% Clear pending operation
-            WSChatState = UIStateAfterTracking#ui_state.ws_chat_state,
+            WSChatState = UIStateWithRatchet#ui_state.ws_chat_state,
             ClearedWSChatState = WSChatState#ws_chat_state{
                 pending_operation = undefined
             },
-            TempUIState = UIStateAfterTracking#ui_state{
+            TempUIState = UIStateWithRatchet#ui_state{
                 inbox = NewInbox,
                 message_count = length(NewInbox),
                 pending_messages = NewPendingMessages,
                 ws_chat_state = ClearedWSChatState
             },
             %% Auto-display if enabled
-            case UIStateAfterTracking#ui_state.auto_display of
+            case UIStateWithRatchet#ui_state.auto_display of
                 true ->
                     ClearedPendingMessages = maps:put(
                         From, 0, NewPendingMessages
@@ -4762,3 +4782,527 @@ take_word([C | Rest]) when C =:= $\s; C =:= $\t ->
 take_word([C | Rest]) ->
     {Word, Remaining} = take_word(Rest),
     {[C | Word], Remaining}.
+
+%%% ============================================================================
+%%% Double Ratchet State Management Functions
+%%% ============================================================================
+
+%% Store ratchet state in UI cache
+store_ratchet_state_in_ui(ConversationId, RatchetState, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    NewSessions = maps:put(
+        ConversationId, RatchetState, WSChatState#ws_chat_state.ratchet_sessions
+    ),
+    NewWSChatState = WSChatState#ws_chat_state{ratchet_sessions = NewSessions},
+    UIState#ui_state{ws_chat_state = NewWSChatState}.
+
+%% Get stored ratchet state from UI cache
+get_stored_ratchet_state(ConversationId, WSChatState) ->
+    case
+        maps:get(
+            ConversationId,
+            WSChatState#ws_chat_state.ratchet_sessions,
+            undefined
+        )
+    of
+        undefined -> {error, not_found};
+        RatchetState -> {ok, RatchetState}
+    end.
+
+%% Clear ratchet state from UI cache
+clear_ratchet_state_from_ui(ConversationId, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    NewSessions = maps:remove(
+        ConversationId, WSChatState#ws_chat_state.ratchet_sessions
+    ),
+    NewWSChatState = WSChatState#ws_chat_state{ratchet_sessions = NewSessions},
+    UIState#ui_state{ws_chat_state = NewWSChatState}.
+
+%% Create conversation ID for two users (normalized order)
+create_conversation_id(User1, User2) when User1 < User2 ->
+    list_to_binary(User1 ++ ":" ++ User2);
+create_conversation_id(User1, User2) ->
+    list_to_binary(User2 ++ ":" ++ User1).
+
+%% Check if ratchet session exists and is active
+check_ratchet_session_exists(ConversationId, WSChatState) ->
+    case get_stored_ratchet_state(ConversationId, WSChatState) of
+        {ok, RatchetState} ->
+            %% Any valid ratchet state is usable (encrypt_message will activate sending chain if needed)
+            StateInfo = cryptic_double_ratchet:get_state_info(RatchetState),
+            SendingActive = maps:get(sending_chain_active, StateInfo, false),
+            ReceivingActive = maps:get(receiving_chain_active, StateInfo, false),
+            case SendingActive orelse ReceivingActive of
+                true -> {ok, ratchet_available};
+                false -> {error, ratchet_inactive}
+            end;
+        {error, not_found} ->
+            {error, no_ratchet}
+    end.
+
+%% Get username from UI state
+get_username(UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    WSChatState#ws_chat_state.username.
+
+%%% ============================================================================
+%%% Double Ratchet Messaging Functions
+%%% ============================================================================
+
+%% Send message via Double Ratchet (high-performance path)
+send_message_via_ratchet(ToUser, Message, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.ws_client_state of
+        ClientState when is_record(ClientState, client_state) ->
+            %% Load ratchet state
+            ConversationId = create_conversation_id(
+                get_username(UIState), ToUser
+            ),
+            case get_stored_ratchet_state(ConversationId, WSChatState) of
+                {ok, RatchetState} ->
+                    %% Encrypt using Double Ratchet (high-performance path)
+                    %% Note: encrypt_message will automatically activate sending chain if needed
+
+                    %% Debug: Check state before encryption
+                    BeforeInfo = cryptic_double_ratchet:get_state_info(RatchetState),
+                    ?dbg("BEFORE encrypt - send_msg: ~p, dh_step: ~p, sending_active: ~p", [
+                        maps:get(send_msg_number, BeforeInfo),
+                        maps:get(dh_ratchet_step, BeforeInfo), 
+                        maps:get(sending_chain_active, BeforeInfo)
+                    ]),
+                    
+                    case
+                        cryptic_double_ratchet:encrypt_message(
+                            list_to_binary(Message), RatchetState
+                        )
+                    of
+                        {ok, RatchetMessage, NewRatchetState} ->
+                            %% Debug: Check state after encryption
+                            AfterInfo = cryptic_double_ratchet:get_state_info(NewRatchetState),
+                            ?dbg("AFTER encrypt - send_msg: ~p, dh_step: ~p, sending_active: ~p", [
+                                maps:get(send_msg_number, AfterInfo),
+                                maps:get(dh_ratchet_step, AfterInfo), 
+                                maps:get(sending_chain_active, AfterInfo)
+                            ]),
+                            
+                            %% Send ratchet message to server
+                            case
+                                send_ratchet_message_to_server(
+                                    ToUser, RatchetMessage, ClientState, UIState
+                                )
+                            of
+                                ok ->
+                                    %% Update stored ratchet state
+                                    UpdatedUIState = store_ratchet_state_in_ui(
+                                        ConversationId, NewRatchetState, UIState
+                                    ),
+
+                                    %% Show success message matching X3DH format
+                                    FromField = "You -> " ++ ToUser,
+                                    add_message(FromField, Message, UpdatedUIState);
+                                {error, SendErr} ->
+                                    ErrMsg = io_lib:format(
+                                        "Failed to send ratchet message: ~p", [
+                                            SendErr
+                                        ]
+                                    ),
+                                    add_system_message(
+                                        lists:flatten(ErrMsg), UIState
+                                    )
+                            end;
+                        {error, RatchetErr} ->
+                            ErrMsg = io_lib:format(
+                                "Ratchet encryption failed: ~p", [RatchetErr]
+                            ),
+                            add_system_message(lists:flatten(ErrMsg), UIState)
+                    end;
+                {error, StateErr} ->
+                    ErrMsg = io_lib:format("Ratchet state error: ~p", [StateErr]),
+                    add_system_message(lists:flatten(ErrMsg), UIState)
+            end;
+        _ ->
+            add_system_message("WebSocket client not available", UIState)
+    end.
+
+%% Send message via X3DH fallback (when no ratchet session exists)
+send_message_via_x3dh_fallback(ToUser, Message, FromUser, ClientState, WSChatState, UIState) ->
+    %% First, get the recipient's prekey
+    GetKeyBundleCmd = #{
+        type => <<"get_key_bundle">>,
+        user => list_to_binary(ToUser)
+    },
+    ?msg_out(
+        "UI requesting key bundle for ~s: ~p", [
+            ToUser, GetKeyBundleCmd
+        ]
+    ),
+    case
+        cryptic_ws_client:send_command(
+            ClientState#client_state.ws_client_pid,
+            GetKeyBundleCmd
+        )
+    of
+        ok ->
+            %% Store the pending message for when we get the prekey response
+            PendingMsg = #{
+                type => send_encrypted,
+                to_user => ToUser,
+                message => Message,
+                from_user => FromUser
+            },
+            NewWSChatState = WSChatState#ws_chat_state{
+                pending_operation = PendingMsg
+            },
+            UIState#ui_state{
+                ws_chat_state = NewWSChatState
+            };
+        {error, Reason} ->
+            ErrMsg = io_lib:format(
+                "Failed to get prekey for ~s: ~p",
+                [
+                    ToUser, Reason
+                ]
+            ),
+            ?error("~s~n", [ErrMsg]),
+            add_system_message(
+                lists:flatten(ErrMsg), UIState
+            )
+    end.
+
+%% Send ratchet message to server via unified encrypted message path
+send_ratchet_message_to_server(ToUser, RatchetMessage, ClientState, _UIState) ->
+    %% Package ratchet message components into unified message format
+    RatchetPayload = #{
+        type => <<"ratchet">>,
+        version => 1,
+        dh_public => base64:encode(maps:get(dh_public, RatchetMessage)),
+        dh_step => maps:get(dh_step, RatchetMessage),
+        prev_chain_length => maps:get(prev_chain_length, RatchetMessage),
+        msg_number => maps:get(msg_number, RatchetMessage),
+        ciphertext => base64:encode(maps:get(ciphertext, RatchetMessage)),
+        nonce => base64:encode(maps:get(nonce, RatchetMessage))
+    },
+
+    %% Send via existing encrypted message infrastructure
+    UnifiedSendCmd = #{
+        type => <<"send_encrypted">>,
+        to => list_to_binary(ToUser),
+        message => RatchetPayload
+    },
+
+    case
+        cryptic_ws_client:send_command(
+            ClientState#client_state.ws_client_pid, UnifiedSendCmd
+        )
+    of
+        ok ->
+            ?dbg("Double Ratchet message sent to ~s via unified path", [ToUser]),
+            ok;
+        {error, Err} ->
+            ?error("Failed to send ratchet message: ~p", [Err]),
+            {error, Err}
+    end.
+
+%% Handle ratchet message via unified encrypted message path
+handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    ?msg_in("Received ratchet message via unified path from ~s: ~p", [From, RatchetPayload]),
+
+    try
+        %% Extract ratchet message components from the payload
+        DHPublic = base64:decode(maps:get(<<"dh_public">>, RatchetPayload)),
+        DHStep = maps:get(<<"dh_step">>, RatchetPayload, 0),
+        PrevChainLength = maps:get(<<"prev_chain_length">>, RatchetPayload, 0),
+        MessageNumber = maps:get(<<"msg_number">>, RatchetPayload, 0),
+        Ciphertext = base64:decode(maps:get(<<"ciphertext">>, RatchetPayload)),
+        Nonce = base64:decode(maps:get(<<"nonce">>, RatchetPayload)),
+
+        %% Get the stored ratchet state for this conversation
+        ConversationId = create_conversation_id(
+            From, WSChatState#ws_chat_state.username
+        ),
+
+        case get_stored_ratchet_state(ConversationId, WSChatState) of
+            {ok, RatchetState} ->
+                %% Reconstruct ratchet message structure
+                RatchetMessage = #{
+                    dh_public => DHPublic,
+                    dh_step => DHStep,
+                    prev_chain_length => PrevChainLength,
+                    msg_number => MessageNumber,
+                    ciphertext => Ciphertext,
+                    nonce => Nonce
+                },
+
+                %% Debug: Check state before decryption
+                BeforeDecryptInfo = cryptic_double_ratchet:get_state_info(RatchetState),
+                ?dbg("BEFORE decrypt - recv_msg: ~p, dh_step: ~p, receiving_active: ~p", [
+                    maps:get(recv_msg_number, BeforeDecryptInfo),
+                    maps:get(dh_ratchet_step, BeforeDecryptInfo), 
+                    maps:get(receiving_chain_active, BeforeDecryptInfo)
+                ]),
+                
+                %% Decrypt the message using the ratchet
+                case
+                    cryptic_double_ratchet:decrypt_message(
+                        RatchetMessage,
+                        RatchetState
+                    )
+                of
+                    {ok, PlaintextMessage, NewRatchetState} ->
+                        %% Debug: Check state after decryption
+                        AfterDecryptInfo = cryptic_double_ratchet:get_state_info(NewRatchetState),
+                        ?dbg("AFTER decrypt - recv_msg: ~p, dh_step: ~p, receiving_active: ~p", [
+                            maps:get(recv_msg_number, AfterDecryptInfo),
+                            maps:get(dh_ratchet_step, AfterDecryptInfo), 
+                            maps:get(receiving_chain_active, AfterDecryptInfo)
+                        ]),
+                        
+                        %% Store updated ratchet state
+                        UIStateWithUpdatedRatchet = store_ratchet_state_in_ui(
+                            ConversationId, NewRatchetState, UIState
+                        ),
+                        %% Display the decrypted message
+                        add_message(
+                            From, binary_to_list(PlaintextMessage), UIStateWithUpdatedRatchet
+                        );
+                    {error, DecryptReason} ->
+                        ?error("Failed to decrypt unified ratchet message: ~p", [
+                            DecryptReason
+                        ]),
+                        add_system_message(
+                            lists:flatten(
+                                io_lib:format(
+                                    "Failed to decrypt ratchet message from ~s: ~p", [
+                                        From, DecryptReason
+                                    ]
+                                )
+                            ),
+                            UIState
+                        )
+                end;
+            {error, not_found} ->
+                ?error("No ratchet state found for unified conversation ~s", [
+                    ConversationId
+                ]),
+                add_system_message(
+                    lists:flatten(
+                        io_lib:format(
+                            "No ratchet session with ~s (unified message ignored)", [From]
+                        )
+                    ),
+                    UIState
+                )
+        end
+    catch
+        Error:CatchReason:StackTrace ->
+            ?error("Error processing unified ratchet message: ~p:~p~n~p", [
+                Error, CatchReason, StackTrace
+            ]),
+            add_system_message("Error processing encrypted ratchet message", UIState)
+    end.
+
+
+%% Show ratchet sessions summary for key_status command
+show_ratchet_sessions_summary(UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    Username = WSChatState#ws_chat_state.username,
+
+    %% Get all active ratchet sessions from the stored state
+    RatchetSessions = WSChatState#ws_chat_state.ratchet_sessions,
+    ActiveSessions = maps:fold(
+        fun(ConvId, RatchetState, Acc) ->
+            %% Extract peer name from conversation ID (format: "alice:bob")
+            case string:split(binary_to_list(ConvId), ":") of
+                [User1, User2] ->
+                    Peer =
+                        case User1 =:= Username of
+                            true -> User2;
+                            false -> User1
+                        end,
+                    %% Get comprehensive state info from ratchet state
+                    StateInfo = cryptic_double_ratchet:get_state_info(RatchetState),
+                    ?dbg("DISPLAY ratchet state for ~s: ~p", [Peer, StateInfo]),
+
+                    %% Calculate meaningful activity counters
+                    DHStep = maps:get(dh_ratchet_step, StateInfo, 0),
+                    CurrentSendMsg = maps:get(send_msg_number, StateInfo, 0),
+                    CurrentRecvMsg = maps:get(recv_msg_number, StateInfo, 0),
+                    PrevChainLength = maps:get(prev_recv_chain_length, StateInfo, 0),
+
+                    %% Approximate total activity (not exact due to chain rotations)
+                    ApproxSent = CurrentSendMsg + (DHStep * 10), % Rough estimate
+                    ApproxReceived = CurrentRecvMsg + PrevChainLength,
+
+                    SessionInfo = #{
+                        peer => Peer,
+                        dh_step => DHStep,
+                        current_send => CurrentSendMsg,
+                        current_recv => CurrentRecvMsg,
+                        prev_chain_length => PrevChainLength,
+                        approx_sent => ApproxSent,
+                        approx_received => ApproxReceived
+                    },
+                    [SessionInfo | Acc];
+                _ ->
+                    Acc
+            end
+        end,
+        [],
+        RatchetSessions
+    ),
+
+    case length(ActiveSessions) of
+        0 ->
+            UIState1 = add_system_message("", UIState),
+            UIState2 = add_system_message(
+                "=== Double Ratchet Sessions ===", UIState1
+            ),
+            add_system_message("No active Double Ratchet sessions", UIState2);
+        Count ->
+            UIState1 = add_system_message("", UIState),
+            UIState2 = add_system_message(
+                "=== Double Ratchet Sessions ===", UIState1
+            ),
+            UIState3 = add_system_message(
+                io_lib:format("Active sessions: ~p", [Count]), UIState2
+            ),
+
+            lists:foldl(
+                fun(SessionInfo, AccUIState) ->
+                    #{
+                        peer := Peer,
+                        dh_step := DHStep,
+                        current_send := CurrentSend,
+                        current_recv := CurrentRecv,
+                        prev_chain_length := PrevChain
+                    } = SessionInfo,
+
+                    %% Explanation:
+                    %% Step X: Number of DH ratchet steps (key rotations) that
+                    %% have occurred
+                    %%
+                    %% Step 0 = Initial session
+                    %% Step 1+ = Keys have been rotated for forward secrecy
+                    %% Chain[X send/Y recv]: Current sending/receiving chain
+                    %% message counters
+                    %%
+                    %% These reset to 0 when DH ratchet steps occur (new chains
+                    %% created)
+                    %% Shows the "next" message numbers in the current chains
+                    %% Prev[X msgs]: Messages from the previous receiving chain
+                    %%
+                    %% Shows how many messages were processed in the previous
+                    %% chain before rotation
+                    %%
+                    %% Show current chain state and DH ratchet progress
+                    StatusLine = io_lib:format(
+                        "  ~s: Step ~p, Chain[~p send, ~p recv], Prev[~p msgs]",
+                        [Peer, DHStep, CurrentSend, CurrentRecv, PrevChain]
+                    ),
+                    add_system_message(lists:flatten(StatusLine), AccUIState)
+                end,
+                UIState3,
+                ActiveSessions
+            )
+    end.
+
+%% Handle successful X3DH and automatically initialize ratchet session
+%% This is called after X3DH message send/receive success to auto-upgrade to high-performance ratchet
+handle_x3dh_success_with_ratchet_init(SharedSecret, PeerUser, Role, UIState) ->
+    MyUsername = get_username(UIState),
+    ?dbg("Auto-initializing Double Ratchet session: ~s (role: ~s) with peer ~s", [MyUsername, Role, PeerUser]),
+
+    WSChatState = UIState#ui_state.ws_chat_state,
+
+    %% Check if auto-initialization is enabled
+    case maps:get(auto_init, WSChatState#ws_chat_state.ratchet_preferences, true) of
+        false ->
+            %% Auto-init disabled, just return original state
+            UIState;
+        true ->
+            try
+                %% Generate our DH keypair for ratchet
+                {_MyDHPub, _MyDHPriv} = MyDHPair = cryptic_nif:gen_keypair(),
+
+                %% Initialize ratchet state based on our role
+                {ok, RatchetState} = case Role of
+                    sender ->
+                        %% We are the sender - we initiated X3DH
+                        cryptic_double_ratchet:init_sender(SharedSecret, MyDHPair);
+                    receiver ->
+                        %% We are the receiver - we received X3DH message first
+                        cryptic_double_ratchet:init_receiver(SharedSecret, MyDHPair)
+                end,
+
+                %% Store ratchet state for future use
+                ConversationId = create_conversation_id(PeerUser, WSChatState#ws_chat_state.username),
+                
+                %% Check if we already have a ratchet session to avoid conflicts
+                UIStateWithRatchet = case get_stored_ratchet_state(ConversationId, WSChatState) of
+                    {ok, ExistingState} ->
+                        StateInfo = cryptic_double_ratchet:get_state_info(ExistingState),
+                        DHStep = maps:get(dh_ratchet_step, StateInfo),
+                        SendingActive = maps:get(sending_chain_active, StateInfo),
+                        ReceivingActive = maps:get(receiving_chain_active, StateInfo),
+                        ?dbg("Ratchet session already exists for ~s (DH step: ~p, sending_active: ~p, receiving_active: ~p), skipping initialization", 
+                             [PeerUser, DHStep, SendingActive, ReceivingActive]),
+                        UIState;
+                    {error, not_found} ->
+                        ?dbg("Creating new ratchet session for ~s with role ~s", [PeerUser, Role]),
+                        store_ratchet_state_in_ui(ConversationId, RatchetState, UIState)
+                end,
+
+                %% Ratchet initialization complete - peer will discover ratchet availability 
+                %% when they receive the first ratchet-encrypted message
+                UIStateWithRatchet
+
+            catch
+                Error:Reason:StackTrace ->
+                    ?error("Failed to initialize ratchet after X3DH: ~p:~p~n~p", [Error, Reason, StackTrace]),
+                    %% Return original UI state - ratchet init failed but X3DH still worked
+                    add_system_message(
+                        io_lib:format("X3DH completed with ~s (ratchet initialization failed)", [PeerUser]),
+                        UIState
+                    )
+            end
+    end.
+
+%% Enhanced X3DH sender function that prepares for ratchet initialization
+%% Enhanced X3DH that automatically initializes ratchet session after successful exchange
+send_x3dh_encrypted_message_with_ratchet_preparation(RecipientBundle, ToUser, Message, UIState) ->
+    ?info("Starting enhanced X3DH with automatic ratchet initialization for ~s", [ToUser]),
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.ws_client_state of
+        ClientState when is_record(ClientState, client_state) ->
+            SenderKeys = WSChatState#ws_chat_state.client_keys,
+            %% Use enhanced X3DH that returns session key for ratchet initialization
+            case
+                cryptic_lib:x3dh_sender_init_with_session_key(
+                    SenderKeys, RecipientBundle, list_to_binary(Message)
+                )
+            of
+                {ok, {MessageBlob, MessageId, SessionKey}} ->
+                    ?info("Enhanced X3DH successful, got session key for ratchet init: ~p", [MessageId]),
+
+                    %% Send the X3DH message first
+                    UIStateAfterSend = send_x3dh_message_to_server(
+                        MessageBlob, MessageId, ToUser, ClientState, UIState, Message
+                    ),
+
+                    %% Now automatically initialize ratchet session with the X3DH shared secret
+                    ?info("Automatically initializing ratchet session for ~s with X3DH shared secret", [ToUser]),
+                    handle_x3dh_success_with_ratchet_init(SessionKey, ToUser, sender, UIStateAfterSend);
+
+                {error, X3DHErr} ->
+                    ErrStr = lists:flatten(
+                        io_lib:format("Enhanced X3DH key agreement failed: ~p", [X3DHErr])
+                    ),
+                    ?error("~s~n", [ErrStr]),
+                    add_system_message(ErrStr, UIState)
+            end;
+        _ ->
+            ClientErrStr = "Client state not available for enhanced X3DH",
+            ?error("~s~n", [ClientErrStr]),
+            add_system_message(ClientErrStr, UIState)
+    end.

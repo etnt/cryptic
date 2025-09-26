@@ -54,7 +54,12 @@
 -include_lib("public_key/include/public_key.hrl").
 
 -export([
-    init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3
+    init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3,
+    % Double Ratchet integration functions
+    create_conversation_id/2, 
+    store_ratchet_state/2, 
+    get_ratchet_state/1, 
+    update_ratchet_state/2
 ]).
 
 %% @doc HTTP to WebSocket upgrade handler
@@ -507,6 +512,43 @@ handle_command(
             },
             {reply, Response}
     end;
+%% Handle unified encrypted messages (both X3DH and Double Ratchet)
+handle_command(
+    #{
+        <<"type">> := <<"send_encrypted">>,
+        <<"to">> := ToUserB,
+        <<"message">> := MessagePayload
+    },
+    Username,
+    _State
+) ->
+    ToUser = binary_to_list(ToUserB),
+    
+    %% Forward the encrypted message payload to recipient
+    %% Server acts as pure relay without understanding the content
+    MessageForward = #{
+        type => <<"encrypted_message_received">>,
+        from => list_to_binary(Username),
+        message => MessagePayload,
+        server_timestamp => erlang:system_time(second)
+    },
+    
+    %% Try to deliver immediately if user is online
+    case find_user_connection(ToUser) of
+        {ok, Pid} ->
+            %% User is online - deliver immediately without storing
+            Pid ! {message, Username, MessageForward};
+        not_found ->
+            %% User is offline - store message for later retrieval
+            cryptic_lib:store_message(ToUser, MessageForward)
+    end,
+    
+    {reply, #{
+        type => <<"message_sent">>,
+        success => true,
+        to => ToUserB,
+        timestamp => erlang:system_time(second)
+    }};
 %% Handle X3DH protocol messages (SESSION-MESSAGE-FLOW.md implementation)
 handle_command(
     #{
@@ -603,150 +645,6 @@ handle_command(
         success => true,
         message => <<"Double Ratchet message sent">>
     }};
-%% Handle Double Ratchet initialization after successful X3DH
-handle_command(
-    #{
-        <<"type">> := <<"init_ratchet">>,
-        <<"peer">> := PeerUserB,
-        <<"x3dh_shared_secret">> := SharedSecretB64,
-        <<"role">> := Role,
-        <<"peer_dh_public">> := PeerDhPublicB64
-    },
-    Username,
-    _State
-) ->
-    PeerUser = binary_to_list(PeerUserB),
-
-    try
-        %% Decode X3DH shared secret
-        SharedSecret = base64:decode(SharedSecretB64),
-        PeerDhPublic = base64:decode(PeerDhPublicB64),
-
-        %% Initialize Double Ratchet state based on role
-        RatchetState =
-            case Role of
-                <<"sender">> ->
-                    cryptic_double_ratchet:init_sender(
-                        SharedSecret, PeerDhPublic
-                    );
-                <<"receiver">> ->
-                    cryptic_double_ratchet:init_receiver(
-                        SharedSecret, PeerDhPublic, 32
-                    )
-            end,
-
-        %% Store ratchet state for this conversation
-        ConversationId = create_conversation_id(Username, PeerUser),
-        store_ratchet_state(ConversationId, RatchetState),
-
-        {reply, #{
-            type => <<"ratchet_initialized">>,
-            success => true,
-            conversation_id => list_to_binary(ConversationId)
-        }}
-    catch
-        error:Reason ->
-            {reply, #{
-                type => <<"ratchet_init_error">>,
-                success => false,
-                error => atom_to_binary(Reason, utf8)
-            }}
-    end;
-%% Handle Double Ratchet message encryption and sending
-handle_command(
-    #{
-        <<"type">> := <<"send_ratchet_message">>,
-        <<"to">> := ToUserB,
-        <<"plaintext">> := PlaintextB64
-    },
-    Username,
-    _State
-) ->
-    ToUser = binary_to_list(ToUserB),
-    ConversationId = create_conversation_id(Username, ToUser),
-
-    try
-        %% Decode the plaintext message
-        Plaintext = base64:decode(PlaintextB64),
-
-        %% Load ratchet state for this conversation
-        case get_ratchet_state(ConversationId) of
-            {ok, RatchetState} ->
-                %% Encrypt message using Double Ratchet
-                case
-                    cryptic_double_ratchet:encrypt_message(
-                        Plaintext, RatchetState
-                    )
-                of
-                    {ok, RatchetMessage, NewRatchetState} ->
-                        %% Update stored ratchet state
-                        update_ratchet_state(ConversationId, NewRatchetState),
-
-                        %% Create message blob for transmission
-                        MessageId = generate_unique_message_id(),
-                        MessageBlob = #{
-                            from => Username,
-                            to => ToUser,
-                            message_type => <<"ratchet">>,
-                            message_id => list_to_binary(MessageId),
-                            dh_public => base64:encode(
-                                maps:get(dh_public, RatchetMessage)
-                            ),
-                            dh_step => maps:get(dh_step, RatchetMessage),
-                            prev_chain_length => maps:get(
-                                prev_chain_length, RatchetMessage
-                            ),
-                            msg_number => maps:get(msg_number, RatchetMessage),
-                            ciphertext => base64:encode(
-                                maps:get(ciphertext, RatchetMessage)
-                            ),
-                            nonce => base64:encode(
-                                maps:get(nonce, RatchetMessage)
-                            ),
-                            server_timestamp => erlang:system_time(second)
-                        },
-
-                        %% Try to deliver immediately if user is online
-                        case find_user_connection(ToUser) of
-                            {ok, Pid} ->
-                                %% User is online - deliver immediately
-                                Pid ! {message, Username, MessageBlob};
-                            not_found ->
-                                %% User is offline - store message for later retrieval
-                                cryptic_lib:store_message(ToUser, MessageBlob)
-                        end,
-
-                        {reply, #{
-                            type => <<"ratchet_message_sent">>,
-                            success => true,
-                            message_id => list_to_binary(MessageId)
-                        }};
-                    {error, Reason} ->
-                        {reply, #{
-                            type => <<"ratchet_send_error">>,
-                            success => false,
-                            error => <<"encryption_failed">>,
-                            reason => atom_to_binary(Reason, utf8)
-                        }}
-                end;
-            {error, not_found} ->
-                {reply, #{
-                    type => <<"ratchet_send_error">>,
-                    success => false,
-                    error => <<"no_ratchet_state">>,
-                    message =>
-                        <<"Initialize ratchet first with init_ratchet command">>
-                }}
-        end
-    catch
-        error:SendReason ->
-            {reply, #{
-                type => <<"ratchet_send_error">>,
-                success => false,
-                error => <<"processing_failed">>,
-                reason => atom_to_binary(SendReason, utf8)
-            }}
-    end;
 %% Handle encrypted room messages (proper E2EE implementation)
 %% messages to currently connected users.
 %%
@@ -1233,9 +1131,7 @@ handle_incoming_ratchet_message(FromUser, Message, ToUser, State) ->
 %% Creates a timestamp-based unique message ID.
 %%
 %% @returns Unique message ID string
-generate_unique_message_id() ->
-    {Mega, Sec, Micro} = erlang:timestamp(),
-    lists:flatten(io_lib:format("~w_~w_~w", [Mega, Sec, Micro])).
+
 
 %%% Double Ratchet State Management Functions %%%
 
@@ -1275,7 +1171,7 @@ store_ratchet_state(ConversationId, RatchetState) ->
 get_ratchet_state(ConversationId) ->
     case cryptic_chat_storage:get_ratchet_state(ConversationId) of
         {ok, SerializedState} ->
-            {ok, cryptic_double_ratchet:deserialize_state(SerializedState)};
+            cryptic_double_ratchet:deserialize_state(SerializedState);
         {error, Reason} ->
             {error, Reason}
     end.

@@ -34,8 +34,27 @@
 %%% Test Suite Setup
 %%% ============================================================================
 
+% EUnit setup and cleanup functions
+setup() ->
+    % Start the event manager for debug logging
+    case gen_event:start_link({local, cryptic_event_manager}) of
+        {ok, Pid} -> Pid;
+        {error, {already_started, Pid}} -> Pid
+    end,
+    % Add a simple console logger to prevent badarg errors
+    gen_event:add_handler(cryptic_event_manager, cryptic_console_logger, []),
+    ok.
+
+cleanup(_) ->
+    % Stop the event manager
+    catch gen_event:stop(cryptic_event_manager),
+    ok.
+
 % Test fixtures and helper functions
 setup_alice_bob_ratchets() ->
+    % Ensure event manager is running for debug logging
+    setup(),
+    
     % Simulate X3DH key agreement - both parties get the same root key
     RootKey = cryptic_nif:rand_bytes(32),
 
@@ -44,13 +63,13 @@ setup_alice_bob_ratchets() ->
     {BobDHPub, BobDHPriv} = cryptic_nif:gen_keypair(),
 
     % Alice initializes as sender with the shared X3DH root key
-    AliceState = cryptic_double_ratchet:init_sender(
+    {ok, AliceState} = cryptic_double_ratchet:init_sender(
         RootKey, {AliceDHPub, AliceDHPriv}
     ),
 
     % Bob initializes as receiver with the same X3DH root key
     % Note: Bob doesn't know Alice's DH key yet - it comes in the first message
-    BobState = cryptic_double_ratchet:init_receiver(
+    {ok, BobState} = cryptic_double_ratchet:init_receiver(
         RootKey, {BobDHPub, BobDHPriv}
     ),
 
@@ -61,10 +80,11 @@ setup_alice_bob_ratchets() ->
 %%% ============================================================================
 
 init_sender_test() ->
+    setup(),
     RootKey = cryptic_nif:rand_bytes(32),
     {DHPub, DHPriv} = cryptic_nif:gen_keypair(),
 
-    State = cryptic_double_ratchet:init_sender(RootKey, {DHPub, DHPriv}),
+    {ok, State} = cryptic_double_ratchet:init_sender(RootKey, {DHPub, DHPriv}),
 
     % Verify initial state
     ?assertEqual(32, byte_size(State#ratchet_state.root_key)),
@@ -74,16 +94,16 @@ init_sender_test() ->
     ?assertEqual({DHPub, DHPriv}, State#ratchet_state.dh_self),
     ?assertEqual(undefined, State#ratchet_state.dh_remote),
     ?assertEqual(true, State#ratchet_state.sending_chain_active),
-    ?assertEqual(false, State#ratchet_state.receiving_chain_active),
-    ?assertEqual(#{}, State#ratchet_state.skipped_keys).
+    ?assertEqual(true, State#ratchet_state.receiving_chain_active),
+    ?assertEqual(#{}, State#ratchet_state.skipped_keys),
+    cleanup(ok).
 
 init_receiver_test() ->
+    setup(),
     RootKey = cryptic_nif:rand_bytes(32),
     {DHPub, DHPriv} = cryptic_nif:gen_keypair(),
 
-    State = cryptic_double_ratchet:init_receiver(
-        RootKey, {DHPub, DHPriv}
-    ),
+    {ok, State} = cryptic_double_ratchet:init_receiver(RootKey, {DHPub, DHPriv}),
 
     % Verify initial state - receiver has compatible chain with Alice
     ?assertEqual(RootKey, State#ratchet_state.root_key),
@@ -99,7 +119,8 @@ init_receiver_test() ->
     ?assertEqual(true, State#ratchet_state.receiving_chain_active),
     ?assertEqual(#{}, State#ratchet_state.skipped_keys),
     % No DH ratchet step yet - will happen on first received message
-    ?assertEqual(0, State#ratchet_state.dh_ratchet_step).
+    ?assertEqual(0, State#ratchet_state.dh_ratchet_step),
+    cleanup(ok).
 
 init_invalid_params_test() ->
     % Test with invalid root key size
@@ -279,7 +300,7 @@ encrypt_inactive_chain_test() ->
     Plaintext = <<"This should fail">>,
     Result = cryptic_double_ratchet:encrypt_message(Plaintext, BobState),
 
-    ?assertEqual({error, sending_chain_not_active}, Result).
+    ?assertEqual({error, {sending_chain_activation_failed, no_remote_dh_key}}, Result).
 
 %%% ============================================================================
 %%% State Serialization Tests
@@ -369,7 +390,7 @@ get_state_info_test() ->
     ?assertEqual(0, maps:get(dh_ratchet_step, Info)),
     ?assertEqual(0, maps:get(send_msg_number, Info)),
     ?assertEqual(true, maps:get(sending_chain_active, Info)),
-    ?assertEqual(false, maps:get(receiving_chain_active, Info)),
+    ?assertEqual(true, maps:get(receiving_chain_active, Info)),
     ?assertEqual(false, maps:get(has_remote_dh, Info)).
 
 cleanup_expired_keys_test() ->
@@ -493,16 +514,16 @@ full_initialization_flow_test() ->
     {AliceRatchetPub, AliceRatchetPriv} = cryptic_nif:gen_keypair(),
     {BobRatchetPub, BobRatchetPriv} = cryptic_nif:gen_keypair(),
 
-    AliceState = cryptic_double_ratchet:init_sender(
+    {ok, AliceState} = cryptic_double_ratchet:init_sender(
         SharedSecret1, {AliceRatchetPub, AliceRatchetPriv}
     ),
-    BobState = cryptic_double_ratchet:init_receiver(
+    {ok, BobState} = cryptic_double_ratchet:init_receiver(
         SharedSecret2, {BobRatchetPub, BobRatchetPriv}
     ),
 
     % 3. Verify states are properly initialized and complementary
     ?assertEqual(true, AliceState#ratchet_state.sending_chain_active),
-    ?assertEqual(false, AliceState#ratchet_state.receiving_chain_active),
+    ?assertEqual(true, AliceState#ratchet_state.receiving_chain_active),
     ?assertEqual(false, BobState#ratchet_state.sending_chain_active),
     % Active to receive Alice's messages
     ?assertEqual(true, BobState#ratchet_state.receiving_chain_active),
@@ -518,7 +539,7 @@ full_initialization_flow_test() ->
 
     % 5. Test that Bob initially cannot encrypt (receiving only)
     ?assertEqual(
-        {error, sending_chain_not_active},
+        {error, {sending_chain_activation_failed, no_remote_dh_key}},
         cryptic_double_ratchet:encrypt_message(<<"Test">>, BobState)
     ).
 
@@ -535,7 +556,7 @@ encrypt_message_error_handling_test() ->
     Result = cryptic_double_ratchet:encrypt_message(<<"test">>, InactiveState),
 
     % Should return error for inactive chain
-    ?assertEqual({error, sending_chain_not_active}, Result).
+    ?assertEqual({error, {sending_chain_activation_failed, no_remote_dh_key}}, Result).
 
 decrypt_message_error_handling_test() ->
     % Test error handling in decrypt_message

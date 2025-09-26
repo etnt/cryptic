@@ -155,7 +155,9 @@
     store_prekey_bundle/2,
     %% X3DH Protocol Implementation
     x3dh_sender_init/3,
+    x3dh_sender_init_with_session_key/3,
     x3dh_receiver_decrypt/4,
+    x3dh_receiver_decrypt_with_session_key/4,
     find_otpk_private_key/2,
     %% OTPK usage tracking
     track_otpk_usage/3,
@@ -1625,6 +1627,110 @@ x3dh_sender_init(SenderKeys, RecipientBundle, Message) ->
         throw:Reason -> {error, Reason}
     end.
 
+%% @doc Enhanced X3DH sender init that also returns the session key for ratchet initialization.
+%%
+%% Same as x3dh_sender_init/3 but returns the session key for automatic ratchet initialization.
+%% This enables seamless upgrade from X3DH to Double Ratchet messaging.
+%%
+%% @param SenderKeys Map containing sender's client keys
+%% @param RecipientBundle Recipient's key bundle from server
+%% @param Message Binary message to encrypt
+%% @returns {ok, {MessageBlob, MessageId, SessionKey}} or {error, Reason}
+-spec x3dh_sender_init_with_session_key(map(), map(), binary()) ->
+    {ok, {map(), binary(), binary()}} | {error, term()}.
+x3dh_sender_init_with_session_key(SenderKeys, RecipientBundle, Message) ->
+    try
+        ?dbg("DEBUG: Starting X3DH sender init with session key, SenderKeys: ~p~n", [SenderKeys]),
+        %% Extract sender's keys
+        #{
+            identity_dh_private := SenderIdPriv,
+            identity_dh_public := SenderIdDHPub,
+            identity_sign_private := SenderSignPriv,
+            identity_sign_public := SenderSignPub,
+            key_id := SenderKeyId
+        } = SenderKeys,
+        ?dbg("DEBUG: SenderKeyId: ~p~n", [SenderKeyId]),
+
+        ?dbg("DEBUG: RecipientBundle: ~p~n", [RecipientBundle]),
+        %% Extract recipient's keys
+        #{
+            identity_sign_public := RecipientIdPub,
+            identity_dh_public := RecipientIdDHPub,
+            signed_prekey := #{
+                public := RecipientSpkPub,
+                signature := SpkSignature
+            },
+            key_id := RecipientKeyId
+        } = RecipientBundle,
+        ?dbg("DEBUG: RecipientKeyId: ~p~n", [RecipientKeyId]),
+
+        %% Verify signed prekey signature
+        case verify_signature(RecipientSpkPub, SpkSignature, RecipientIdPub) of
+            false ->
+                {error, invalid_signed_prekey_signature};
+            true ->
+                %% Generate ephemeral keypair for this session
+                {EphemeralPub, EphemeralPriv} = gen_keypair(),
+
+                %% Perform X3DH key exchanges
+                DH1 = scalarmult(SenderIdPriv, RecipientSpkPub),
+                DH2 = scalarmult(EphemeralPriv, RecipientIdDHPub),
+                DH3 = scalarmult(EphemeralPriv, RecipientSpkPub),
+
+                %% Handle optional one-time prekey
+                {DH4, OtpkId} =
+                    case maps:get(one_time_prekey, RecipientBundle, null) of
+                        null ->
+                            {<<>>, undefined};
+                        #{id := OtpkIdBin, public := OtpkPub} ->
+                            DH4Val = scalarmult(EphemeralPriv, OtpkPub),
+                            {DH4Val, OtpkIdBin}
+                    end,
+
+                %% Combine DH outputs and derive session key
+                DHCombined = <<DH1/binary, DH2/binary, DH3/binary, DH4/binary>>,
+                SessionKey = hkdf_sha256(DHCombined, <<"X3DH SessionKey">>, 32),
+
+                %% Generate unique message ID
+                MessageId = crypto:strong_rand_bytes(16),
+
+                %% Create message metadata for X3DH
+                Metadata = #{
+                    version => 1,
+                    type => <<"X3DH_INIT">>,
+                    sender_id => SenderKeyId,
+                    sender_identity_dh_public => SenderIdDHPub,
+                    sender_identity_sign_public => SenderSignPub,
+                    recipient_id => RecipientKeyId,
+                    ephemeral_public => EphemeralPub,
+                    otpk_id => OtpkId,
+                    message_id => MessageId,
+                    timestamp => erlang:system_time(second)
+                },
+
+                %% Sign the message metadata
+                MetadataBin = erlang:term_to_binary(Metadata),
+                Signature = sign_message(MetadataBin, SenderSignPriv),
+
+                %% Encrypt the actual message with session key
+                {Ciphertext, Nonce} = aead_encrypt(Message, SessionKey, <<>>),
+
+                %% Create complete message blob
+                MessageBlob = #{
+                    metadata => Metadata,
+                    signature => Signature,
+                    ciphertext => Ciphertext,
+                    nonce => Nonce
+                },
+
+                %% Return message blob, ID, AND session key for ratchet initialization
+                {ok, {MessageBlob, MessageId, SessionKey}}
+        end
+    catch
+        error:Reason -> {error, Reason};
+        throw:Reason -> {error, Reason}
+    end.
+
 %% @doc Perform X3DH key agreement from receiver's perspective.
 %%
 %% Implements the Bob side of the X3DH protocol as described in SESSION-MESSAGE-FLOW.md.
@@ -1746,6 +1852,87 @@ x3dh_receiver_decrypt(
     catch
         error:Reason -> {error, Reason};
         throw:Reason -> {error, Reason}
+    end.
+
+%% @doc Enhanced X3DH receiver decrypt that also returns the session key for ratchet initialization.
+%%
+%% Same as x3dh_receiver_decrypt/4 but returns the session key for automatic ratchet initialization.
+%% This enables seamless upgrade from X3DH to Double Ratchet messaging.
+%%
+%% @param ReceiverKeys Map containing receiver's client keys
+%% @param MessageBlob Encrypted message blob from sender
+%% @param SenderIdPub Sender's identity public key for signature verification
+%% @param OtpkPrivateKey Private key for the OTPK ID specified in message (or null)
+%% @returns {ok, {Message, MessageId, SessionKey}} or {error, Reason}
+-spec x3dh_receiver_decrypt_with_session_key(
+    map(), map(), binary(), binary() | null
+) ->
+    {ok, {binary(), binary(), binary()}} | {error, term()}.
+x3dh_receiver_decrypt_with_session_key(
+    ReceiverKeys,
+    MessageBlob,
+    SenderIdPub,
+    OtpkPrivateKey
+) ->
+    try
+        %% Extract message components
+        #{
+            metadata := Metadata,
+            signature := Signature,
+            ciphertext := Ciphertext,
+            nonce := Nonce
+        } = MessageBlob,
+
+        %% Extract metadata 
+        #{
+            sender_identity_dh_public := SenderIdDHPub,
+            ephemeral_public := EphemeralPub,
+            message_id := MessageId
+        } = Metadata,
+
+        %% Verify message signature (use provided SenderIdPub parameter)
+        MetadataBin = erlang:term_to_binary(Metadata),
+        case verify_signature(MetadataBin, Signature, SenderIdPub) of
+            false ->
+                {error, invalid_message_signature};
+            true ->
+                %% Extract receiver's keys
+                #{
+                    identity_dh_private := ReceiverIdPriv,
+                    signed_prekey_private := ReceiverSpkPriv
+                } = ReceiverKeys,
+
+                %% Perform same DH exchanges as sender (order matters for consistency)
+                DH1 = scalarmult(ReceiverSpkPriv, SenderIdDHPub),
+                DH2 = scalarmult(ReceiverIdPriv, EphemeralPub),
+                DH3 = scalarmult(ReceiverSpkPriv, EphemeralPub),
+
+                %% Handle optional DH4 with OTPK
+                DH4 = case OtpkPrivateKey of
+                    null -> <<>>;
+                    _ -> scalarmult(OtpkPrivateKey, EphemeralPub)
+                end,
+
+                %% Combine DH outputs and derive session key (same as sender)
+                DHCombined = <<DH1/binary, DH2/binary, DH3/binary, DH4/binary>>,
+                SessionKey = hkdf_sha256(DHCombined, <<"X3DH SessionKey">>, 32),
+
+                %% Decrypt message with session key
+                case aead_decrypt(Ciphertext, SessionKey, Nonce, <<>>) of
+                    error ->
+                        {error, decryption_failed};
+                    DecryptedMessage ->
+                        %% Return message, ID, AND session key for ratchet initialization
+                        {ok, {DecryptedMessage, MessageId, SessionKey}}
+                end
+        end
+    catch
+        error:Reason:Stacktrace ->
+            ?error("x3dh_receiver_decrypt_with_session_key error: ~p~n"
+                   "Stacktrace: ~p", [Reason, Stacktrace]),
+            {error, Reason};
+        throw:Reason ->
+            {error, Reason}
     end.
 
 %% @doc Find the private key for a specific OTPK ID in the client keys.

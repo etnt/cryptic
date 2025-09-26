@@ -9,7 +9,7 @@
 %%% @version 1.0
 %%% @since 2025-09-21
 
-%% Client state record from cryptic_ws_client_lib
+%% Client state
 -record(client_state, {
     ws_client_pid,
     username,
@@ -30,7 +30,20 @@
     % Full client key set
     client_keys :: #{} | undefined,
     connection_status = disconnected :: connected | disconnected | connecting,
-    pending_operation :: map() | undefined
+    pending_operation :: map() | undefined,
+
+    %% Double Ratchet fields
+
+    % ConversationId -> RatchetState cache
+    ratchet_sessions = #{} :: #{binary() => term()},
+    ratchet_preferences = #{
+        % Auto-initialize after X3DH
+        auto_init => true,
+        % Prefer ratchet over X3DH when available
+        prefer_ratchet => true,
+        % Show ratchet status in messages
+        show_ratchet_status => true
+    } :: #{atom() => boolean()}
 }).
 
 %% UI state record containing screen layout and interaction state.
