@@ -1016,28 +1016,28 @@ perform_dh_ratchet_on_send(State) ->
     % Bob (responder) uses the responder chain for sending after DH ratchet
     % Alice will derive the same responder chain for receiving Bob's messages
     NewSendChainKey = RespChainKey,
-    
+
     % 5. Update state with new DH ratchet step
     Now = erlang:system_time(millisecond),
     NewState = State#ratchet_state{
         % Update to new root key from DH ratchet
         root_key = NewRootKey,
-        
+
         % Use new DH keypair (our new ephemeral key)
         dh_self = {NewDHPub, NewDHPriv},
-        
+
         % Use new sending chain from DH ratchet
         send_chain_key = NewSendChainKey,
         % Reset send message counter for new chain
         send_msg_number = 0,
-        
+
         % Increment DH ratchet step counter
         dh_ratchet_step = State#ratchet_state.dh_ratchet_step + 1,
-        
+
         % Update metadata
         last_updated = Now
     },
-    
+
     NewState.
 
 %%% ============================================================================

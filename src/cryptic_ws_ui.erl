@@ -5041,7 +5041,7 @@ handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
                     maps:get(dh_ratchet_step, BeforeDecryptInfo), 
                     maps:get(receiving_chain_active, BeforeDecryptInfo)
                 ]),
-                
+
                 %% Decrypt the message using the ratchet
                 case
                     cryptic_double_ratchet:decrypt_message(
@@ -5057,7 +5057,7 @@ handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
                             maps:get(dh_ratchet_step, AfterDecryptInfo), 
                             maps:get(receiving_chain_active, AfterDecryptInfo)
                         ]),
-                        
+
                         %% Store updated ratchet state
                         UIStateWithUpdatedRatchet = store_ratchet_state_in_ui(
                             ConversationId, NewRatchetState, UIState
@@ -5129,6 +5129,7 @@ show_ratchet_sessions_summary(UIState) ->
                     CurrentSendMsg = maps:get(send_msg_number, StateInfo, 0),
                     CurrentRecvMsg = maps:get(recv_msg_number, StateInfo, 0),
                     PrevChainLength = maps:get(prev_recv_chain_length, StateInfo, 0),
+                    SkippedKeysCount = maps:get(skipped_keys_count, StateInfo, 0),
 
                     %% Approximate total activity (not exact due to chain rotations)
                     ApproxSent = CurrentSendMsg + (DHStep * 10), % Rough estimate
@@ -5140,6 +5141,7 @@ show_ratchet_sessions_summary(UIState) ->
                         current_send => CurrentSendMsg,
                         current_recv => CurrentRecvMsg,
                         prev_chain_length => PrevChainLength,
+                        skipped_keys => SkippedKeysCount,
                         approx_sent => ApproxSent,
                         approx_received => ApproxReceived
                     },
@@ -5175,30 +5177,32 @@ show_ratchet_sessions_summary(UIState) ->
                         dh_step := DHStep,
                         current_send := CurrentSend,
                         current_recv := CurrentRecv,
-                        prev_chain_length := PrevChain
+                        prev_chain_length := PrevChain,
+                        skipped_keys := SkippedKeys
                     } = SessionInfo,
 
                     %% Explanation:
+                    %%
                     %% Step X: Number of DH ratchet steps (key rotations) that
                     %% have occurred
                     %%
                     %% Step 0 = Initial session
                     %% Step 1+ = Keys have been rotated for forward secrecy
-                    %% Chain[X send/Y recv]: Current sending/receiving chain
-                    %% message counters
                     %%
+                    %% Chain[X init/Y resp]: Current initiator/responder chain
+                    %% message counters
                     %% These reset to 0 when DH ratchet steps occur (new chains
                     %% created)
-                    %% Shows the "next" message numbers in the current chains
-                    %% Prev[X msgs]: Messages from the previous receiving chain
                     %%
+                    %% Prev[X msgs]: Messages from the previous receiving chain
                     %% Shows how many messages were processed in the previous
                     %% chain before rotation
                     %%
-                    %% Show current chain state and DH ratchet progress
+                    %% Skipped[X keys]: Out-of-order messages cached for delayed
+                    %% delivery
                     StatusLine = io_lib:format(
-                        "  ~s: Step ~p, Chain[~p send, ~p recv], Prev[~p msgs]",
-                        [Peer, DHStep, CurrentSend, CurrentRecv, PrevChain]
+                        "  ~s: Step ~p, Chain[~p init, ~p resp], Prev[~p msgs], Skipped[~p keys]",
+                        [Peer, DHStep, CurrentSend, CurrentRecv, PrevChain, SkippedKeys]
                     ),
                     add_system_message(lists:flatten(StatusLine), AccUIState)
                 end,
