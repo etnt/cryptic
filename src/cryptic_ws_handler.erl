@@ -201,8 +201,8 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
             %% Regular message or X3DH message - forward as-is
             Response = #{
                 type => <<"message">>,
-                from => list_to_binary(FromUser),
-                to => list_to_binary(Username),
+                from => FromUser,
+                to => Username,
                 message => Message
             },
             ResponseJson = jsx:encode(Response),

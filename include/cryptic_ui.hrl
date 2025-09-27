@@ -43,7 +43,9 @@
         prefer_ratchet => true,
         % Show ratchet status in messages
         show_ratchet_status => true
-    } :: #{atom() => boolean()}
+    } :: #{atom() => boolean()},
+    % User passphrase for session persistence
+    passphrase :: string() | binary() | undefined
 }).
 
 %% UI state record containing screen layout and interaction state.

@@ -133,6 +133,11 @@
     save_encrypted_keys/3,
     load_encrypted_keys/2,
     initialize_client_keys/2,
+    %% Ratchet session persistence functions
+    save_ratchet_session/4,
+    load_ratchet_session/3,
+    load_all_ratchet_sessions/2,
+    delete_ratchet_session/2,
     %% Message signing functions
     sign_message/2,
     verify_signature/3,
@@ -886,6 +891,93 @@ load_encrypted_keys(KeysFile, Passphrase) ->
             decrypt_keys(EncryptedData, Passphrase);
         {error, Reason} ->
             {error, {file_read_error, Reason}}
+    end.
+
+%% @doc Save a ratchet session to encrypted storage.
+%%
+%% Saves a double ratchet session state to an encrypted file using the same
+%% encryption infrastructure as save_encrypted_keys/3. The session data is
+%% encrypted with AES-256-GCM using a key derived from the user's passphrase.
+%%
+%% @param Username The username identifying the ratchet session
+%% @param SessionData The ratchet session state (map containing keys, counters, etc.)
+%% @param Passphrase User passphrase for encryption
+%% @param BaseDir Base directory for storing ratchet sessions (usually "~/.cryptic/sessions")
+%% @returns ok | {error, term()}
+-spec save_ratchet_session(string(), #{}, string() | binary(), string()) ->
+    ok | {error, term()}.
+save_ratchet_session(Username, SessionData, Passphrase, BaseDir) ->
+    %% Ensure base directory exists
+    case filelib:ensure_dir(BaseDir ++ "/") of
+        ok ->
+            %% Create session filename
+            SessionFile = filename:join(BaseDir, Username ++ ".session"),
+            
+            %% Use existing encryption infrastructure
+            save_encrypted_keys(SessionData, Passphrase, SessionFile);
+        {error, Reason} ->
+            {error, {directory_creation_failed, Reason}}
+    end.
+
+%% @doc Load a specific ratchet session from encrypted storage.
+%%
+%% Loads and decrypts a double ratchet session state from file using the same
+%% decryption infrastructure as load_encrypted_keys/2.
+%%
+%% @param Username The username identifying the ratchet session
+%% @param Passphrase User passphrase for decryption
+%% @param BaseDir Base directory for storing ratchet sessions
+%% @returns {ok, SessionData} | {error, term()}
+-spec load_ratchet_session(string(), string() | binary(), string()) ->
+    {ok, #{}} | {error, term()}.
+load_ratchet_session(Username, Passphrase, BaseDir) ->
+    SessionFile = filename:join(BaseDir, Username ++ ".session"),
+    load_encrypted_keys(SessionFile, Passphrase).
+
+%% @doc Load all available ratchet sessions from encrypted storage.
+%%
+%% Scans the sessions directory and attempts to load all .session files
+%% using the provided passphrase. Returns a map of username -> session_data
+%% for successfully loaded sessions, and logs errors for failed ones.
+%%
+%% @param Passphrase User passphrase for decryption
+%% @param BaseDir Base directory for storing ratchet sessions
+%% @returns {ok, SessionsMap} | {error, term()}
+-spec load_all_ratchet_sessions(string() | binary(), string()) ->
+    {ok, #{}} | {error, term()}.
+load_all_ratchet_sessions(Passphrase, BaseDir) ->
+    case file:list_dir(BaseDir) of
+        {ok, Files} ->
+            SessionFiles = [F || F <- Files, filename:extension(F) =:= ".session"],
+            LoadedSessions = maps:from_list([
+                {Username, SessionData} ||
+                File <- SessionFiles,
+                Username <- [filename:basename(File, ".session")],
+                {ok, SessionData} <- [load_ratchet_session(Username, Passphrase, BaseDir)]
+            ]),
+            {ok, LoadedSessions};
+        {error, enoent} ->
+            %% Directory doesn't exist yet - that's OK, return empty map
+            {ok, #{}};
+        {error, Reason} ->
+            {error, {directory_read_failed, Reason}}
+    end.
+
+%% @doc Delete a ratchet session from storage.
+%%
+%% Removes the encrypted session file for the specified username.
+%%
+%% @param Username The username identifying the ratchet session to delete
+%% @param BaseDir Base directory for storing ratchet sessions
+%% @returns ok | {error, term()}
+-spec delete_ratchet_session(string(), string()) ->
+    ok | {error, term()}.
+delete_ratchet_session(Username, BaseDir) ->
+    SessionFile = filename:join(BaseDir, Username ++ ".session"),
+    case file:delete(SessionFile) of
+        ok -> ok;
+        {error, enoent} -> ok;  % File didn't exist - that's OK
+        {error, Reason} -> {error, {file_delete_failed, Reason}}
     end.
 
 %% @doc Sign a message using Ed25519 signature.

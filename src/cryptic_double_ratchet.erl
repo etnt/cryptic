@@ -759,8 +759,9 @@ perform_dh_ratchet_step(Message, State) ->
     NewState = State#ratchet_state{
         root_key = NewRootKey,
 
-        % Update sending chain key but keep it inactive until we send
+        % Update sending chain key and reset counter for new DH step
         send_chain_key = NewSendChainKey,
+        send_msg_number = 0,  % CRITICAL FIX: Reset sending chain counter for new DH ratchet step
 
         % Reset receiving chain for new DH step
         recv_chain_key = NewRecvChainKey,

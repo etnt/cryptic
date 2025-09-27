@@ -129,6 +129,8 @@ start(Username) ->
 %% @throws any()
 -spec start(string(), string()) -> ok.
 start(Username, ServerHost) ->
+    CrypticDir = get_cryptic_dir(),
+
     %% Start cecho first (handles ncurses initialization)
     ok = application:start(cecho),
 
@@ -206,6 +208,7 @@ start(Username, ServerHost) ->
 
     %% Create initial UI state
     UIState = #ui_state{
+        cryptic_dir = CrypticDir,
         ws_chat_state = WSChatState,
         screen_height = Height,
         screen_width = Width
@@ -250,6 +253,16 @@ start(Username, ServerHost) ->
     after
         cleanup_ui()
     end.
+
+get_cryptic_dir() ->
+    case os:getenv("CRYPTIC_DIR") of
+        false ->
+            io:format("<FATAL ERROR> CRYPTIC_DIR environment variable not set~n", []),
+            init:stop();
+        Dir ->
+            Dir
+    end.
+
 
 %%%===================================================================
 %%% Main UI Loop
@@ -376,7 +389,6 @@ handle_passphrase_input(Input, UIState) ->
             %% Cancel passphrase input
             NewUIState = UIState#ui_state{
                 passphrase_mode = false,
-                cryptic_dir = undefined,
                 current_input = "",
                 cursor_position = 0
             },
@@ -397,12 +409,10 @@ handle_passphrase_input(Input, UIState) ->
         {key, 10} ->
             %% Enter pressed - process passphrase
             Passphrase = list_to_binary(UIState#ui_state.current_input),
-            ConfigDir = UIState#ui_state.cryptic_dir,
 
             %% Exit passphrase mode
             NormalUIState = UIState#ui_state{
                 passphrase_mode = false,
-                cryptic_dir = undefined,
                 current_input = "",
                 cursor_position = 0
             },
@@ -415,6 +425,7 @@ handle_passphrase_input(Input, UIState) ->
                         "Empty passphrase not allowed", NormalUIState
                     );
                 _ ->
+                    ConfigDir = UIState#ui_state.cryptic_dir,
                     load_client_keys_and_connect(
                         NormalUIState, ConfigDir, Passphrase
                     )
@@ -802,34 +813,23 @@ process_command("connect", UIState) ->
             add_system_message("Connection already in progress", UIState);
         disconnected ->
             %% Step 1: Switch to passphrase input mode
-            case os:getenv("CRYPTIC_DIR") of
-                false ->
-                    ?error(
-                        "CRYPTIC_DIR environment variable not set~n", []
-                    ),
-                    UIState;
-                ConfigDir ->
-                    NewState =
-                        foldf(
-                            UIState,
-                            [
-                                add_sys_msg_f("Starting secure connection..."),
-                                add_sys_msg_f(
-                                    "Enter passphrase for key decryption:"
-                                )
-                            ]
-                        ),
-
-                    %% Switch to passphrase input mode
-                    PassphraseState = NewState#ui_state{
-                        passphrase_mode = true,
-                        cryptic_dir = ConfigDir,
-                        current_input = "",
-                        cursor_position = 0
-                    },
-
-                    PassphraseState
-            end
+            NewState =
+                foldf(
+                    UIState,
+                    [
+                        add_sys_msg_f("Starting secure connection..."),
+                        add_sys_msg_f(
+                            "Enter passphrase for key decryption:"
+                        )
+                    ]
+                ),
+            %% Switch to passphrase input mode
+            PassphraseState = NewState#ui_state{
+                passphrase_mode = true,
+                current_input = "",
+                cursor_position = 0
+            },
+            PassphraseState
     end;
 process_command("disconnect", UIState) ->
     %% Disconnect from WebSocket server
@@ -998,10 +998,10 @@ process_command("send " ++ Rest, UIState) ->
                             TrimmedMessage = string:trim(Message),
 
                             %% Check if we have an existing ratchet session first
-                            ConversationId = create_conversation_id(FromUser, TrimmedToUser),
+                            PeerName = TrimmedToUser,
                             case
                                 check_ratchet_session_exists(
-                                    ConversationId, WSChatState
+                                    PeerName, WSChatState
                                 )
                             of
                                 {ok, ratchet_available} ->
@@ -2232,8 +2232,7 @@ handle_prekey_for_send_encrypted(User, _PrekeyB64, SendOp, UIState) ->
 handle_encrypted_message_received(Message, UIState) ->
     ?dbg("handle_encrypted_message_received called with Message: ~p~n", [Message]),
     try
-        From = binary_to_list(maps:get(<<"from">>, Message)),
-
+        From = maps:get(<<"from">>, Message),
         %% Extract the nested message content
         case maps:get(<<"message">>, Message, undefined) of
             undefined ->
@@ -2251,7 +2250,7 @@ handle_encrypted_message_received(Message, UIState) ->
                         %% Direct message format
                         NestedMessage
                 end,
-                
+
                 %% Check message type and route accordingly
                 case maps:get(<<"type">>, ActualMessage, maps:get(<<"message_type">>, ActualMessage, undefined)) of
                     <<"ratchet">> ->
@@ -2334,7 +2333,10 @@ handle_encrypted_message_received(Message, UIState) ->
                 end
         end
     catch
-        _:Error ->
+        _:Error:Stacktrace ->
+            ?dbg(
+                "Error processing encrypted message: ~p~n~p~n", [Error, Stacktrace]
+            ),
             %% Log the actual message structure for debugging
             ProcessErrMsg = io_lib:format(
                 "Failed to process encrypted message: ~p. Message was: ~p", [
@@ -4037,6 +4039,19 @@ load_client_keys_and_connect(UIState, ConfigDir, Passphrase) ->
                 "Keys loaded successfully", UIState
             ),
 
+            %% Step 2.5: Load existing ratchet sessions
+            SessionsDir = filename:join(ConfigDir, "sessions"),
+            {LoadedSessions, SessionsUIState} = case cryptic_lib:load_all_ratchet_sessions(Passphrase, SessionsDir) of
+                {ok, Sessions} when map_size(Sessions) > 0 ->
+                    SessionMsg = io_lib:format("Loaded ~p ratchet sessions", [map_size(Sessions)]),
+                    {Sessions, add_system_message(lists:flatten(SessionMsg), KeysState)};
+                {ok, _EmptySessions} ->
+                    {#{}, add_system_message("No existing ratchet sessions found", KeysState)};
+                {error, SessionLoadError} ->
+                    ErrorMsg = io_lib:format("Warning: Failed to load ratchet sessions: ~p", [SessionLoadError]),
+                    {#{}, add_system_message(lists:flatten(ErrorMsg), KeysState)}
+            end,
+
             %% Update status to connecting
             NewWSChatState = WSChatState#ws_chat_state{
                 connection_status = connecting,
@@ -4044,9 +4059,11 @@ load_client_keys_and_connect(UIState, ConfigDir, Passphrase) ->
                 keypair = {
                     maps:get(identity_dh_private, ClientKeys),
                     maps:get(identity_dh_public, ClientKeys)
-                }
+                },
+                passphrase = Passphrase,
+                ratchet_sessions = LoadedSessions
             },
-            ConnectingUIState = KeysState#ui_state{
+            ConnectingUIState = SessionsUIState#ui_state{
                 ws_chat_state = NewWSChatState
             },
             ConnectingState = add_system_message(
@@ -4788,19 +4805,24 @@ take_word([C | Rest]) ->
 %%% ============================================================================
 
 %% Store ratchet state in UI cache
-store_ratchet_state_in_ui(ConversationId, RatchetState, UIState) ->
+store_ratchet_state_in_ui(PeerName, RatchetState, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
     NewSessions = maps:put(
-        ConversationId, RatchetState, WSChatState#ws_chat_state.ratchet_sessions
+        PeerName, RatchetState, WSChatState#ws_chat_state.ratchet_sessions
     ),
     NewWSChatState = WSChatState#ws_chat_state{ratchet_sessions = NewSessions},
-    UIState#ui_state{ws_chat_state = NewWSChatState}.
+    UpdatedUIState = UIState#ui_state{ws_chat_state = NewWSChatState},
+    
+    %% Auto-save ratchet session to persistent storage
+    auto_save_ratchet_session(PeerName, RatchetState, UpdatedUIState),
+    
+    UpdatedUIState.
 
 %% Get stored ratchet state from UI cache
-get_stored_ratchet_state(ConversationId, WSChatState) ->
+get_stored_ratchet_state(PeerName, WSChatState) ->
     case
         maps:get(
-            ConversationId,
+            PeerName,
             WSChatState#ws_chat_state.ratchet_sessions,
             undefined
         )
@@ -4810,23 +4832,46 @@ get_stored_ratchet_state(ConversationId, WSChatState) ->
     end.
 
 %% Clear ratchet state from UI cache
-clear_ratchet_state_from_ui(ConversationId, UIState) ->
+clear_ratchet_state_from_ui(PeerName, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
     NewSessions = maps:remove(
-        ConversationId, WSChatState#ws_chat_state.ratchet_sessions
+        PeerName, WSChatState#ws_chat_state.ratchet_sessions
     ),
     NewWSChatState = WSChatState#ws_chat_state{ratchet_sessions = NewSessions},
     UIState#ui_state{ws_chat_state = NewWSChatState}.
 
-%% Create conversation ID for two users (normalized order)
-create_conversation_id(User1, User2) when User1 < User2 ->
-    list_to_binary(User1 ++ ":" ++ User2);
-create_conversation_id(User1, User2) ->
-    list_to_binary(User2 ++ ":" ++ User1).
+%% Note: Removed create_conversation_id - we now use peer names directly as session keys
+
+%% Auto-save ratchet session to persistent storage
+auto_save_ratchet_session(PeerName, RatchetState, UIState) ->
+    WSChatState = UIState#ui_state.ws_chat_state,
+    case WSChatState#ws_chat_state.passphrase of
+        undefined ->
+            %% No passphrase available, can't save (this shouldn't normally happen)
+            ?dbg("Warning: Cannot auto-save ratchet session - no passphrase available", []);
+        Passphrase ->
+            %% PeerName is now directly the other username - no parsing needed
+            OtherUsername = PeerName,
+
+            %% Create sessions directory path
+            CrypticDir = UIState#ui_state.cryptic_dir,
+            SessionsDir = filename:join(CrypticDir, "sessions"),
+            ?dbg("Using session dir: ~s~n", [SessionsDir]),
+
+            %% Save session asynchronously to avoid blocking UI
+            spawn_link(fun() ->
+                case cryptic_lib:save_ratchet_session(OtherUsername, RatchetState, Passphrase, SessionsDir) of
+                    ok ->
+                        ?dbg("Auto-saved ratchet session for ~s", [OtherUsername]);
+                    {error, SaveError} ->
+                        ?msg_out("Warning: Failed to auto-save ratchet session for ~s: ~p", [OtherUsername, SaveError])
+                end
+            end)
+    end.
 
 %% Check if ratchet session exists and is active
-check_ratchet_session_exists(ConversationId, WSChatState) ->
-    case get_stored_ratchet_state(ConversationId, WSChatState) of
+check_ratchet_session_exists(PeerName, WSChatState) ->
+    case get_stored_ratchet_state(PeerName, WSChatState) of
         {ok, RatchetState} ->
             %% Any valid ratchet state is usable (encrypt_message will activate sending chain if needed)
             StateInfo = cryptic_double_ratchet:get_state_info(RatchetState),
@@ -4854,11 +4899,9 @@ send_message_via_ratchet(ToUser, Message, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
     case WSChatState#ws_chat_state.ws_client_state of
         ClientState when is_record(ClientState, client_state) ->
-            %% Load ratchet state
-            ConversationId = create_conversation_id(
-                get_username(UIState), ToUser
-            ),
-            case get_stored_ratchet_state(ConversationId, WSChatState) of
+            %% Load ratchet state (use peer name directly)
+            PeerName = ToUser,
+            case get_stored_ratchet_state(PeerName, WSChatState) of
                 {ok, RatchetState} ->
                     %% Encrypt using Double Ratchet (high-performance path)
                     %% Note: encrypt_message will automatically activate sending chain if needed
@@ -4894,7 +4937,7 @@ send_message_via_ratchet(ToUser, Message, UIState) ->
                                 ok ->
                                     %% Update stored ratchet state
                                     UpdatedUIState = store_ratchet_state_in_ui(
-                                        ConversationId, NewRatchetState, UIState
+                                        PeerName, NewRatchetState, UIState
                                     ),
 
                                     %% Show success message matching X3DH format
@@ -5017,12 +5060,11 @@ handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
         Ciphertext = base64:decode(maps:get(<<"ciphertext">>, RatchetPayload)),
         Nonce = base64:decode(maps:get(<<"nonce">>, RatchetPayload)),
 
-        %% Get the stored ratchet state for this conversation
-        ConversationId = create_conversation_id(
-            From, WSChatState#ws_chat_state.username
-        ),
+        %% Get the stored ratchet state for this conversation (use peer name directly)
+        PeerName = From,
+        ?dbg("Looking up ratchet session with peer: ~s", [PeerName]),
 
-        case get_stored_ratchet_state(ConversationId, WSChatState) of
+        case get_stored_ratchet_state(PeerName, WSChatState) of
             {ok, RatchetState} ->
                 %% Reconstruct ratchet message structure
                 RatchetMessage = #{
@@ -5060,7 +5102,7 @@ handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
 
                         %% Store updated ratchet state
                         UIStateWithUpdatedRatchet = store_ratchet_state_in_ui(
-                            ConversationId, NewRatchetState, UIState
+                            PeerName, NewRatchetState, UIState
                         ),
                         %% Display the decrypted message
                         add_message(
@@ -5082,8 +5124,8 @@ handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
                         )
                 end;
             {error, not_found} ->
-                ?error("No ratchet state found for unified conversation ~s", [
-                    ConversationId
+                ?error("No ratchet state found for peer ~s", [
+                    PeerName
                 ]),
                 add_system_message(
                     lists:flatten(
@@ -5106,23 +5148,16 @@ handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
 %% Show ratchet sessions summary for key_status command
 show_ratchet_sessions_summary(UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
-    Username = WSChatState#ws_chat_state.username,
 
     %% Get all active ratchet sessions from the stored state
     RatchetSessions = WSChatState#ws_chat_state.ratchet_sessions,
     ActiveSessions = maps:fold(
-        fun(ConvId, RatchetState, Acc) ->
-            %% Extract peer name from conversation ID (format: "alice:bob")
-            case string:split(binary_to_list(ConvId), ":") of
-                [User1, User2] ->
-                    Peer =
-                        case User1 =:= Username of
-                            true -> User2;
-                            false -> User1
-                        end,
-                    %% Get comprehensive state info from ratchet state
-                    StateInfo = cryptic_double_ratchet:get_state_info(RatchetState),
-                    ?dbg("DISPLAY ratchet state for ~s: ~p", [Peer, StateInfo]),
+        fun(PeerName, RatchetState, Acc) ->
+            %% ConvId is now just the peer name directly - no parsing needed
+            Peer = PeerName,
+            %% Get comprehensive state info from ratchet state
+            StateInfo = cryptic_double_ratchet:get_state_info(RatchetState),
+            ?dbg("DISPLAY ratchet state for ~s: ~p", [Peer, StateInfo]),
 
                     %% Calculate meaningful activity counters
                     DHStep = maps:get(dh_ratchet_step, StateInfo, 0),
@@ -5135,20 +5170,17 @@ show_ratchet_sessions_summary(UIState) ->
                     ApproxSent = CurrentSendMsg + (DHStep * 10), % Rough estimate
                     ApproxReceived = CurrentRecvMsg + PrevChainLength,
 
-                    SessionInfo = #{
-                        peer => Peer,
-                        dh_step => DHStep,
-                        current_send => CurrentSendMsg,
-                        current_recv => CurrentRecvMsg,
-                        prev_chain_length => PrevChainLength,
-                        skipped_keys => SkippedKeysCount,
-                        approx_sent => ApproxSent,
-                        approx_received => ApproxReceived
-                    },
-                    [SessionInfo | Acc];
-                _ ->
-                    Acc
-            end
+            SessionInfo = #{
+                peer => Peer,
+                dh_step => DHStep,
+                current_send => CurrentSendMsg,
+                current_recv => CurrentRecvMsg,
+                prev_chain_length => PrevChainLength,
+                skipped_keys => SkippedKeysCount,
+                approx_sent => ApproxSent,
+                approx_received => ApproxReceived
+            },
+            [SessionInfo | Acc]
         end,
         [],
         RatchetSessions
@@ -5239,11 +5271,11 @@ handle_x3dh_success_with_ratchet_init(SharedSecret, PeerUser, Role, UIState) ->
                         cryptic_double_ratchet:init_receiver(SharedSecret, MyDHPair)
                 end,
 
-                %% Store ratchet state for future use
-                ConversationId = create_conversation_id(PeerUser, WSChatState#ws_chat_state.username),
+                %% Store ratchet state for future use (use peer name directly)
+                PeerName = PeerUser,
                 
                 %% Check if we already have a ratchet session to avoid conflicts
-                UIStateWithRatchet = case get_stored_ratchet_state(ConversationId, WSChatState) of
+                UIStateWithRatchet = case get_stored_ratchet_state(PeerName, WSChatState) of
                     {ok, ExistingState} ->
                         StateInfo = cryptic_double_ratchet:get_state_info(ExistingState),
                         DHStep = maps:get(dh_ratchet_step, StateInfo),
@@ -5254,7 +5286,7 @@ handle_x3dh_success_with_ratchet_init(SharedSecret, PeerUser, Role, UIState) ->
                         UIState;
                     {error, not_found} ->
                         ?dbg("Creating new ratchet session for ~s with role ~s", [PeerUser, Role]),
-                        store_ratchet_state_in_ui(ConversationId, RatchetState, UIState)
+                        store_ratchet_state_in_ui(PeerName, RatchetState, UIState)
                 end,
 
                 %% Ratchet initialization complete - peer will discover ratchet availability 

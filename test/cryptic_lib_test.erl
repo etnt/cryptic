@@ -15,6 +15,15 @@
 %%%===================================================================
 
 setup() ->
+    %% Start event manager for debug logging
+    case whereis(cryptic_event_manager) of
+        undefined ->
+            {ok, _Pid} = gen_event:start_link({local, cryptic_event_manager}),
+            gen_event:add_handler(cryptic_event_manager, cryptic_console_logger, []);
+        _ ->
+            ok
+    end,
+    
     cryptic_lib:initialize().
 
 %%%===================================================================
