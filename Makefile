@@ -1,12 +1,14 @@
-.PHONY: all compile xref clean server client edoc
+.PHONY: all compile xref clean server client edoc lux-runpty
 
-all: CA compile xref
+all: CA compile xref lux-runpty
 
-server:
-	rebar3 shell --sname server --apps ssl,ranch,cowboy --eval 'application:load(gunsmoke).'
+lux-runpty: ./_build/default/lib/lux/priv/bin/runpty
 
-client:
-	rebar3 shell --sname client --apps ssl,gun --eval 'application:load(gunsmoke).'
+./_build/default/lib/lux/priv/bin/runpty:
+	(cd ./_build/default/lib/lux ; \
+		autoconf ; \
+		./configure ; \
+		make)
 
 compile:
 	rebar3 compile
@@ -22,3 +24,20 @@ CA:
 
 clean:
 	rebar3 clean
+
+# ---------------------------------------------------------------------
+# TEST STUFF
+# Used by Lux test scripts
+# ---------------------------------------------------------------------
+
+.PHONY: lux-tests send_messages-lux
+
+lux-tests: send_messages-lux
+
+send_messages-lux:
+	./_build/default/lib/lux/bin/lux ./test/send_messages.lux
+
+
+
+
+

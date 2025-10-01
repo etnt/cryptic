@@ -880,7 +880,7 @@ process_command("list_users", UIState) ->
             case WSChatState#ws_chat_state.ws_client_state of
                 ClientState when is_record(ClientState, client_state) ->
                     ListUsersCmd = #{type => <<"list_users">>},
-                    ?msg_out("UI sending list_users command: ~p", [ListUsersCmd]),
+                    ?dbg("UI sending list_users command: ~p", [ListUsersCmd]),
                     case
                         cryptic_ws_client:send_command(
                             ClientState#client_state.ws_client_pid, ListUsersCmd
@@ -916,7 +916,7 @@ process_command("fetch_messages", UIState) ->
             case WSChatState#ws_chat_state.ws_client_state of
                 ClientState when is_record(ClientState, client_state) ->
                     GetMessagesCmd = #{type => <<"get_messages">>},
-                    ?msg_out("UI sending get_messages command: ~p", [
+                    ?dbg("UI sending get_messages command: ~p", [
                         GetMessagesCmd
                     ]),
                     case
@@ -956,7 +956,7 @@ process_command("key_status", UIState) ->
             case WSChatState#ws_chat_state.ws_client_state of
                 ClientState when is_record(ClientState, client_state) ->
                     KeyStatusCmd = #{type => <<"key_status">>},
-                    ?msg_out("UI sending key_status command: ~p", [KeyStatusCmd]),
+                    ?dbg("UI sending key_status command: ~p", [KeyStatusCmd]),
                     case
                         cryptic_ws_client:send_command(
                             ClientState#client_state.ws_client_pid, KeyStatusCmd
@@ -1381,7 +1381,6 @@ handle_websocket_message(Message, UIState) ->
     case Message of
         {text, JsonText} ->
             ?dbg("Attempting to decode JSON: ~p", [JsonText]),
-            ?msg_in("UI received WebSocket message: ~s", [JsonText]),
             try
                 Data = jsx:decode(JsonText),
                 ?dbg("Successfully decoded JSON: ~p", [Data]),
@@ -1722,7 +1721,7 @@ send_x3dh_message_to_server(
         %% Include complete metadata for proper X3DH signature verification
         metadata => base64:encode(erlang:term_to_binary(Metadata))
     },
-    ?msg_out("UI sending X3DH message to ~s: ~p", [ToUser, X3DHSendCmd]),
+    ?dbg("UI sending X3DH message to ~s: ~p", [ToUser, X3DHSendCmd]),
 
     %% Add warning if no OTPK was available for this message
     UIStateWithWarning =
@@ -3939,7 +3938,6 @@ send_encrypted_room_message(ClientState, RoomId, Message) ->
                 },
 
                 ?dbg("Sending encrypted room message command: ~p", [Command]),
-                ?msg_out("UI sending encrypted room message: ~p", [Command]),
                 cryptic_ws_client:send_command(
                     ClientState#client_state.ws_client_pid, Command
                 ),
@@ -4122,7 +4120,7 @@ load_client_keys_and_connect(UIState, ConfigDir, Passphrase) ->
                             SignedPrekeySignature
                         )
                     },
-                    ?msg_out("UI uploading identity keys: ~p", [UploadKeysCmd]),
+                    ?dbg("UI uploading identity keys: ~p", [UploadKeysCmd]),
                     case
                         cryptic_ws_client:send_command(ClientPid, UploadKeysCmd)
                     of
@@ -4205,7 +4203,7 @@ upload_prekey_bundle_and_finalize(
         type => <<"upload_prekey_bundle">>,
         one_time_prekeys => PrekeyBundle
     },
-    ?msg_out("UI uploading prekey bundle: ~p", [PrekeyBundleCmd]),
+    ?dbg("UI uploading prekey bundle: ~p", [PrekeyBundleCmd]),
     case cryptic_ws_client:send_command(ClientPid, PrekeyBundleCmd) of
         ok ->
             %% All steps completed successfully
@@ -4864,7 +4862,7 @@ auto_save_ratchet_session(PeerName, RatchetState, UIState) ->
                     ok ->
                         ?dbg("Auto-saved ratchet session for ~s", [OtherUsername]);
                     {error, SaveError} ->
-                        ?msg_out("Warning: Failed to auto-save ratchet session for ~s: ~p", [OtherUsername, SaveError])
+                        ?dbg("Warning: Failed to auto-save ratchet session for ~s: ~p", [OtherUsername, SaveError])
                 end
             end)
     end.
@@ -4913,7 +4911,7 @@ send_message_via_ratchet(ToUser, Message, UIState) ->
                         maps:get(dh_ratchet_step, BeforeInfo), 
                         maps:get(sending_chain_active, BeforeInfo)
                     ]),
-                    
+
                     case
                         cryptic_double_ratchet:encrypt_message(
                             list_to_binary(Message), RatchetState
@@ -4927,7 +4925,7 @@ send_message_via_ratchet(ToUser, Message, UIState) ->
                                 maps:get(dh_ratchet_step, AfterInfo), 
                                 maps:get(sending_chain_active, AfterInfo)
                             ]),
-                            
+
                             %% Send ratchet message to server
                             case
                                 send_ratchet_message_to_server(
@@ -4974,7 +4972,7 @@ send_message_via_x3dh_fallback(ToUser, Message, FromUser, ClientState, WSChatSta
         type => <<"get_key_bundle">>,
         user => list_to_binary(ToUser)
     },
-    ?msg_out(
+    ?dbg(
         "UI requesting key bundle for ~s: ~p", [
             ToUser, GetKeyBundleCmd
         ]
@@ -5049,7 +5047,7 @@ send_ratchet_message_to_server(ToUser, RatchetMessage, ClientState, _UIState) ->
 %% Handle ratchet message via unified encrypted message path
 handle_ratchet_message_unified(From, RatchetPayload, UIState) ->
     WSChatState = UIState#ui_state.ws_chat_state,
-    ?msg_in("Received ratchet message via unified path from ~s: ~p", [From, RatchetPayload]),
+    ?dbg("Received ratchet message via unified path from ~s: ~p", [From, RatchetPayload]),
 
     try
         %% Extract ratchet message components from the payload
