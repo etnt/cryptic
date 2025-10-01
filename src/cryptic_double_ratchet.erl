@@ -36,6 +36,143 @@
 %%%
 %%% Both parties maintain independent sending/receiving chains that advance
 %%% separately, with periodic DH ratchet steps injecting fresh entropy.
+%%% == State-Event Diagram ==
+%%%
+%%% The following diagram illustrates the complete session flow between Alice (sender)
+%%% and Bob (receiver), showing state transitions from X3DH key agreement through
+%%% Double Ratchet messaging with synchronization points.
+%%%
+%%% <pre>
+%%% ┌──────────────────────────────────────────────────────────────────────────┐
+%%% │                           X3DH KEY AGREEMENT PHASE                       │
+%%% └──────────────────────────────────────────────────────────────────────────┘
+%%%                                    │
+%%%                              [X3DH Complete]
+%%%                         RootKey = DH(Alice, Bob)
+%%%                                    │
+%%%                                    ▼
+%%% ┌──────────────────────────────────────────────────────────────────────────┐
+%%% │                        DOUBLE RATCHET INITIALIZATION                     │
+%%% │                                                                          │
+%%% │  Alice (Sender):                   │  Bob (Receiver):                    │
+%%% │  ┌─────────────────────┐           │  ┌──────────────────────┐           │
+%%% │  │ SENDER_INIT         │           │  │ RECEIVER_INIT        │           │
+%%% │  │ sending_active=true │           │  │ sending_active=false │           │
+%%% │  │ recv_active=true    │           │  │ recv_active=true     │           │
+%%% │  │ dh_step=0           │           │  │ dh_step=0            │           │
+%%% │  │ send_msg_num=0      │           │  │ recv_msg_num=0       │           │
+%%% │  │ recv_msg_num=0      │           │  │ send_msg_num=0       │           │
+%%% │  └─────────────────────┘           │  └──────────────────────┘           │
+%%% └──────────────────────────────────────────────────────────────────────────┘
+%%%                                    │
+%%%                           [Alice encrypts M1]
+%%%                                    │
+%%%                                    ▼
+%%% ┌──────────────────────────────────────────────────────────────────────────┐
+%%% │                           MESSAGE EXCHANGE PHASE                         │
+%%% │                                                                          │
+%%% │  Alice State Changes:              │  Bob State Changes:                 │
+%%% │  ┌─────────────────────┐           │  ┌─────────────────────┐            │
+%%% │  │ SENDING_M1          │  ──────►  │  │ RECEIVING_M1        │            │
+%%% │  │ send_msg_num=1      │   M1      │  │ recv_msg_num=1      │            │
+%%% │  │ dh_step=0           │           │  │ dh_step=0           │            │
+%%% │  │ (msg_key derived)   │           │  │ (msg_key derived)   │            │
+%%% │  └─────────────────────┘           │  └─────────────────────┘            │
+%%% │                                    │                                     │
+%%% │  ┌─────────────────────┐           │  ┌─────────────────────┐            │
+%%% │  │ SENDING_M2          │  ──────►  │  │ RECEIVING_M2        │            │
+%%% │  │ send_msg_num=2      │   M2      │  │ recv_msg_num=2      │            │
+%%% │  │ dh_step=0           │           │  │ dh_step=0           │            │
+%%% │  └─────────────────────┘           │  └─────────────────────┘            │
+%%% └──────────────────────────────────────────────────────────────────────────┘
+%%%                                    │
+%%%                      [Bob wants to send reply]
+%%%                                    │
+%%%                                    ▼
+%%% ┌──────────────────────────────────────────────────────────────────────────┐
+%%% │                         DH RATCHET DIRECTION CHANGE                      │
+%%% │                                                                          │
+%%% │  Alice: No change yet              │  Bob: Auto DH Ratchet               │
+%%% │  ┌─────────────────────┐           │  ┌─────────────────────┐            │
+%%% │  │ AWAITING_REPLY      │           │  │ ACTIVATING_SEND     │            │
+%%% │  │ send_msg_num=2      │           │  │ Generate new DH     │            │
+%%% │  │ recv_msg_num=0      │           │  │ dh_step=0→1         │            │
+%%% │  │ dh_step=0           │           │  │ sending_active=true │            │
+%%% │  └─────────────────────┘           │  └─────────────────────┘            │
+%%% │                                    │                                     │
+%%% │                                    │  ┌─────────────────────┐            │
+%%% │                                    │  │ SENDING_REPLY       │            │
+%%% │                                    │  │ send_msg_num=1      │  ─────┐    │
+%%% │                                    │  │ dh_step=1           │       │    │
+%%% │                                    │  └─────────────────────┘       │    │
+%%% └──────────────────────────────────────────────────────────────────────────┘
+%%%                                                                       │
+%%%                                                                 [Bob Reply]
+%%%                                                                       │
+%%%                                                                       ▼
+%%% ┌──────────────────────────────────────────────────────────────────────────┐
+%%% │                        ALICE PROCESSES BOB'S REPLY                       │
+%%% │                                                                          │
+%%% │  Alice: DH Ratchet on Receive      │  Bob: Stable State                  │
+%%% │  ┌─────────────────────┐           │  ┌─────────────────────┐            │
+%%% │  │ DH_RATCHET_RECV     │           │  │ SEND_READY          │            │
+%%% │  │ See new DH pub key  │           │  │ Can send more       │            │
+%%% │  │ Generate new DH     │           │  │ send_msg_num=1      │            │
+%%% │  │ dh_step=0→1         │           │  │ dh_step=1           │            │
+%%% │  │ recv_msg_num=1      │           │  └─────────────────────┘            │
+%%% │  └─────────────────────┘           │                                     │
+%%% │                                    │                                     │
+%%% │  ┌───────────────────────┐         │                                     │
+%%% │  │ BIDIRECTIONAL         │         │                                     │
+%%% │  │ Can send &amp; receive│         │                                     │
+%%% │  │ dh_step=1             │         │                                     │
+%%% │  │ Both chains active    │         │                                     │
+%%% │  └───────────────────────┘         │                                     │
+%%% └──────────────────────────────────────────────────────────────────────────┘
+%%%                                    │
+%%%                          [Continued messaging]
+%%%                                    │
+%%%                                    ▼
+%%% ┌──────────────────────────────────────────────────────────────────────────┐
+%%% │                    STEADY STATE BIDIRECTIONAL MESSAGING                  │
+%%% │                                                                          │
+%%% │  • Both parties can send/receive messages freely                         │
+%%% │  • DH ratchet steps occur automatically on direction changes             │
+%%% │  • Out-of-order messages handled via skipped key cache                   │
+%%% │  • Forward secrecy maintained through chain key advancement              │
+%%% │  • Break-in recovery achieved through periodic DH ratchet steps          │
+%%% │                                                                          │
+%%% │  Event Triggers:                                                         │
+%%% │  - encrypt_message/2 → Chain advancement, optional DH ratchet            │
+%%% │  - decrypt_message/2 → Chain advancement, gap handling, DH ratchet       │
+%%% │  - Direction change → Automatic DH ratchet with new ephemeral keys       │
+%%% │  - Message gaps → Skipped key derivation and caching                     │
+%%% └──────────────────────────────────────────────────────────────────────────┘
+%%% </pre>
+%%%
+%%% == State Transition Events ==
+%%%
+%%% Key state transitions and their triggers:
+%%%
+%%% - SENDER_INIT + encrypt_message/2 → SENDING_ACTIVE (send_msg_num incremented)
+%%% - RECEIVER_INIT + decrypt_message/2 → RECEIVING_ACTIVE (recv_msg_num incremented)
+%%% - RECEIVING_ACTIVE + encrypt_message/2 (first) → BIDIRECTIONAL (DH ratchet, new keys)
+%%% - SENDING_ACTIVE + decrypt_message/2 (new DH) → BIDIRECTIONAL (DH ratchet, new keys)
+%%% - BIDIRECTIONAL + encrypt_message/2 → BIDIRECTIONAL (send chain advance, optional DH ratchet)
+%%% - BIDIRECTIONAL + decrypt_message/2 → BIDIRECTIONAL (recv chain advance, gap handling)
+%%% - Any State + Message gap → Same State (skipped key derivation and caching)
+%%% - Any State + Out-of-order message → Same State (cached key usage and removal)
+%%%
+%%% == Critical Synchronization Points ==
+%%%
+%%% <ol>
+%%%   <li><strong>X3DH Completion:</strong> Both parties derive identical root key</li>
+%%%   <li><strong>First Message:</strong> Sender activates, receiver waits</li>
+%%%   <li><strong>Direction Change:</strong> DH ratchet step synchronizes new chains</li>
+%%%   <li><strong>Message Gaps:</strong> Skipped key derivation maintains decryption capability</li>
+%%%   <li><strong>Chain Advancement:</strong> Each message advances appropriate chain independently</li>
+%%% </ol>
+%%%
 %%% == Security Properties ==
 %%%
 %%% <ul>
@@ -45,6 +182,11 @@
 %%%   <li><strong>Out-of-Order Delivery:</strong> Delayed messages can be decrypted using cached skipped keys</li>
 %%%   <li><strong>Cryptographic Agility:</strong> Uses libsodium's ChaCha20-Poly1305 AEAD for encryption</li>
 %%% </ul>
+%%%
+%%% == Further Reading ==
+%%%
+%%% For a comprehensive state machine analysis with detailed synchronization
+%%% points and implementation notes, see: docs/DOUBLE_RATCHET_STATE_MACHINE.md
 %%%
 %%% @author Cryptic Team
 %%% @version 1.0.0

@@ -1,0 +1,100 @@
+[doc Double Ratchet Console Test - Error Handling]
+
+[config timeout=10000]
+
+[shell console]
+    # Start console
+    !erl -pa ../../_build/default/lib/cryptic/ebin -s cryptic_console_simple start -noshell
+    ?Cryptic Double Ratchet Console
+    ?cryptic> 
+
+    # Test help command
+    !help
+    ?Available commands:
+    ?generate_root_key
+    ?start_alice
+    ?encrypt
+    ?decrypt
+    ?quit
+    ?cryptic> 
+
+    # Try to encrypt without initialization
+    !encrypt test message
+    ?ERROR: No engine started
+    ?cryptic> 
+
+    # Try to decrypt without initialization  
+    !decrypt abcd1234
+    ?ERROR: No engine started
+    ?cryptic> 
+
+    # Check status with no engine
+    !status
+    ?ENGINE: Not started
+    ?ROLE: None
+    ?MESSAGES: 0
+    ?cryptic> 
+
+    # Try to start with invalid hex keys
+    !start_alice invalid_hex invalid_pub invalid_priv
+    ?ERROR: Invalid hex format
+    ?cryptic> 
+
+    # Generate valid root key
+    !generate_root_key
+    ?ROOT_KEY: ([0-9a-f]+)
+    [global root_key=$1]
+    ?cryptic> 
+
+    # Generate valid keypair
+    !generate_keys
+    ?PUBLIC_KEY: ([0-9a-f]+)
+    [global pub_key=$1]
+    ?PRIVATE_KEY: ([0-9a-f]+)
+    [global priv_key=$1]
+    ?cryptic> 
+
+    # Initialize Alice successfully
+    !start_alice $root_key $pub_key $priv_key
+    ?SUCCESS: Alice initialized
+    ?cryptic> 
+
+    # Try to start again (should fail)
+    !start_alice $root_key $pub_key $priv_key
+    ?ERROR: Engine already started
+    ?cryptic> 
+
+    # Try to start Bob on same engine (should fail)
+    !start_bob $root_key $pub_key $priv_key
+    ?ERROR: Engine already started
+    ?cryptic> 
+
+    # Test verbose toggle
+    !verbose
+    ?Verbose mode: true
+    ?cryptic> 
+
+    !verbose
+    ?Verbose mode: false
+    ?cryptic> 
+
+    # Test unknown command
+    !unknown_command
+    ?ERROR: Unknown command
+    ?cryptic> 
+
+    # Test empty command (should be ignored)
+    !
+    ?cryptic> 
+
+    # Test debug info
+    !debug
+    ?DEBUG INFO:
+    ?current_state:
+    ?cryptic> 
+
+    # Quit
+    !quit
+    ?Goodbye!
+
+[cleanup]

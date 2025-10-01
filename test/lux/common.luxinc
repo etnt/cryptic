@@ -1,0 +1,16 @@
+# See: https://github.com/hawk/lux/issues/50
+[config shell_prompt_cmd=bind 'set enable-bracketed-paste off'; unset LS_COLORS; unset PROMPT_COMMAND; export PS1=SH-PROMPT:]
+
+[global fail_pattern=[\s][Ee][Rr][Rr][Oo][Rr]]
+[global eprompt=\d+>\s]
+
+[macro log message]
+    [progress \n$message\n]
+[endmacro]
+
+[macro check-exitcode code]
+    ?SH-PROMPT
+    !echo ==$$?==
+    ?==${code}==
+    ?SH-PROMPT
+[endmacro]

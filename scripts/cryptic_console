@@ -1,0 +1,13 @@
+#!/usr/bin/env escript
+%%! -pa _build/default/lib/cryptic/ebin
+
+%%% @doc Escript entry point for the Cryptic Console
+%%%
+%%% Usage: ./cryptic_console [--verbose]
+
+main(Args) ->
+    % Ensure crypto application is started
+    application:ensure_all_started(crypto),
+
+    % Start the console
+    cryptic_console_simple:main(Args).

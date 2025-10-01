@@ -1,0 +1,38 @@
+[doc Test Erlang Event Manager Example from README]
+
+[include common.luxinc]
+
+[shell server]
+    -$fail_pattern
+    [invoke log "Starting server"]
+    !make start-server
+    ?$eprompt
+
+[shell alice]
+    -$fail_pattern
+    [invoke log "Starting Alice"]
+    !make start-alice
+    ?Commands: connect
+    ?>
+
+[shell bob]
+    -$fail_pattern
+    [invoke log "Starting Bob"]
+    !make start-bob
+    ?Commands: connect
+    ?>
+
+[shell alice]
+    [invoke log "Alice connects to server"]
+    !connect
+    ?Connected to server
+    ?Commands: send, quit
+    ?>
+
+[cleanup]
+    !make stop-alice
+    ?SH-PROMPT:
+    !make stop-bob
+    ?SH-PROMPT:
+    !make stop-server
+    ?SH-PROMPT:
