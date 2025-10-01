@@ -1,4 +1,4 @@
-.PHONY: all compile xref clean server client
+.PHONY: all compile xref clean server client edoc
 
 all: CA compile xref
 
@@ -13,6 +13,9 @@ compile:
 
 xref:
 	rebar3 xref
+
+edoc:
+	rebar3 edoc
 
 CA:
 	git clone --depth 1 https://github.com/etnt/myca.git CA

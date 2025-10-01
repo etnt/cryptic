@@ -12,6 +12,7 @@
 %%%   <li>Asynchronous messaging: Works with offline/online patterns</li>
 %%%   <li>Out-of-order handling: Skipped message key store for delayed messages</li>
 %%%   <li>High performance: Native KDF operations (39x faster than Erlang)</li>
+%%%   <li>ChaCha20-Poly1305 AEAD: Modern authenticated encryption with libsodium</li>
 %%% </ul>
 %%%
 %%% == Architecture ==
@@ -24,6 +25,26 @@
 %%%
 %%% Each chain advances independently, with periodic DH ratchet steps
 %%% that inject fresh entropy and provide break-in recovery.
+%%%
+%%% == Usage Pattern ==
+%%%
+%%% 1. After X3DH key agreement, initialize sender and receiver states
+%%% 2. Sender encrypts messages using encrypt_message/2
+%%% 3. Receiver decrypts messages using decrypt_message/2
+%%% 4. DH ratchet steps occur automatically for forward secrecy
+%%% 5. Out-of-order messages handled via skipped key cache
+%%%
+%%% Both parties maintain independent sending/receiving chains that advance
+%%% separately, with periodic DH ratchet steps injecting fresh entropy.
+%%% == Security Properties ==
+%%%
+%%% <ul>
+%%%   <li><strong>Forward Secrecy:</strong> Compromise of current keys does not affect past messages</li>
+%%%   <li><strong>Future Secrecy (Break-in Recovery):</strong> New DH ratchet steps restore security after compromise</li>
+%%%   <li><strong>Replay Protection:</strong> Each message uses unique keys and sequence numbers</li>
+%%%   <li><strong>Out-of-Order Delivery:</strong> Delayed messages can be decrypted using cached skipped keys</li>
+%%%   <li><strong>Cryptographic Agility:</strong> Uses libsodium's ChaCha20-Poly1305 AEAD for encryption</li>
+%%% </ul>
 %%%
 %%% @author Cryptic Team
 %%% @version 1.0.0
@@ -55,10 +76,36 @@
     % Utilities and debugging
     get_state_info/1,
     cleanup_expired_keys/1,
-    
+
     % Test helpers (for simulating X3DH handshake)
     set_remote_dh_key/2
 ]).
+
+%% Type specifications for exported functions
+-spec init_sender(binary(), {binary(), binary()}) -> {ok, ratchet_state()}.
+-spec init_receiver(binary(), {binary(), binary()}) -> {ok, ratchet_state()}.
+-spec activate_sending_chain(ratchet_state()) ->
+    {ok, ratchet_state()} | {error, term()}.
+
+-spec encrypt_message(binary(), ratchet_state()) ->
+    {ok, message(), ratchet_state()} | {error, term()}.
+-spec decrypt_message(message(), ratchet_state()) ->
+    {ok, binary(), ratchet_state()} | {error, term()}.
+
+-spec kdf_rk(binary(), binary()) -> {binary(), binary(), binary()}.
+-spec advance_sending_chain(binary(), non_neg_integer()) ->
+    {binary(), binary()}.
+-spec advance_receiving_chain(binary(), non_neg_integer()) ->
+    {binary(), binary()}.
+-spec kdf_mk(binary()) -> {binary(), binary()}.
+-spec kdf_derive_chain_key(binary(), binary()) -> binary().
+
+-spec serialize_state(ratchet_state()) -> binary().
+-spec deserialize_state(binary()) -> {ok, ratchet_state()} | {error, term()}.
+
+-spec get_state_info(ratchet_state()) -> map().
+-spec cleanup_expired_keys(ratchet_state()) -> ratchet_state().
+-spec set_remote_dh_key(ratchet_state(), binary()) -> ratchet_state().
 
 -include("cryptic.hrl").
 
@@ -258,7 +305,7 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
     byte_size(DHPrivate) =:= 32
 ->
     % ?dbg("Initializing Double Ratchet receiver with DH keypair.~n", []),
-    % ?dbg("RootKey size: ~p bytes, DHPublic: ~p bytes, DHPrivate: ~p bytes.~n", 
+    % ?dbg("RootKey size: ~p bytes, DHPublic: ~p bytes, DHPrivate: ~p bytes.~n",
     %      [byte_size(RootKey), byte_size(DHPublic), byte_size(DHPrivate)]),
 
     Now = erlang:system_time(millisecond),
@@ -317,7 +364,13 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
 %% sending and receiving directions.
 %%
 %% Uses the high-performance Blake2b KDF (39x faster than Erlang) for
-%% optimal ratchet performance.
+%% optimal ratchet performance. The function mixes the root key with fresh
+%% DH entropy to provide forward secrecy and break-in recovery.
+%%
+%% @param RootKey Current root key from the ratchet chain (32 bytes)
+%% @param DhOutput Fresh DH shared secret from new keypair (32 bytes)
+%% @returns {NewRootKey, InitChainKey, RespChainKey} - new root key and
+%%          separate chain keys for initiator and responder directions
 kdf_rk(RootKey, DhOutput) ->
     % Use high-performance Blake2b KDF directly (39x faster than Erlang)
     % Mix the root key and DH output by XORing them (both are 32 bytes)
@@ -336,6 +389,12 @@ kdf_rk(RootKey, DhOutput) ->
 %% This function is used when encrypting outgoing messages. It derives the
 %% message key for encryption and advances the sending chain key for the
 %% next message. The receiving chain is completely unaffected.
+%%
+%% This maintains forward secrecy by ensuring each message uses a unique key.
+%%
+%% @param SendChainKey Current sending chain key (32 bytes)
+%% @param MsgNumber Message number in the current sending chain
+%% @returns {NewChainKey, MessageKey} - advanced chain key and message-specific key
 advance_sending_chain(SendChainKey, MsgNumber) ->
     MessageKey = cryptic_nif:kdf_derive(
         32, MsgNumber, <<"msg">>, SendChainKey
@@ -350,6 +409,13 @@ advance_sending_chain(SendChainKey, MsgNumber) ->
 %% This function is used when decrypting incoming messages. It derives the
 %% message key for decryption and advances the receiving chain key for the
 %% next expected message. The sending chain is completely unaffected.
+%%
+%% Used both for current expected messages and when pre-deriving keys for
+%% message gaps (out-of-order delivery support).
+%%
+%% @param RecvChainKey Current receiving chain key (32 bytes)
+%% @param MsgNumber Message number to derive key for
+%% @returns {NewChainKey, MessageKey} - advanced chain key and message-specific key
 advance_receiving_chain(RecvChainKey, MsgNumber) ->
     MessageKey = cryptic_nif:kdf_derive(
         32, MsgNumber, <<"msg">>, RecvChainKey
@@ -364,6 +430,9 @@ advance_receiving_chain(RecvChainKey, MsgNumber) ->
 %% Derives the encryption key and authentication key from a message key.
 %% Note: For ChaCha20-Poly1305, we don't need a separate IV since the
 %% aead_encrypt function generates its own nonce.
+%%
+%% @param MessageKey The message-specific key derived from chain advancement (32 bytes)
+%% @returns {EncKey, AuthKey} - separate 32-byte keys for encryption and authentication
 kdf_mk(MessageKey) ->
     EncKey = cryptic_nif:kdf_derive(32, 0, <<"enc">>, MessageKey),
     AuthKey = cryptic_nif:kdf_derive(32, 1, <<"mac">>, MessageKey),
@@ -372,6 +441,11 @@ kdf_mk(MessageKey) ->
 %% @doc Derive initial chain key from root key
 %%
 %% Helper function for initialization - derives chain keys from the root key.
+%% Used to establish separate sending/receiving chains after X3DH key agreement.
+%%
+%% @param RootKey The X3DH shared secret (32 bytes)
+%% @param Context Binary context string (&lt;&lt;"init"&gt;&gt; or &lt;&lt;"resp"&gt;&gt;) for domain separation
+%% @returns Derived chain key (32 bytes)
 kdf_derive_chain_key(RootKey, Context) ->
     cryptic_nif:kdf_derive(32, 0, Context, RootKey).
 
@@ -393,7 +467,7 @@ kdf_derive_chain_key(RootKey, Context) ->
 %% @returns {ok, ActivatedState} or {error, Reason}
 activate_sending_chain(State = #ratchet_state{}) ->
     % ?dbg("Activating sending chain for receiver", []),
-    
+
     case State#ratchet_state.sending_chain_active of
         true ->
             % Already active
@@ -408,13 +482,15 @@ activate_sending_chain(State = #ratchet_state{}) ->
                     % Bob's first reply should NOT perform a DH ratchet step
                     % The DH ratchet happens when Alice wants to send her second message
                     % For now, Bob just uses his X3DH-derived sending chain
-                    
+
                     CurrentRootKey = State#ratchet_state.root_key,
-                    
+
                     % Derive Bob's sending chain from the same X3DH root key (context "resp")
                     % This ensures Bob's sending chain matches what Alice expects for decryption
-                    NewSendChainKey = kdf_derive_chain_key(CurrentRootKey, <<"resp">>),
-                    
+                    NewSendChainKey = kdf_derive_chain_key(
+                        CurrentRootKey, <<"resp">>
+                    ),
+
                     % Update state with activated sending chain (no DH ratchet yet)
                     Now = erlang:system_time(millisecond),
                     ActivatedState = State#ratchet_state{
@@ -425,13 +501,32 @@ activate_sending_chain(State = #ratchet_state{}) ->
                         % Don't increment dh_ratchet_step - that happens when Alice receives this
                         last_updated = Now
                     },
-                    
-                    % ?dbg("Sending chain activated - DH step: ~p, can now encrypt messages", 
+
+                    % ?dbg("Sending chain activated - DH step: ~p, can now encrypt messages",
                     %      [ActivatedState#ratchet_state.dh_ratchet_step]),
                     {ok, ActivatedState}
             end
     end.
 
+%% @doc Encrypt a plaintext message using the Double Ratchet sending chain
+%%
+%% This is the main function for encrypting outgoing messages. It handles:
+%% <ul>
+%%   <li>Automatic sending chain activation for receivers</li>
+%%   <li>DH ratchet steps when changing message direction</li>
+%%   <li>ChaCha20-Poly1305 AEAD encryption with libsodium</li>
+%%   <li>Message header generation with ratchet metadata</li>
+%% </ul>
+%%
+%% The function automatically performs DH ratchet steps when needed (e.g., when
+%% Bob wants to send his first reply after receiving messages from Alice).
+%%
+%% The function automatically handles DH ratchet steps when needed for security.
+%%
+%% @param Plaintext The message to encrypt (binary)
+%% @param State Current Double Ratchet state
+%% @returns {ok, Message, NewState} where Message contains encrypted data and metadata,
+%%          or {error, Reason} if encryption fails
 encrypt_message(Plaintext, State = #ratchet_state{}) ->
     % ?dbg("encrypt_message - plaintext size: ~p bytes, sending_chain_active: ~p~n",
     %      [byte_size(Plaintext), State#ratchet_state.sending_chain_active]),
@@ -455,14 +550,14 @@ encrypt_message(Plaintext, State = #ratchet_state{}) ->
 encrypt_message_impl(Plaintext, State) ->
     % 1. Check if we need to perform DH ratchet step before sending
     % This happens when we're starting to send after receiving messages (direction change)
-    StateAfterRatchet = 
+    StateAfterRatchet =
         case should_perform_dh_ratchet_on_send(State) of
             true ->
                 perform_dh_ratchet_on_send(State);
             false ->
                 State
         end,
-    
+
     % 2. Use the (possibly updated) sending chain for outgoing messages
     CurrentSendingChain = StateAfterRatchet#ratchet_state.send_chain_key,
     CurrentMsgNum = StateAfterRatchet#ratchet_state.send_msg_number,
@@ -490,7 +585,8 @@ encrypt_message_impl(Plaintext, State) ->
         dh_step => StateAfterRatchet#ratchet_state.dh_ratchet_step,
 
         % Sending chain information
-        prev_chain_length => StateAfterRatchet#ratchet_state.prev_recv_chain_length,
+        prev_chain_length =>
+            StateAfterRatchet#ratchet_state.prev_recv_chain_length,
         msg_number => CurrentMsgNum,
 
         % Encrypted payload
@@ -592,10 +688,19 @@ decrypt_message_impl(Message, State) ->
 %%
 %% Converts the ratchet state into a binary format suitable for storage
 %% in databases or files. The serialized format should be encrypted
-%% before storage for security.
+%% before storage for security using cryptic_lib:encrypt_keys/2.
+%%
+%% Warning: The serialized state contains sensitive cryptographic material
+%% including chain keys and DH private keys. Always encrypt before storage.
+%%
+%% Usage:
+%% <pre>
+%% SerializedBinary = cryptic_double_ratchet:serialize_state(State),
+%% {ok, EncryptedState} = cryptic_lib:encrypt_keys(SerializedBinary, Password).
+%% </pre>
 %%
 %% @param State The ratchet state to serialize
-%% @returns Binary representation of the state
+%% @returns Binary representation of the state (MUST be encrypted before storage)
 serialize_state(State = #ratchet_state{}) ->
     % Convert to a term that can be serialized
     StateMap = #{
@@ -628,8 +733,14 @@ serialize_state(State = #ratchet_state{}) ->
 %% This function assumes the binary has been decrypted if it was
 %% encrypted during storage.
 %%
-%% @param Binary The serialized state data
-%% @returns {ok, State} or {error, Reason}
+%% Usage:
+%% <pre>
+%% {ok, DecryptedBinary} = cryptic_lib:decrypt_keys(EncryptedState, Password),
+%% {ok, State} = cryptic_double_ratchet:deserialize_state(DecryptedBinary).
+%% </pre>
+%%
+%% @param Binary The serialized state data (must be decrypted first if encrypted)
+%% @returns {ok, State} or {error, {deserialization_failed, Reason}}
 deserialize_state(Binary) when is_binary(Binary) ->
     try
         StateMap = binary_to_term(Binary),
@@ -668,9 +779,21 @@ deserialize_state(Binary) when is_binary(Binary) ->
 %%
 %% Returns useful debugging and monitoring information about the current
 %% state of the ratchet without exposing sensitive key material.
+%% Safe to use in logs and monitoring systems.
+%%
+%% Returned fields:
+%% <ul>
+%%   <li>`dh_ratchet_step' - Current DH ratchet step number</li>
+%%   <li>`send_msg_number' - Next outgoing message number</li>
+%%   <li>`recv_msg_number' - Next expected incoming message number</li>
+%%   <li>`skipped_keys_count' - Number of cached keys for out-of-order messages</li>
+%%   <li>`sending_chain_active' - Whether we can encrypt messages</li>
+%%   <li>`receiving_chain_active' - Whether we can decrypt messages</li>
+%%   <li>`has_remote_dh' - Whether remote party's DH key is known</li>
+%% </ul>
 %%
 %% @param State The ratchet state to inspect
-%% @returns Map with state information
+%% @returns Map with non-sensitive state information
 get_state_info(State = #ratchet_state{}) ->
     #{
         dh_ratchet_step => State#ratchet_state.dh_ratchet_step,
@@ -761,7 +884,8 @@ perform_dh_ratchet_step(Message, State) ->
 
         % Update sending chain key and reset counter for new DH step
         send_chain_key = NewSendChainKey,
-        send_msg_number = 0,  % CRITICAL FIX: Reset sending chain counter for new DH ratchet step
+        % CRITICAL FIX: Reset sending chain counter for new DH ratchet step
+        send_msg_number = 0,
 
         % Reset receiving chain for new DH step
         recv_chain_key = NewRecvChainKey,
@@ -823,12 +947,29 @@ handle_message_gap(State, IncomingMsgNum, _CurrentDHStep) ->
     end.
 
 %% @doc Derive and store keys for skipped messages
+%%
+%% Entry point for handling message gaps - initiates recursive derivation
+%% of keys for all messages between the expected number and received number.
+%%
+%% @param State Current ratchet state
+%% @param StartMsgNum First message number to derive (expected)
+%% @param EndMsgNum Last message number to derive (received)
+%% @returns {ok, NewState} with all gap keys pre-derived and stored
 derive_skipped_keys_for_gap(State, StartMsgNum, EndMsgNum) ->
     derive_skipped_keys_loop(
         State, StartMsgNum, EndMsgNum, State#ratchet_state.recv_chain_key
     ).
 
 %% @doc Recursively derive keys for skipped messages
+%%
+%% Performs the actual key derivation loop for handling message gaps.
+%% Each iteration derives one message key and advances the chain.
+%%
+%% @param State Current ratchet state (accumulates skipped keys)
+%% @param CurrentMsgNum Current message number being processed
+%% @param EndMsgNum Target message number (loop termination)
+%% @param ChainKey Current receiving chain key for derivation
+%% @returns {ok, NewState} when all keys derived
 derive_skipped_keys_loop(State, CurrentMsgNum, EndMsgNum, ChainKey) when
     CurrentMsgNum >= EndMsgNum
 ->
@@ -982,19 +1123,19 @@ process_delayed_message(Message, State) ->
 %% 1. We have received messages from the other party (recv_msg_number > 0)
 %% 2. AND we're about to send our first message in response (send_msg_number = 0)
 %% 3. AND we have the remote party's DH key
-%% 
+%%
 %% This represents a "direction change" - we were receiving, now we start sending.
 should_perform_dh_ratchet_on_send(State) ->
     HasReceivedMessages = State#ratchet_state.recv_msg_number > 0,
     FirstSendInDirection = State#ratchet_state.send_msg_number == 0,
     HasRemoteDH = State#ratchet_state.dh_remote =/= undefined,
-    
+
     HasReceivedMessages andalso FirstSendInDirection andalso HasRemoteDH.
 
 %% @doc Perform DH ratchet step before sending (generate new ephemeral key)
 %%
 %% This function implements the core DH ratchet operation when sending:
-%% 1. Generate a new ephemeral DH keypair 
+%% 1. Generate a new ephemeral DH keypair
 %% 2. Compute shared secret with remote party's current DH key
 %% 3. Derive new root key and sending chain key
 %% 4. Update state with new DH step
@@ -1003,13 +1144,13 @@ should_perform_dh_ratchet_on_send(State) ->
 perform_dh_ratchet_on_send(State) ->
     % 1. Generate new ephemeral DH keypair for this ratchet step
     {NewDHPub, NewDHPriv} = cryptic_nif:gen_keypair(),
-    
+
     % 2. Get current remote DH key and our old private key
     RemoteDHPub = State#ratchet_state.dh_remote,
-    
+
     % 3. Compute DH shared secret using our NEW private key and their current public key
     DHOutput = cryptic_nif:scalarmult(NewDHPriv, RemoteDHPub),
-    
+
     % 4. Perform root key derivation (DH ratchet)
     {NewRootKey, _InitChainKey, RespChainKey} = kdf_rk(
         State#ratchet_state.root_key, DHOutput
