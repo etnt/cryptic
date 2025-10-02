@@ -195,7 +195,9 @@
     %% OTPK usage tracking
     track_otpk_usage/3,
     check_otpk_usage/2,
-    cleanup_old_otpk/2
+    cleanup_old_otpk/2,
+    get_cryptic_dir/0,
+    get_cryptic_dir/1
 ]).
 
 -include("cryptic.hrl").
@@ -2287,3 +2289,25 @@ cleanup_old_otpk(MyUsername, SenderUsername) ->
     KeyTuple = {MyUsername, otpk_usage, SenderUsername},
     ets:delete(?PREKEY_TABLE, KeyTuple),
     ok.
+
+
+%% @doc Determine the CRYPTIC_DIR path.
+%% Will halt the system if not found.
+-spec get_cryptic_dir() -> string().
+get_cryptic_dir() ->
+    case {os:getenv("HOME"), os:getenv("CRYPTIC_DIR")} of
+        {false, false} ->
+            io:format("<FATAL ERROR> can't deduce CRYPTIC_DIR to use~n", []),
+            init:stop();
+        {Home, false} ->
+            filename:join([Home,".cryptic"]);
+        {_Home, Dir} ->
+            Dir
+    end.
+
+%% @doc Get user-specific directory path under CRYPTIC_DIR.
+-spec get_cryptic_dir(string()) -> string().
+get_cryptic_dir(Username) when is_binary(Username) ->
+    get_cryptic_dir(binary_to_list(Username));
+get_cryptic_dir(Username) when is_list(Username) ->
+    filename:join([get_cryptic_dir(), Username]).

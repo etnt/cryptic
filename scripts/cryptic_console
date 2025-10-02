@@ -1,0 +1,88 @@
+#!/usr/bin/env escript
+%%! -pa _build/default/lib/cryptic/ebin -pa _build/default/lib/eclip/ebin
+
+%%% @doc Escript entry point for the Cryptic Console
+%%%
+%%% Usage: ./cryptic_console [options]
+%%%
+%%% Options:
+%%%   --username <user>        Username (required)
+%%%   --server-host <host>     Server hostname (default: localhost)
+%%%   --server-port <port>     Server port (default: 8443)
+%%%   --verbose                Enable verbose output
+%%%   --help                   Show this help
+
+main(Args) ->
+    %% Ensure crypto application is started
+    application:ensure_all_started(crypto),
+
+    %% Parse command line options using eclip
+    case eclip:parse(Args, spec(), #{}) of
+        {done, _} ->
+            %% Help was shown or similar, exit gracefully
+            ok;
+        {error, Reason} ->
+            io:format("Error: ~s~n", [Reason]),
+            halt(1);
+        Result ->
+            io:format("Unexpected result: ~p~n", [Result]),
+            halt(1)
+    end.
+
+%% @doc Eclip command specification
+spec() ->
+    #{
+        help => "Cryptic Console - Secure messaging console interface",
+        opts => [
+            #{
+                name => username,
+                short => $u,
+                long => "username",
+                required => true,
+                help => "Username for the console session"
+            },
+            #{
+                name => server_host,
+                short => $s,
+                long => "server-host",
+                default => "localhost",
+                help => "Server hostname to connect to"
+            },
+            #{
+                name => server_port,
+                short => $p,
+                long => "server-port",
+                type => int,
+                default => 8443,
+                help => "Server port to connect to"
+            },
+            #{
+                name => verbose,
+                short => $v,
+                long => "verbose",
+                type => flag,
+                help => "Enable verbose output"
+            }
+        ],
+        cb => fun start_console/6
+    }.
+
+%% @doc Callback function for eclip
+start_console(_Env, _CmdStack, Username, ServerHost, ServerPort, Verbose) ->
+    Config = #{
+        username => list_to_binary(Username),
+        server_host => ServerHost,
+        server_port => ServerPort,
+        verbose => Verbose
+    },
+
+    case Verbose of
+        true ->
+            io:format("=== Cryptic Console ===~n"),
+            io:format("Config: ~p~n", [Config]);
+        false ->
+            io:format("=== Cryptic Console ===~n")
+    end,
+
+    %% Start the console
+    cryptic_console:main(Config).

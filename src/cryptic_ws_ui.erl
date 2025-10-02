@@ -255,13 +255,7 @@ start(Username, ServerHost) ->
     end.
 
 get_cryptic_dir() ->
-    case os:getenv("CRYPTIC_DIR") of
-        false ->
-            io:format("<FATAL ERROR> CRYPTIC_DIR environment variable not set~n", []),
-            init:stop();
-        Dir ->
-            Dir
-    end.
+    cryptic_lib:get_cryptic_dir().
 
 
 %%%===================================================================
@@ -882,7 +876,7 @@ process_command("list_users", UIState) ->
                     ListUsersCmd = #{type => <<"list_users">>},
                     ?dbg("UI sending list_users command: ~p", [ListUsersCmd]),
                     case
-                        cryptic_ws_client:send_command(
+                        cryptic_ws_client:send_message(
                             ClientState#client_state.ws_client_pid, ListUsersCmd
                         )
                     of
@@ -920,7 +914,7 @@ process_command("fetch_messages", UIState) ->
                         GetMessagesCmd
                     ]),
                     case
-                        cryptic_ws_client:send_command(
+                        cryptic_ws_client:send_message(
                             ClientState#client_state.ws_client_pid,
                             GetMessagesCmd
                         )
@@ -958,7 +952,7 @@ process_command("key_status", UIState) ->
                     KeyStatusCmd = #{type => <<"key_status">>},
                     ?dbg("UI sending key_status command: ~p", [KeyStatusCmd]),
                     case
-                        cryptic_ws_client:send_command(
+                        cryptic_ws_client:send_message(
                             ClientState#client_state.ws_client_pid, KeyStatusCmd
                         )
                     of
@@ -1307,7 +1301,7 @@ process_chat_command(Message, UIState) ->
 
                     %% First, get the recipient's prekey
                     case
-                        cryptic_ws_client:send_command(
+                        cryptic_ws_client:send_message(
                             ClientState#client_state.ws_client_pid, #{
                                 type => <<"get_key_bundle">>,
                                 user => list_to_binary(ToUser)
@@ -1739,7 +1733,7 @@ send_x3dh_message_to_server(
         end,
 
     case
-        cryptic_ws_client:send_command(
+        cryptic_ws_client:send_message(
             ClientState#client_state.ws_client_pid, X3DHSendCmd
         )
     of
@@ -2196,7 +2190,7 @@ handle_prekey_for_send_encrypted(User, _PrekeyB64, SendOp, UIState) ->
                         user => list_to_binary(ToUser)
                     },
                     case
-                        cryptic_ws_client:send_command(
+                        cryptic_ws_client:send_message(
                             ClientState#client_state.ws_client_pid, KeyBundleCmd
                         )
                     of
@@ -2966,7 +2960,7 @@ handle_create_room_command(Rest, UIState) ->
 
                     %% Send WebSocket message
                     ClientState = WSChatState#ws_chat_state.ws_client_state,
-                    cryptic_ws_client:send_command(
+                    cryptic_ws_client:send_message(
                         ClientState#client_state.ws_client_pid, FinalCommand
                     ),
 
@@ -3038,7 +3032,7 @@ handle_join_room_command(Rest, UIState) ->
 
                     ClientState = WSChatState#ws_chat_state.ws_client_state,
 
-                    cryptic_ws_client:send_command(
+                    cryptic_ws_client:send_message(
                         ClientState#client_state.ws_client_pid, FinalCommand
                     ),
 
@@ -3076,7 +3070,7 @@ handle_leave_room_command(Rest, UIState) ->
 
                     ClientState = WSChatState#ws_chat_state.ws_client_state,
 
-                    cryptic_ws_client:send_command(
+                    cryptic_ws_client:send_message(
                         ClientState#client_state.ws_client_pid, Command
                     ),
 
@@ -3137,7 +3131,7 @@ handle_list_rooms_command(Rest, UIState) ->
 
             case WSChatState#ws_chat_state.ws_client_state of
                 ClientState when is_record(ClientState, client_state) ->
-                    cryptic_ws_client:send_command(
+                    cryptic_ws_client:send_message(
                         ClientState#client_state.ws_client_pid, Command
                     );
                 _ ->
@@ -3187,7 +3181,7 @@ handle_room_info_command(Rest, UIState) ->
 
                     ClientState = WSChatState#ws_chat_state.ws_client_state,
 
-                    cryptic_ws_client:send_command(
+                    cryptic_ws_client:send_message(
                         ClientState#client_state.ws_client_pid, Command
                     ),
 
@@ -3389,7 +3383,7 @@ handle_room_history_command(Rest, UIState) ->
 
                     ClientState = WSChatState#ws_chat_state.ws_client_state,
 
-                    cryptic_ws_client:send_command(
+                    cryptic_ws_client:send_message(
                         ClientState#client_state.ws_client_pid, Command
                     ),
 
@@ -3938,7 +3932,7 @@ send_encrypted_room_message(ClientState, RoomId, Message) ->
                 },
 
                 ?dbg("Sending encrypted room message command: ~p", [Command]),
-                cryptic_ws_client:send_command(
+                cryptic_ws_client:send_message(
                     ClientState#client_state.ws_client_pid, Command
                 ),
                 ok;
@@ -4122,7 +4116,7 @@ load_client_keys_and_connect(UIState, ConfigDir, Passphrase) ->
                     },
                     ?dbg("UI uploading identity keys: ~p", [UploadKeysCmd]),
                     case
-                        cryptic_ws_client:send_command(ClientPid, UploadKeysCmd)
+                        cryptic_ws_client:send_message(ClientPid, UploadKeysCmd)
                     of
                         ok ->
                             %% Step 5: Send prekey bundle per SESSION-MESSAGE-FLOW.md
@@ -4204,7 +4198,7 @@ upload_prekey_bundle_and_finalize(
         one_time_prekeys => PrekeyBundle
     },
     ?dbg("UI uploading prekey bundle: ~p", [PrekeyBundleCmd]),
-    case cryptic_ws_client:send_command(ClientPid, PrekeyBundleCmd) of
+    case cryptic_ws_client:send_message(ClientPid, PrekeyBundleCmd) of
         ok ->
             %% All steps completed successfully
             SuccessWSChatState = WSChatState#ws_chat_state{
@@ -4978,7 +4972,7 @@ send_message_via_x3dh_fallback(ToUser, Message, FromUser, ClientState, WSChatSta
         ]
     ),
     case
-        cryptic_ws_client:send_command(
+        cryptic_ws_client:send_message(
             ClientState#client_state.ws_client_pid,
             GetKeyBundleCmd
         )
@@ -5032,7 +5026,7 @@ send_ratchet_message_to_server(ToUser, RatchetMessage, ClientState, _UIState) ->
     },
 
     case
-        cryptic_ws_client:send_command(
+        cryptic_ws_client:send_message(
             ClientState#client_state.ws_client_pid, UnifiedSendCmd
         )
     of

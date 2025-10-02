@@ -50,13 +50,15 @@ init(Args) ->
 
     Username =
         case Args of
-            #{username := U} ->
+            #{username := U} when is_binary(U) ->
+                binary_to_list(U);
+            #{username := U} when is_list(U) ->
                 U;
             _ ->
                 ""
         end,
 
-    % Ensure log directory exists
+    %% Ensure log directory exists
     case filelib:ensure_dir(
              filename:join([LogDir, "dummy"]))
     of

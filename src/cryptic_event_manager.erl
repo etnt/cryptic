@@ -107,6 +107,7 @@ setup_event_handlers(Config) ->
     end,
     ok.
 
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Determines debug mode based on environment variables and application settings.

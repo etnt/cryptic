@@ -54,11 +54,15 @@
 -include_lib("public_key/include/public_key.hrl").
 
 -export([
-    init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3,
+    init/2,
+    websocket_init/1,
+    websocket_handle/2,
+    websocket_info/2,
+    terminate/3,
     % Double Ratchet integration functions
-    create_conversation_id/2, 
-    store_ratchet_state/2, 
-    get_ratchet_state/1, 
+    create_conversation_id/2,
+    store_ratchet_state/2,
+    get_ratchet_state/1,
     update_ratchet_state/2
 ]).
 
@@ -123,42 +127,93 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
     try
         ?dbg("Received message from ~s: ~s", [Username, Msg]),
         ?msg_in("Received WebSocket message from ~s: ~s", [Username, Msg]),
-        Command = jsx:decode(Msg, [return_maps]),
-        ?dbg("Decoded command: ~p", [Command]),
-        case handle_command(Command, Username, State) of
-            {reply, Response} ->
-                ResponseJson = jsx:encode(Response),
-                ?msg_out("Sending WebSocket response to ~s: ~s", [
-                    Username, ResponseJson
-                ]),
-                {[{text, ResponseJson}], State};
-            {reply, Response, NewState} ->
-                ResponseJson = jsx:encode(Response),
-                ?msg_out("Sending WebSocket response to ~s: ~s", [
-                    Username, ResponseJson
-                ]),
-                {[{text, ResponseJson}], NewState};
-            {noreply, NewState} ->
-                {[], NewState};
-            {error, ErrorMsg} ->
-                ErrorResp = #{
+
+        %% 1. Decode JSON
+        case jsx:decode(Msg, [return_maps]) of
+            DecodedMessage when is_map(DecodedMessage) ->
+                %% 2. Verify message follows cryptic_messages module definitions
+                case cryptic_messages:validate_message(DecodedMessage) of
+                    {ok, ValidatedMessage} ->
+                        %% Log message type for debugging
+                        MessageType = maps:get(
+                            <<"type">>, ValidatedMessage, <<"unknown">>
+                        ),
+                        ?dbg("Processing validated message type: ~s", [
+                            MessageType
+                        ]),
+
+                        %% 3. Process valid message with command handler
+                        case
+                            handle_command(ValidatedMessage, Username, State)
+                        of
+                            {reply, Response} ->
+                                ResponseJson = jsx:encode(Response),
+                                ?msg_out(
+                                    "Sending WebSocket response to ~s: ~s", [
+                                        Username, ResponseJson
+                                    ]
+                                ),
+                                {[{text, ResponseJson}], State};
+                            {reply, Response, NewState} ->
+                                ResponseJson = jsx:encode(Response),
+                                ?msg_out(
+                                    "Sending WebSocket response to ~s: ~s", [
+                                        Username, ResponseJson
+                                    ]
+                                ),
+                                {[{text, ResponseJson}], NewState};
+                            {noreply, NewState} ->
+                                {[], NewState};
+                            {error, ErrorMsg} ->
+                                ErrorResp = #{
+                                    type => <<"error">>,
+                                    message => list_to_binary(ErrorMsg)
+                                },
+                                ErrorJson = jsx:encode(ErrorResp),
+                                ?msg_out("Sending WebSocket error to ~s: ~s", [
+                                    Username, ErrorJson
+                                ]),
+                                {[{text, ErrorJson}], State}
+                        end;
+                    {error, ValidationError} ->
+                        %% 4. Drop invalid message and log the fact
+                        ?warning(
+                            "Message validation failed from ~s: ~p, Original: ~s",
+                            [Username, ValidationError, Msg]
+                        ),
+                        ValidationErrorResp = #{
+                            type => <<"error">>,
+                            message => <<"Invalid message format">>
+                        },
+                        ValidationErrorJson = jsx:encode(ValidationErrorResp),
+                        ?msg_out("Sending validation error to ~s: ~s", [
+                            Username, ValidationErrorJson
+                        ]),
+                        {[{text, ValidationErrorJson}], State}
+                end;
+            _ ->
+                %% JSON decode failed
+                ?warning("Invalid JSON format from ~s: ~s", [Username, Msg]),
+                JsonErrorResp = #{
                     type => <<"error">>,
-                    message => list_to_binary(ErrorMsg)
+                    message => <<"Invalid JSON format">>
                 },
-                ErrorJson = jsx:encode(ErrorResp),
-                ?msg_out("Sending WebSocket error to ~s: ~s", [
-                    Username, ErrorJson
+                JsonErrorJson = jsx:encode(JsonErrorResp),
+                ?msg_out("Sending JSON error to ~s: ~s", [
+                    Username, JsonErrorJson
                 ]),
-                {[{text, ErrorJson}], State}
+                {[{text, JsonErrorJson}], State}
         end
     catch
         _Error:Reason ->
-            ?error("Failed to handle incoming text frame; Reason: ~p~n", [
-                Reason
-            ]),
+            ?error(
+                "Failed to handle incoming text frame from ~s; Reason: ~p~n", [
+                    Username, Reason
+                ]
+            ),
             CatchErrorResponse = #{
                 type => <<"error">>,
-                message => <<"Invalid JSON format">>
+                message => <<"Message processing failed">>
             },
             CatchErrorJson = jsx:encode(CatchErrorResponse),
             ?msg_out("Sending error response: ~s", [CatchErrorJson]),
@@ -523,7 +578,7 @@ handle_command(
     _State
 ) ->
     ToUser = binary_to_list(ToUserB),
-    
+
     %% Forward the encrypted message payload to recipient
     %% Server acts as pure relay without understanding the content
     MessageForward = #{
@@ -532,7 +587,7 @@ handle_command(
         message => MessagePayload,
         server_timestamp => erlang:system_time(second)
     },
-    
+
     %% Try to deliver immediately if user is online
     case find_user_connection(ToUser) of
         {ok, Pid} ->
@@ -542,7 +597,7 @@ handle_command(
             %% User is offline - store message for later retrieval
             cryptic_lib:store_message(ToUser, MessageForward)
     end,
-    
+
     {reply, #{
         type => <<"message_sent">>,
         success => true,
@@ -1123,7 +1178,6 @@ handle_incoming_ratchet_message(FromUser, Message, ToUser, State) ->
             },
             {[{text, jsx:encode(ProcessingErrorResponse)}], State}
     end.
-
 
 %% @doc Create a unique conversation identifier for two users
 %%

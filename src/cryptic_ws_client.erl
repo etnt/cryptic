@@ -49,7 +49,12 @@
 -module(cryptic_ws_client).
 -behaviour(gen_server).
 
--export([start_link/2, start_link/3, send_command/2, stop/1, set_ui_pid/2]).
+-export([
+    start_link/1, start_link/2, start_link/3,
+    send_message/2,
+    stop/1,
+    set_ui_pid/2
+]).
 -export([
     init/1,
     handle_call/3,
@@ -111,6 +116,13 @@
 start_link(Username, ServerHost) ->
     start_link(Username, ServerHost, #{}).
 
+start_link(CfgMap) when is_map(CfgMap) ->
+    start_link(
+        maps:get(username, CfgMap),
+        maps:get(server_host, CfgMap),
+        CfgMap
+    ).
+
 %% @doc Start a WebSocket client with custom configuration.
 %%
 %% Starts a WebSocket client process with the ability to override default
@@ -163,8 +175,8 @@ start_link(Username, ServerHost, Config) ->
 %% @param Pid The client process PID
 %% @param Command The command map to send
 %% @returns `ok' if sent immediately, `queued' if queued for later sending
-send_command(Pid, Command) ->
-    gen_server:call(Pid, {send_command, Command}).
+send_message(Pid, Command) ->
+    gen_server:call(Pid, {send_message, Command}).
 
 %% @doc Stop the WebSocket client.
 %%
@@ -285,14 +297,14 @@ handle_continue(connect, State) ->
 %% @param From The caller's reference
 %% @param State Current gen_server state
 %% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
-handle_call({send_command, Command}, _From, State = #state{connected = true}) ->
+handle_call({send_message, Command}, _From, State = #state{connected = true}) ->
     JsonCommand = jsx:encode(Command),
-    ?msg_out("~s~n", [maps:get(<<"type">>, Command, <<"unknown...">>) ]),
+    ?msg_out("~s~n", [maps:get(<<"type">>, Command, <<"unknown...">>)]),
     gun:ws_send(
         State#state.conn_pid, State#state.stream_ref, {text, JsonCommand}
     ),
     {reply, ok, State};
-handle_call({send_command, Command}, _From, State = #state{connected = false}) ->
+handle_call({send_message, Command}, _From, State = #state{connected = false}) ->
     %% Queue command until connected
     NewState = State#state{
         pending_commands = [Command | State#state.pending_commands]
@@ -353,12 +365,30 @@ handle_info(
         connected = true, pending_commands = [], ping_timer_ref = PingTimerRef
     }};
 handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
+    %% 1. Decode JSON
     case jsx:decode(Data, [return_maps]) of
-        Message = #{<<"type">> := Type} ->
-            ?msg_in("~s~n", [Type]),
-            handle_server_message(Type, Message, State);
+        DecodedMessage when is_map(DecodedMessage) ->
+            %% 2. Verify message follows cryptic_messages module definitions
+            case cryptic_messages:validate_message(DecodedMessage) of
+                {ok, ValidatedMessage} ->
+                    %% Log message type for debugging
+                    MessageType = maps:get(
+                        <<"type">>, ValidatedMessage, <<"unknown">>
+                    ),
+                    ?msg_in("~s~n", [MessageType]),
+
+                    %% 3. Dispatch valid message to ui_pid
+                    dispatch_to_ui(ValidatedMessage, State);
+                {error, ValidationError} ->
+                    %% 4. Drop invalid message and log the fact
+                    ?warning("Message validation failed: ~p, Original: ~s", [
+                        ValidationError, Data
+                    ]),
+                    {noreply, State}
+            end;
         _ ->
-            ?warning("Invalid message format: ~s", [Data]),
+            %% JSON decode failed
+            ?warning("Invalid JSON format: ~s", [Data]),
             {noreply, State}
     end;
 handle_info({gun_ws, _ConnPid, _StreamRef, {close, Code, Reason}}, State) ->
@@ -455,7 +485,15 @@ code_change(_OldVsn, State, _Extra) ->
 connect_websocket(State) ->
     application:ensure_all_started(gun),
 
-    %% TLS options with client certificate (following gunsmoke pattern)
+    %% TLS options with client certificate authentication
+    %%
+    %% Uses OTP 28 compatible certificates with proper Extended Key Usage (EKU) extensions:
+    %% - Server certificates have "TLS Web Server Authentication" (1.3.6.1.5.5.7.3.1)
+    %% - Client certificates have "TLS Web Client Authentication" (1.3.6.1.5.5.7.3.2)
+    %% - All extensions use explicit OID format for maximum compatibility
+    %%
+    %% The certificates are generated using OpenSSL with specific configurations
+    %% that ensure compatibility with Erlang/OTP 28's stricter certificate validation.
     TLSOptions = [
         {verify, verify_peer},
         {log_level, info},
@@ -503,102 +541,23 @@ connect_websocket(State) ->
     end.
 
 %% @private
-%% @doc Handle incoming messages from the WebSocket server.
+%% @doc Dispatch a validated message to the UI process.
 %%
-%% Processes different types of server messages and forwards relevant
-%% information to the UI process. Each message type has specific handling
-%% logic and appropriate logging.
+%% Forwards all validated messages to the UI process using a standardized
+%% {websocket_message, Message} format. The UI is responsible for handling
+%% the specific message types according to the cryptic_messages definitions.
 %%
-%% @param Type The message type as a binary
-%% @param Message The complete message map
+%% @param ValidatedMessage The validated message map from cryptic_messages
 %% @param State Current client state
 %% @returns `{noreply, State}'
-handle_server_message(<<"welcome">>, Message, State) ->
-    ?info("Server welcome: ~s", [
-        maps:get(<<"message">>, Message, <<"Unknown">>)
-    ]),
-    {noreply, State};
-handle_server_message(<<"success">>, Message, State) ->
-    SuccessMsg = maps:get(<<"message">>, Message, <<"Operation successful">>),
-    ?info("Server success: ~s", [SuccessMsg]),
-    {noreply, State};
-handle_server_message(<<"prekey">>, Message, State) ->
-    User = maps:get(<<"user">>, Message),
-    Prekey = maps:get(<<"prekey">>, Message),
-    ?info("Received prekey for user ~s: ~s", [User, Prekey]),
-    %% Forward prekey to UI so it can encrypt and send the pending message
+dispatch_to_ui(ValidatedMessage, State) ->
     case State#state.ui_pid of
         undefined ->
-            ?warning("No UI PID set, cannot forward prekey", []);
+            ?warning("No UI PID set, cannot dispatch message: ~p", [
+                ValidatedMessage
+            ]);
         UIPid ->
-            UIPid ! {prekey_received, User, Prekey}
+            %% Send the validated message to the UI using standardized format
+            UIPid ! {websocket_message, ValidatedMessage}
     end,
-    {noreply, State};
-handle_server_message(<<"users">>, Message, State) ->
-    Users = maps:get(<<"users">>, Message, []),
-    ?info("Received user list: ~p", [Users]),
-    %% Forward users list to UI for display
-    case State#state.ui_pid of
-        undefined ->
-            ?warning("No UI PID set, cannot forward users list", []);
-        UIPid ->
-            UIPid ! {users_list_received, Users}
-    end,
-    {noreply, State};
-handle_server_message(<<"user_status">>, Message, State) ->
-    User = maps:get(<<"user">>, Message),
-    Status = maps:get(<<"status">>, Message),
-    ?info("User ~s status: ~s", [User, Status]),
-    %% Forward user status to UI for handling
-    case State#state.ui_pid of
-        undefined ->
-            ?warning("No UI PID set, cannot forward user status", []);
-        UIPid ->
-            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
-    end,
-    {noreply, State};
-handle_server_message(<<"message">>, Message, State) ->
-    From = maps:get(<<"from">>, Message),
-    ?info("Message from ~s", [From]),
-    %% Forward encrypted message to UI for decryption and display
-    case State#state.ui_pid of
-        undefined ->
-            ?warning("No UI PID set, cannot forward message", []);
-        UIPid ->
-            UIPid ! {encrypted_message_received, Message}
-    end,
-    {noreply, State};
-handle_server_message(<<"error">>, Message, State) ->
-    ErrorMsg = maps:get(<<"message">>, Message, <<"Unknown error">>),
-    ?error("Server error: ~s", [ErrorMsg]),
-    %% Forward error to UI for proper handling
-    case State#state.ui_pid of
-        undefined ->
-            ?warning("No UI PID set, cannot forward error message", []);
-        UIPid ->
-            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
-    end,
-    {noreply, State};
-handle_server_message(<<"key_bundle">>, Message, State) ->
-    %% Forward key bundle response to UI for X3DH session establishment
-    ?info("Received key_bundle response, forwarding to UI", []),
-    case State#state.ui_pid of
-        undefined ->
-            ?warning("No UI PID set, cannot forward key_bundle", []);
-        UIPid ->
-            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
-    end,
-    {noreply, State};
-handle_server_message(<<"key_status">>, Message, State) ->
-    %% Forward key status response to UI for display
-    ?info("Received key_status response, forwarding to UI", []),
-    case State#state.ui_pid of
-        undefined ->
-            ?warning("No UI PID set, cannot forward key_status", []);
-        UIPid ->
-            UIPid ! {websocket_message, {text, jsx:encode(Message)}}
-    end,
-    {noreply, State};
-handle_server_message(Type, Message, State) ->
-    ?warning("Unknown message type ~s: ~p", [Type, Message]),
     {noreply, State}.

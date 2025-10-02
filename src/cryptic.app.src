@@ -12,12 +12,13 @@
         ranch,
         cowlib,
         cowboy,
+        eclip,
         uuid
     ]},
     {mod, {cryptic_app, []}},
     {env, [
         %% Event handling configuration
-        {cryptic_event_handlers, [cryptic_console_logger]},
+        {cryptic_event_handlers, [cryptic_file_logger]},
 
         % WebSocket mTLS server configuration
         {websocket_mtls_enabled, true},
