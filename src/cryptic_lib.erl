@@ -102,7 +102,7 @@
 %%%
 %%% %% Encrypt and save keys to file
 %%% Passphrase = &lt;&lt;"secure_passphrase">>,
-%%% ok = cryptic_lib:save_encrypted_keys(Keys, Passphrase, "/path/to/keys.encrypted"),
+%%% ok = cryptic_lib:save_encrypted_keys(Keys, Passphrase, "/path/to"),
 %%%
 %%% %% Later, load keys from file
 %%% {ok, LoadedKeys} = cryptic_lib:load_encrypted_keys("/path/to/keys.encrypted", Passphrase),
@@ -593,7 +593,7 @@ get_messages(Username) ->
     }}
     | {error, term()}.
 initialize_client_keys(ConfigDir, Passphrase) ->
-    KeysFile = filename:join(ConfigDir, "keys.encrypted"),
+    KeysFile = filename:join(ConfigDir, identity_keys_filename()),
 
     case filelib:is_file(KeysFile) of
         true ->
@@ -602,7 +602,7 @@ initialize_client_keys(ConfigDir, Passphrase) ->
         false ->
             %% Generate new keys
             Keys = generate_client_keys(),
-            case save_encrypted_keys(Keys, Passphrase, KeysFile) of
+            case save_encrypted_keys(Keys, Passphrase, ConfigDir) of
                 ok -> {ok, Keys};
                 {error, Reason} -> {error, Reason}
             end
@@ -1017,7 +1017,8 @@ decrypt_keys(EncryptedData, Passphrase) when is_binary(Passphrase) ->
 %% @doc Save encrypted keys to file.
 -spec save_encrypted_keys(#{}, string() | binary(), string()) ->
     ok | {error, term()}.
-save_encrypted_keys(Keys, Passphrase, KeysFile) ->
+save_encrypted_keys(Keys, Passphrase, ConfigDir) ->
+    KeysFile = filename:join(ConfigDir, identity_keys_filename()),
     %% Encrypt keys
     {EncryptedData, _Salt} = encrypt_keys(Keys, Passphrase),
 
@@ -1041,6 +1042,10 @@ load_encrypted_keys(KeysFile, Passphrase) ->
         {error, Reason} ->
             {error, {file_read_error, Reason}}
     end.
+
+%%% @private
+identity_keys_filename() ->
+    "keys.encrypted".
 
 %% @doc Save a ratchet session to encrypted storage.
 %%
