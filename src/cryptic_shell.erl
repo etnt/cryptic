@@ -7,8 +7,12 @@
 %%% - Arrow key navigation
 %%% - Backspace and delete operations
 %%% - Password input with masking
+%%% - ANSI color and formatting support for enhanced visual experience
 %%%
 -module(cryptic_shell).
+
+%% Include ANSI escape sequence macros for terminal formatting
+-include("cryptic_ansi.hrl").
 
 %% API
 -export([
@@ -16,7 +20,13 @@
     start_shell/1,
     get_line/1,
     get_password/1,
-    cleanup/0
+    cleanup/0,
+    % Enhanced output functions with ANSI formatting
+    print_success/1,
+    print_error/1,
+    print_warning/1,
+    print_info/1,
+    print_highlight/1
 ]).
 
 %% Internal state record for line editing
@@ -48,16 +58,24 @@ start_shell(Options) ->
         case shell:start_interactive({noshell, raw}) of
             ok ->
                 case Verbose of
-                    true -> io:format("Cryptic Shell (OTP 28 raw mode)\r\n");
-                    false -> ok
+                    true ->
+                        io:format("~s\r\n", [
+                            ?FG_GREEN(?BOLD("Cryptic Shell (OTP 28 raw mode)"))
+                        ]);
+                    false ->
+                        ok
                 end,
                 ok;
-            {error, Reason} ->
+            {error, _Reason} ->
                 case Verbose of
                     true ->
                         io:format(
-                            "OTP 28 mode failed (~p), trying fallback...\r\n", [
-                                Reason
+                            "~s\r\n", [
+                                ?FG_YELLOW(
+                                    ?BOLD(
+                                        "OTP 28 mode failed, trying fallback..."
+                                    )
+                                )
                             ]
                         );
                     false ->
@@ -70,7 +88,13 @@ start_shell(Options) ->
             case Verbose of
                 true ->
                     io:format(
-                        "OTP 28 shell function not available, trying fallback...\r\n"
+                        "~s\r\n", [
+                            ?FG_YELLOW(
+                                ?BOLD(
+                                    "OTP 28 shell function not available, trying fallback..."
+                                )
+                            )
+                        ]
                     );
                 false ->
                     ok
@@ -78,8 +102,17 @@ start_shell(Options) ->
             fallback_raw_mode();
         _:Error ->
             case Verbose of
-                true -> io:format("Shell setup error: ~p\r\n", [Error]);
-                false -> ok
+                true ->
+                    io:format("~s\r\n", [
+                        ?FG_WHITE_BG_RED(
+                            ?BOLD(
+                                "Shell setup error: " ++
+                                    lists:flatten(io_lib:format("~p", [Error]))
+                            )
+                        )
+                    ]);
+                false ->
+                    ok
             end,
             {error, Error}
     end.
@@ -92,18 +125,22 @@ cleanup() ->
 %% @doc Get a line of input with line editing
 -spec get_line(string()) -> string() | eof | {error, term()}.
 get_line(Prompt) ->
-    io:format("~s", [Prompt]),
+    % Format prompt with bold styling for better visibility
+    FormattedPrompt = ?BOLD(Prompt),
+    io:format("~s", [FormattedPrompt]),
     LineState = #line_state{
         buffer = [],
         cursor = 0,
-        prompt = Prompt
+        prompt = FormattedPrompt
     },
     line_editor_loop(LineState).
 
 %% @doc Get password input with character masking
 -spec get_password(string()) -> string() | eof.
 get_password(Prompt) ->
-    io:format("~s", [Prompt]),
+    % Format password prompt with yellow color and bold for security emphasis
+    FormattedPrompt = ?FG_YELLOW_BG_BLACK(?BOLD(Prompt)),
+    io:format("~s", [FormattedPrompt]),
     password_loop([]).
 
 %%%===================================================================
@@ -315,3 +352,32 @@ handle_password_backspace([]) ->
 handle_password_backspace([_Last | Rest]) ->
     io:format("\b \b"),
     password_loop(Rest).
+
+%%%===================================================================
+%%% Enhanced Output Functions with ANSI Formatting
+%%%===================================================================
+
+%% @doc Print success message with green formatting
+-spec print_success(string()) -> ok.
+print_success(Message) ->
+    io:format("~s~n", [?FG_GREEN(?BOLD("[OK] " ++ Message))]).
+
+%% @doc Print error message with red formatting
+-spec print_error(string()) -> ok.
+print_error(Message) ->
+    io:format("~s~n", [?FG_WHITE_BG_RED(?BOLD("[ERROR] " ++ Message))]).
+
+%% @doc Print warning message with yellow formatting
+-spec print_warning(string()) -> ok.
+print_warning(Message) ->
+    io:format("~s~n", [?FG_BLACK_BG_YELLOW(?BOLD("[WARN] " ++ Message))]).
+
+%% @doc Print info message with cyan formatting
+-spec print_info(string()) -> ok.
+print_info(Message) ->
+    io:format("~s~n", [?FG_CYAN(?BOLD("[INFO] " ++ Message))]).
+
+%% @doc Print highlighted message with blue formatting
+-spec print_highlight(string()) -> ok.
+print_highlight(Message) ->
+    io:format("~s~n", [?FG_WHITE_BG_BLUE(?BOLD("[***] " ++ Message))]).

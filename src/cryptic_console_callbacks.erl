@@ -95,10 +95,7 @@ send_message_to_peer(FromUsername, ToUsername, Message, Context) when
 send_message_to_server(FromUsername, Message, Context) when
     is_binary(FromUsername), is_map(Context)
 ->
-    io:format("[CALLBACK] Sending message from ~s to server~n", [FromUsername]),
-    io:format("[CALLBACK] Message: ~p~n", [Message]),
-
-    % For bare bones implementation, just return success
+    
     {ok, Context}.
 
 %%%===================================================================

@@ -5,6 +5,9 @@
 %%%
 -module(cryptic_console).
 
+%% Include ANSI escape sequence macros for terminal formatting
+-include("cryptic_ansi.hrl").
+
 %% API
 -export([main/1]).
 
@@ -23,7 +26,7 @@
 %% @doc Main entry point for the console
 -spec main(Config :: map()) -> ok.
 main(InitCfg) ->
-    io:format("Cryptic Console starting...\r\n"),
+    cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
     %% Add code paths to all dependencies
@@ -40,9 +43,9 @@ main(InitCfg) ->
         ok ->
             ok;
         {error, ShellError} ->
-            io:format(
-                "Warning: Enhanced shell unavailable (~p), using basic mode\r\n",
-                [ShellError]
+            cryptic_shell:print_warning(
+                "Enhanced shell unavailable, using basic mode: " ++
+                    lists:flatten(io_lib:format("~p", [ShellError]))
             )
     end,
 
@@ -73,7 +76,9 @@ main(InitCfg) ->
         verbose = maps:get(verbose, CertCfg, false)
     },
 
-    io:format("Cryptic Console ready. Type 'help' for commands.\r\n"),
+    cryptic_shell:print_success(
+        "Cryptic Console ready. Type 'help' for commands."
+    ),
 
     % Start command loop
     command_loop(State).
@@ -87,7 +92,7 @@ main(InitCfg) ->
 get_passphrase() ->
     case cryptic_shell:get_password("Enter passphrase: ") of
         eof ->
-            io:format("\r\nPassphrase required. Exiting...\r\n"),
+            cryptic_shell:print_error("Passphrase required. Exiting..."),
             halt(1);
         Passphrase when is_list(Passphrase) ->
             case length(Passphrase) of
@@ -100,7 +105,10 @@ get_passphrase() ->
                     list_to_binary(Passphrase)
             end;
         {error, Reason} ->
-            io:format("Error reading passphrase: ~p\r\n", [Reason]),
+            cryptic_shell:print_error(
+                "Error reading passphrase: " ++
+                    lists:flatten(io_lib:format("~p", [Reason]))
+            ),
             halt(1)
     end.
 
@@ -257,7 +265,7 @@ command_loop(State) ->
             Command = string:trim(Line),
             case parse_command(Command) of
                 {quit} ->
-                    io:format("Goodbye!\r\n"),
+                    cryptic_shell:print_highlight("Goodbye!"),
                     cleanup(State);
                 {help} ->
                     show_help(),
@@ -297,7 +305,7 @@ parse_command_parts(_) ->
 execute_command({noop}, State) ->
     State;
 execute_command({error, Msg}, State) ->
-    io:format("ERROR: ~s~n", [Msg]),
+    cryptic_shell:print_error(Msg),
     State;
 execute_command({status}, State) ->
     show_status(State),
