@@ -360,24 +360,24 @@ handle_password_backspace([_Last | Rest]) ->
 %% @doc Print success message with green formatting
 -spec print_success(string()) -> ok.
 print_success(Message) ->
-    io:format("~s~n", [?FG_GREEN(?BOLD("[OK] " ++ Message))]).
+    io:format("~s\r\n", [?FG_GREEN(?BOLD("[OK] " ++ Message))]).
 
 %% @doc Print error message with red formatting
 -spec print_error(string()) -> ok.
 print_error(Message) ->
-    io:format("~s~n", [?FG_WHITE_BG_RED(?BOLD("[ERROR] " ++ Message))]).
+    io:format("~s\r\n", [?FG_WHITE_BG_RED(?BOLD("[ERROR] " ++ Message))]).
 
 %% @doc Print warning message with yellow formatting
 -spec print_warning(string()) -> ok.
 print_warning(Message) ->
-    io:format("~s~n", [?FG_BLACK_BG_YELLOW(?BOLD("[WARN] " ++ Message))]).
+    io:format("~s\r\n", [?FG_BLACK_BG_YELLOW(?BOLD("[WARN] " ++ Message))]).
 
 %% @doc Print info message with cyan formatting
 -spec print_info(string()) -> ok.
 print_info(Message) ->
-    io:format("~s~n", [?FG_CYAN(?BOLD("[INFO] " ++ Message))]).
+    io:format("~s\r\n", [?FG_CYAN(?BOLD("[INFO] " ++ Message))]).
 
 %% @doc Print highlighted message with blue formatting
 -spec print_highlight(string()) -> ok.
 print_highlight(Message) ->
-    io:format("~s~n", [?FG_WHITE_BG_BLUE(?BOLD("[***] " ++ Message))]).
+    io:format("~s\r\n", [?FG_WHITE_BG_BLUE(?BOLD("[***] " ++ Message))]).

@@ -33,6 +33,8 @@
     code_change/3
 ]).
 
+-include("cryptic.hrl").
+
 %% Records
 -record(cryptic_engine_state, {
     % Our username
@@ -41,6 +43,8 @@
     identity_key :: {binary(), binary()},
     % Signed prekey (ID, Pub, Priv)
     signed_prekey :: {integer(), binary(), binary()},
+    % Signed prekey signature
+    signed_prekey_signature :: binary(),
     % Available one-time prekeys
     one_time_prekeys :: #{integer() => {binary(), binary()}},
 
@@ -198,25 +202,35 @@ init(Config) ->
     % Load identity keys using callback (callback handles key creation if needed)
     case CallbackModule:load_identity_keys(Username, Config) of
         {ok, IdentityKeys, NewContext} ->
+            ?dbg("Loaded identity keys: ~p~n", [IdentityKeys]),
             StateWithKeys = InitialState#cryptic_engine_state{
                 identity_key = maps:get(identity_key, IdentityKeys),
                 signed_prekey = maps:get(signed_prekey, IdentityKeys),
+                signed_prekey_signature = maps:get(signed_prekey_signature, IdentityKeys),
                 one_time_prekeys = maps:get(one_time_prekeys, IdentityKeys),
                 callback_context = NewContext
             },
 
-            % Upload prekey bundle to server
-            case upload_prekey_bundle(StateWithKeys) of
-                {ok, FinalState} ->
-                    {ok, FinalState};
+            %% Upload key bundles to server
+            maybe
+                {ok, IdentityKeysState} ?= upload_identity_keys(StateWithKeys),
+                {ok, FinalState} ?= upload_prekey_bundle(IdentityKeysState),
+                {ok, FinalState}
+            else
                 {error, Reason} ->
-                    log_error("Prekey bundle upload failed: ~p",
-                             [Reason], StateWithKeys),
+                    log_error(
+                        "Key upload failed: ~p",
+                        [Reason],
+                        StateWithKeys
+                    ),
                     {stop, {upload_failed, Reason}}
             end;
         {error, Reason, _Context} ->
-            log_error("Loading identity keys failed: ~p",
-                     [Reason], InitialState),
+            log_error(
+                "Loading identity keys failed: ~p",
+                [Reason],
+                InitialState
+            ),
             {stop, {load_keys_failed, Reason}}
     end.
 
@@ -282,19 +296,84 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 %% @private
+upload_identity_keys(State) ->
+    CallbackModule = State#cryptic_engine_state.callback_module,
+    Context = State#cryptic_engine_state.callback_context,
+
+    % Extract keys from state
+    {IdentitySignPub, _IdentitySignPriv} =
+        State#cryptic_engine_state.identity_key,
+    {_SignedPrekeyId, SignedPrekeyPub, _SignedPrekeyPriv} =
+        State#cryptic_engine_state.signed_prekey,
+    SignedPrekeySignature = State#cryptic_engine_state.signed_prekey_signature,
+
+    % Construct identity keys message using cryptic_messages
+    IdentityData = #{
+        identity_sign_public => IdentitySignPub,
+        % TODO: Need separate DH key
+        identity_dh_public => IdentitySignPub,
+        signed_prekey_public => SignedPrekeyPub,
+        signed_prekey_signature => SignedPrekeySignature
+    },
+
+    {ok, IdentityMessage} = cryptic_messages:upload_identity_keys(IdentityData),
+
+    % Send identity keys to server via callback
+    case
+        CallbackModule:send_message_to_server(
+            State#cryptic_engine_state.username,
+            IdentityMessage,
+            Context
+        )
+    of
+        {ok, UpdatedContext} ->
+            log_info("Identity keys uploaded successfully", [], State),
+            {ok, State#cryptic_engine_state{callback_context = UpdatedContext}};
+        {error, Reason, _UpdatedContext} ->
+            log_error("Failed to upload identity keys: ~p", [Reason], State),
+            {error, Reason};
+        {error, Reason} ->
+            log_error("Failed to upload identity keys: ~p", [Reason], State),
+            {error, Reason}
+    end.
+
+%% @private
 upload_prekey_bundle(State) ->
     CallbackModule = State#cryptic_engine_state.callback_module,
     Context = State#cryptic_engine_state.callback_context,
 
-    % Construct prekey bundle message using cryptic_messages
+    % Extract one-time prekeys from state
     OneTimePrekeys = State#cryptic_engine_state.one_time_prekeys,
-    SignedPrekey = State#cryptic_engine_state.signed_prekey,
-    IdentityKey = State#cryptic_engine_state.identity_key,
 
+    % Check if one_time_prekeys is already in the right format or needs conversion
+    OTPKList =
+        case OneTimePrekeys of
+            % If it's already a list of maps with id and public fields
+            List when is_list(List) ->
+                List;
+            % If it's a map with integer keys mapping to {PubKey, PrivKey} tuples
+            Map when is_map(Map) ->
+                maps:fold(
+                    fun(_KeyId, {PubKey, _PrivKey}, Acc) ->
+                        [
+                            #{
+                                id => crypto:strong_rand_bytes(8),
+                                public => PubKey
+                            }
+                            | Acc
+                        ]   
+                    end,
+                    [],
+                    Map
+                );
+            % Fallback - empty list
+            _ ->
+                []
+        end,
+
+    % Construct prekey bundle message using cryptic_messages
     PrekeyData = #{
-        identity_key => IdentityKey,
-        signed_prekey => SignedPrekey,
-        one_time_prekeys => OneTimePrekeys
+        one_time_prekeys => OTPKList
     },
 
     {ok, BundleMessage} = cryptic_messages:upload_prekey_bundle(PrekeyData),
@@ -308,11 +387,15 @@ upload_prekey_bundle(State) ->
         )
     of
         {ok, UpdatedContext} ->
+            log_info("Prekey bundle uploaded successfully", [], State),
             {ok, State#cryptic_engine_state{callback_context = UpdatedContext}};
+        {error, Reason, _UpdatedContext} ->
+            log_error("Failed to upload prekey bundle: ~p", [Reason], State),
+            {error, Reason};
         {error, Reason} ->
+            log_error("Failed to upload prekey bundle: ~p", [Reason], State),
             {error, Reason}
     end.
-
 
 %% @private
 log_error(FormatString, Args, State) ->
@@ -326,4 +409,10 @@ log_info(FormatString, Args, State) ->
 log(Level, FormatString, Args, State) ->
     CallbackModule = State#cryptic_engine_state.callback_module,
     Context = State#cryptic_engine_state.callback_context,
-    CallbackModule:log_message(Level, {FormatString, Args}, Context).
+    case CallbackModule:log_message(Level, {FormatString, Args}, Context) of
+        {ok, _UpdatedContext} ->
+            ok;
+        {error, _Reason} ->
+            % Ignore logging errors to prevent cascading failures
+            ok
+    end.

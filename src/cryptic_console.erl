@@ -29,12 +29,9 @@ main(InitCfg) ->
     cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
-    %% Add code paths to all dependencies
-    add_dependency_paths(),
-
     Username = maps:get(username, InitCfg),
 
-    % Initialize the enhanced shell first
+    %% Initialize the enhanced shell first
     case
         cryptic_shell:start_shell(#{
             verbose => maps:get(verbose, InitCfg, false)
@@ -49,22 +46,23 @@ main(InitCfg) ->
             )
     end,
 
-    % Prompt for passphrase early, before initializing cryptic engine
-    Passphrase = get_passphrase(),
-
-    % Now continue with initialization
+    %% Now continue with initialization
     setup_event_management(InitCfg),
     CertCfg = get_cert_config(InitCfg),
 
-    % Start WebSocket client
+    %% Start WebSocket client
     WsCfg = CertCfg#{callback_mod => ?MODULE},
     {ok, WsClientPid} = cryptic_ws_client:start_link(WsCfg),
 
-    % Start cryptic engine with passphrase
+    %% Prompt for passphrase early, before initializing cryptic engine
+    Passphrase = get_passphrase(),
+
+    % Start cryptic engine with passphrase and WebSocket client PID
     EngineCfg = CertCfg#{
         callback_mod => cryptic_console_callbacks,
         username => Username,
-        passphrase => Passphrase
+        passphrase => Passphrase,
+        ws_client_pid => WsClientPid
     },
     {ok, EnginePid} = cryptic_engine:start_link(EngineCfg),
 
@@ -112,86 +110,7 @@ get_passphrase() ->
             halt(1)
     end.
 
-%% @doc Add code paths to all dependencies
--spec add_dependency_paths() -> ok.
-add_dependency_paths() ->
-    %% Find the current module's location to determine build directory structure
-    case code:which(?MODULE) of
-        non_existing ->
-            io:format(
-                "Warning: Could not determine module location for path setup~n"
-            );
-        ModulePath ->
-            %% Extract the build directory from the module path
-            %% Expected path: .../cryptic/_build/default/lib/cryptic/ebin/cryptic_console.beam
-            case find_build_directory(ModulePath) of
-                {ok, BuildDir} ->
-                    LibsDir = filename:join([BuildDir, "lib"]),
-                    add_library_paths(LibsDir);
-                {error, Reason} ->
-                    io:format(
-                        "Warning: Could not determine build directory: ~p~n", [
-                            Reason
-                        ]
-                    )
-            end
-    end.
 
-%% @doc Find the build directory from a module path
--spec find_build_directory(string()) -> {ok, string()} | {error, term()}.
-find_build_directory(ModulePath) ->
-    %% Split the path and look for "_build/default" pattern
-    PathParts = filename:split(ModulePath),
-    case find_build_in_path(PathParts, []) of
-        {ok, BuildParts} ->
-            {ok, filename:join(BuildParts ++ ["_build", "default"])};
-        error ->
-            %% Fallback: assume we're in project root and use relative path
-            {ok, "_build/default"}
-    end.
-
-%% @doc Find _build directory in path parts
--spec find_build_in_path([string()], [string()]) -> {ok, [string()]} | error.
-find_build_in_path([], _Acc) ->
-    error;
-find_build_in_path(["_build" | _Rest], Acc) ->
-    {ok, lists:reverse(Acc)};
-find_build_in_path([Part | Rest], Acc) ->
-    find_build_in_path(Rest, [Part | Acc]).
-
-%% @doc Add all library paths from the libs directory
--spec add_library_paths(string()) -> ok.
-add_library_paths(LibsDir) ->
-    case file:list_dir(LibsDir) of
-        {ok, Libraries} ->
-            %% Add paths for all discovered libraries
-            _ = [add_library_path(LibsDir, LibName) || LibName <- Libraries];
-        {error, Reason} ->
-            io:format("Warning: Could not list libraries directory ~s: ~p~n", [
-                LibsDir, Reason
-            ])
-    end.
-
-%% @doc Add code path for a single library
--spec add_library_path(string(), string()) -> ok.
-add_library_path(LibsDir, LibName) ->
-    LibEbinDir = filename:join([LibsDir, LibName, "ebin"]),
-    case filelib:is_dir(LibEbinDir) of
-        true ->
-            case code:add_path(LibEbinDir) of
-                true ->
-                    ok;
-                {error, bad_directory} ->
-                    io:format(
-                        "Warning: Bad directory for library ~s: ~s~n",
-                        [LibName, LibEbinDir]
-                    )
-            end;
-        false ->
-            %% Not all directories in lib/ are necessarily Erlang libraries
-            %% Some might be build artifacts or other files, so we don't warn
-            ok
-    end.
 
 %% @doc Setup event management
 -spec setup_event_management(Config :: map()) -> ok.

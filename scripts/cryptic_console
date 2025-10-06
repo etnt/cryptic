@@ -1,5 +1,4 @@
 #!/usr/bin/env escript
-%%! -pa _build/default/lib/cryptic/ebin -pa _build/default/lib/eclip/ebin
 
 %%% @doc Escript entry point for the Cryptic Console
 %%%
@@ -13,6 +12,9 @@
 %%%   --help                   Show this help
 
 main(Args) ->
+    %% Set up code paths relative to the script location
+    setup_code_paths(),
+
     %% Ensure crypto application is started
     application:ensure_all_started(crypto),
 
@@ -86,3 +88,38 @@ start_console(_Env, _CmdStack, Username, ServerHost, ServerPort, Verbose) ->
 
     %% Start the console
     cryptic_console:main(Config).
+
+%% @doc Set up code paths relative to the script location
+setup_code_paths() ->
+    %% Get the directory where this escript is located
+    ScriptPath = escript:script_name(),
+    ScriptDir = filename:dirname(ScriptPath),
+
+    %% Calculate the repository root (one level up from scripts/)
+    RepoRoot = filename:join(ScriptDir, ".."),
+
+    %% Add the required ebin directories to the code path
+    EbinPaths = [
+        filename:join([RepoRoot, "_build", "default", "lib", "cryptic", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "eclip", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "jsx", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "gun", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "cowboy", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "ranch", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "cowlib", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "uuid", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "cecho", "ebin"])
+    ],
+
+    %% Add each path if it exists
+    lists:foreach(
+        fun(Path) ->
+            case filelib:is_dir(Path) of
+                true ->
+                    code:add_path(Path);
+                false ->
+                    io:format("Warning: ebin path not found: ~s~n", [Path])
+            end
+        end,
+        EbinPaths
+    ).

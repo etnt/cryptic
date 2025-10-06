@@ -43,6 +43,7 @@ load_identity_keys(Username, Context) when is_binary(Username) andalso
                maps:get(signed_prekey_public, RawKeys),
                maps:get(signed_prekey_private, RawKeys)
            },
+           signed_prekey_signature => maps:get(signed_prekey_signature, RawKeys),
            one_time_prekeys => transform_one_time_prekeys(maps:get(one_time_prekeys, RawKeys))
        },
 
@@ -56,26 +57,36 @@ load_identity_keys(Username, Context) when is_binary(Username) andalso
 save_identity_keys(Username, _IdentityKeys, Context) when
     is_binary(Username), is_map(Context)
 ->
-    io:format("[CALLBACK] Saving identity keys for ~s (no-op)~n", [Username]),
-    {ok, Context}.
+    {ok, UpdatedContext} = log_message(
+        debug, {"Saving identity keys for ~s (no-op)", [Username]}, Context
+    ),
+    {ok, UpdatedContext}.
 
 %% @doc Load session state for a peer
 load_session_state(Username, PeerUsername, Context) when
     is_binary(Username), is_binary(PeerUsername), is_map(Context)
 ->
-    io:format("[CALLBACK] Loading session state ~s <-> ~s (not found)~n", [
-        Username, PeerUsername
-    ]),
-    {error, not_found, Context}.
+    {ok, UpdatedContext} = log_message(
+        debug,
+        {"Loading session state ~s <-> ~s (not found)", [
+            Username, PeerUsername
+        ]},
+        Context
+    ),
+    {error, not_found, UpdatedContext}.
 
 %% @doc Save session state for a peer
 save_session_state(Username, PeerUsername, _SessionState, Context) when
     is_binary(Username), is_binary(PeerUsername), is_map(Context)
 ->
-    io:format("[CALLBACK] Saving session state ~s <-> ~s (no-op)~n", [
-        Username, PeerUsername
-    ]),
-    {ok, Context}.
+    {ok, UpdatedContext} = log_message(
+        debug,
+        {"Saving session state ~s <-> ~s (no-op)", [
+            Username, PeerUsername
+        ]},
+        Context
+    ),
+    {ok, UpdatedContext}.
 
 %%%===================================================================
 %%% Network Operations
@@ -85,18 +96,50 @@ save_session_state(Username, PeerUsername, _SessionState, Context) when
 send_message_to_peer(FromUsername, ToUsername, Message, Context) when
     is_binary(FromUsername), is_binary(ToUsername), is_map(Context)
 ->
-    io:format("[CALLBACK] Sending message from ~s to ~s (no-op)~n", [
-        FromUsername, ToUsername
-    ]),
-    io:format("[CALLBACK] Message: ~p~n", [Message]),
-    {ok, Context}.
+    {ok, UpdatedContext1} = log_message(
+        info,
+        {"Sending message from ~s to ~s (no-op)", [
+            FromUsername, ToUsername
+        ]},
+        Context
+    ),
+    {ok, UpdatedContext2} = log_message(
+        debug, {"Message: ~p", [Message]}, UpdatedContext1
+    ),
+    {ok, UpdatedContext2}.
 
 %% @doc Send message to server
 send_message_to_server(FromUsername, Message, Context) when
     is_binary(FromUsername), is_map(Context)
 ->
-    
-    {ok, Context}.
+    {ok, UpdatedContext1} = log_message(
+        info, {"Sending message from ~s to server", [FromUsername]}, Context
+    ),
+    {ok, UpdatedContext2} = log_message(
+        debug, {"Message: ~p", [Message]}, UpdatedContext1
+    ),
+
+    case maps:get(ws_client_pid, UpdatedContext2, undefined) of
+        undefined ->
+            {ok, UpdatedContext3} = log_message(
+                error, {"No WebSocket client available", []}, UpdatedContext2
+            ),
+            {error, no_ws_client, UpdatedContext3};
+        WSClientPid when is_pid(WSClientPid) ->
+            case cryptic_ws_client:send_message(WSClientPid, Message) of
+                ok ->
+                    log_message(debug, 
+                         {"Message sent successfully", []},
+                               UpdatedContext2);
+                {error, Reason} ->
+                    {ok, UpdatedContext3} = log_message(
+                        error,
+                        {"Failed to send message: ~p", [Reason]},
+                        UpdatedContext2
+                    ),
+                    {error, Reason, UpdatedContext3}
+            end
+    end.
 
 %%%===================================================================
 %%% UI Operations
@@ -131,8 +174,10 @@ log(Level, {_FormatString, _Args} = Msg) when
 life_cycle(Event, Reason, Username, Context) when
     is_atom(Event), is_binary(Username), is_map(Context)
 ->
-    io:format("[LIFECYCLE] ~s: ~p (reason: ~p)~n", [Username, Event, Reason]),
-    {ok, Context}.
+    {ok, UpdatedContext} = log_message(
+        info, {"~s: ~p (reason: ~p)", [Username, Event, Reason]}, Context
+    ),
+    {ok, UpdatedContext}.
 
 %%%===================================================================
 %%% Helper Functions

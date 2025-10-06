@@ -1,162 +1,35 @@
 [doc Double Ratchet Console Test - Basic Message Flow]
 
+[global alice_passphrase=qwe123]
+
+
+[shell server]
+    # Start the Cryptic server
+    !env CRYPTIC_DEBUG=true ../../scripts/start-server.sh
+    ?Cryptic WebSocket server with mTLS started on port 8443
+    ?\(server@localhost\)[0-9]+\>
+
+
+
 [shell alice]
     # Start Alice's console
-    !erl -pa ../../_build/default/lib/cryptic/ebin -s cryptic_console_simple start -noshell
-    ?Cryptic Double Ratchet Console
-    ?cryptic> 
+    !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u alice
+    ?Enter passphrase
 
-    # Generate keys for Alice
-    !generate_keys
-    ?PUBLIC_KEY: ([0-9a-f]+)
-    [global alice_pub=$1]
-    ?PRIVATE_KEY: ([0-9a-f]+)
-    [global alice_priv=$1]
-    ?cryptic> 
-
-    # Generate shared root key
-    !generate_root_key
-    ?ROOT_KEY: ([0-9a-f]+)
-    [global root_key=$1]
-    ?cryptic> 
-
-[shell bob]
-    # Start Bob's console
-    !erl -pa ../../_build/default/lib/cryptic/ebin -s cryptic_console_simple start -noshell
-    ?Cryptic Double Ratchet Console
-    ?cryptic> 
-
-    # Generate keys for Bob
-    !generate_keys
-    ?PUBLIC_KEY: ([0-9a-f]+)
-    [global bob_pub=$1]
-    ?PRIVATE_KEY: ([0-9a-f]+)
-    [global bob_priv=$1]
-    ?cryptic> 
+[shell alice-log]
+    !tail -f ./logs/client-alice.log
+    ?WebSocket connection established for alice
 
 [shell alice]
-    # Initialize Alice as sender
-    !start_alice $root_key $alice_pub $alice_priv
-    ?SUCCESS: Alice initialized
-    ?cryptic> 
+    !$alice_passphrase
+    ?cryptic>
 
-    # Check Alice's status
-    !status
-    ?ENGINE: Running
-    ?ROLE: alice
-    ?STATE: sender_init
-    ?MESSAGES: 0
-    ?ERRORS: 0
-    ?cryptic> 
 
-[shell bob]
-    # Initialize Bob as receiver with same root key
-    !start_bob $root_key $bob_pub $bob_priv
-    ?SUCCESS: Bob initialized
-    ?cryptic> 
-
-    # Check Bob's status
-    !status
-    ?ENGINE: Running
-    ?ROLE: bob
-    ?STATE: receiver_init
-    ?MESSAGES: 0
-    ?ERRORS: 0
-    ?cryptic> 
 
 [shell alice]
-    # Alice encrypts first message
-    !encrypt Hello Bob from Alice!
-    ?SUCCESS: ([0-9a-f]+)
-    [global encrypted_msg=$1]
-    ?cryptic> 
-
-    # Check Alice's status after encryption
-    !status
-    ?STATE: sending_active
-    ?MESSAGES: 1
-    ?cryptic> 
-
-[shell bob]
-    # Bob decrypts the message
-    !decrypt $encrypted_msg
-    ?SUCCESS: Hello Bob from Alice!
-    ?cryptic> 
-
-    # Check Bob's status after decryption
-    !status
-    ?STATE: receiving_active
-    ?MESSAGES: 1
-    ?cryptic> 
-
-    # Bob can now encrypt back to Alice
-    !encrypt Hello Alice from Bob!
-    ?SUCCESS: ([0-9a-f]+)
-    [global bob_encrypted_msg=$1]
-    ?cryptic> 
-
-[shell alice]
-    # Alice decrypts Bob's message
-    !decrypt $bob_encrypted_msg
-    ?SUCCESS: Hello Alice from Bob!
-    ?cryptic> 
-
-    # Check final status
-    !status
-    ?STATE: (sending_active|bidirectional)
-    ?MESSAGES: 2
-    ?cryptic> 
-
-[shell bob]
-    # Check Bob's final status
-    !status
-    ?STATE: (activating_send_chain|bidirectional)
-    ?MESSAGES: 2
-    ?cryptic> 
-
-[shell alice]
-    # Test multiple messages
-    !encrypt Message 2 from Alice
-    ?SUCCESS: ([0-9a-f]+)
-    [global msg2=$1]
-    ?cryptic> 
-
-    !encrypt Message 3 from Alice
-    ?SUCCESS: ([0-9a-f]+)
-    [global msg3=$1]
-    ?cryptic> 
-
-[shell bob]
-    # Decrypt multiple messages
-    !decrypt $msg2
-    ?SUCCESS: Message 2 from Alice
-    ?cryptic> 
-
-    !decrypt $msg3
-    ?SUCCESS: Message 3 from Alice
-    ?cryptic> 
-
-    # Final status check
-    !status
-    ?MESSAGES: 4
-    ?ERRORS: 0
-    ?cryptic> 
-
-[shell alice]
-    # Test debug information
-    !debug
-    ?DEBUG INFO:
-    ?current_state:
-    ?message_count:
-    ?cryptic> 
-
     # Quit Alice
     !quit
     ?Goodbye!
 
-[shell bob]
-    # Quit Bob
-    !quit
-    ?Goodbye!
 
 [cleanup]

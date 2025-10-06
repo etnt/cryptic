@@ -61,8 +61,7 @@
     handle_cast/2,
     handle_info/2,
     terminate/2,
-    code_change/3,
-    handle_continue/2
+    code_change/3
 ]).
 
 -include("cryptic.hrl").
@@ -265,26 +264,13 @@ init({UIPid, Username, ServerHost, Config}) ->
                 key_file = Key,
                 ca_file = CA
             },
-            {ok, State, {continue, connect}}
-    end.
-
-%% @private
-%% @doc Handle the continue callback to establish WebSocket connection.
-%%
-%% This callback is triggered after successful initialization to establish
-%% the actual WebSocket connection. Using continue prevents blocking the
-%% supervisor during potentially slow connection establishment.
-%%
-%% @param connect The continue message
-%% @param State Current gen_server state
-%% @returns `{noreply, NewState}' on success, `{stop, Reason, State}' on failure
-handle_continue(connect, State) ->
-    case connect_websocket(State) of
-        {ok, NewState} ->
-            {noreply, NewState};
-        {error, Reason} ->
-            ?error("Failed to connect: ~p", [Reason]),
-            {stop, {connection_failed, Reason}, State}
+            case connect_websocket(State) of
+                {ok, NewState} ->
+                    {ok, NewState};
+                {error, Reason} ->
+                    ?error("Failed to connect: ~p", [Reason]),
+                    {stop, {connection_failed, Reason}, State}
+            end
     end.
 
 %% @private
@@ -297,19 +283,15 @@ handle_continue(connect, State) ->
 %% @param From The caller's reference
 %% @param State Current gen_server state
 %% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
-handle_call({send_message, Command}, _From, State = #state{connected = true}) ->
+handle_call({send_message, Command}, _From, State) ->
     JsonCommand = jsx:encode(Command),
     ?msg_out("~s~n", [maps:get(<<"type">>, Command, <<"unknown...">>)]),
-    gun:ws_send(
+    ?dbg("send_message: ConnPid=~p, StreamRef=~p , Command=~p~n", 
+        [State#state.conn_pid, State#state.stream_ref, Command]),
+    ok = gun:ws_send(
         State#state.conn_pid, State#state.stream_ref, {text, JsonCommand}
     ),
     {reply, ok, State};
-handle_call({send_message, Command}, _From, State = #state{connected = false}) ->
-    %% Queue command until connected
-    NewState = State#state{
-        pending_commands = [Command | State#state.pending_commands]
-    },
-    {reply, queued, NewState};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call({set_ui_pid, UiPid}, _From, State) ->
@@ -523,9 +505,7 @@ connect_websocket(State) ->
         {ok, ConnPid} ->
             case gun:await_up(ConnPid, 5000) of
                 {ok, _Protocol} ->
-                    ?dbg(
-                        "TLS connection established, upgrading to WebSocket", []
-                    ),
+                    ?dbg("TLS connection established, upgrading to WebSocket~n", []),
                     StreamRef = gun:ws_upgrade(ConnPid, "/ws"),
                     NewState = State#state{
                         conn_pid = ConnPid,
