@@ -2,7 +2,9 @@
 
 # Start Cryptic WebSocket mTLS Client using environment variables
 
-cd "$(dirname "$0")/.."
+# Get absolute path to project root (parent directory of scripts/)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Default username
 USERNAME="${1:-alice}"
@@ -26,10 +28,10 @@ echo "   Server: ${SERVER:-localhost}"
 echo "   Config Dir: $CRYPTIC_DIR"
 echo ""
 
-# Set default certificate paths if not already set
-export CRYPTIC_CLIENT_CERT="${CRYPTIC_CLIENT_CERT:-CA/client_keys/${USERNAME}.crt}"
-export CRYPTIC_CLIENT_KEY="${CRYPTIC_CLIENT_KEY:-CA/client_keys/${USERNAME}.key}"
-export CRYPTIC_CA_CERT="${CRYPTIC_CA_CERT:-CA/certs/ca.crt}"
+# Set default certificate paths if not already set (use absolute paths)
+export CRYPTIC_CLIENT_CERT="${CRYPTIC_CLIENT_CERT:-$PROJECT_ROOT/CA/client_keys/${USERNAME}.crt}"
+export CRYPTIC_CLIENT_KEY="${CRYPTIC_CLIENT_KEY:-$PROJECT_ROOT/CA/client_keys/${USERNAME}.key}"
+export CRYPTIC_CA_CERT="${CRYPTIC_CA_CERT:-$PROJECT_ROOT/CA/certs/ca.crt}"
 
 echo "🔧 Cryptic Client Configuration for user: $USERNAME"
 echo "  Client Cert: $CRYPTIC_CLIENT_CERT"
@@ -45,7 +47,7 @@ echo ""
 if [ ! -f "$CRYPTIC_CLIENT_CERT" ]; then
     echo "❌ Error: Client certificate not found: $CRYPTIC_CLIENT_CERT"
     echo "Available users:"
-    ls CA/client_keys/*.crt 2>/dev/null | xargs -n1 basename | sed 's/.crt$//' | sed 's/^/  /'
+    ls "$PROJECT_ROOT/CA/client_keys"/*.crt 2>/dev/null | xargs -n1 basename | sed 's/.crt$//' | sed 's/^/  /'
     exit 1
 fi
 
@@ -55,6 +57,7 @@ if [ ! -f "$CRYPTIC_CLIENT_KEY" ]; then
 fi
 
 echo "🔌 Starting Cryptic WebSocket UI..."
-erl -sname ${USERNAME}@localhost -pa _build/default/lib/*/ebin -eval "
+# Use absolute paths - no need to change directory
+erl -sname ${USERNAME}@localhost -pa $PROJECT_ROOT/_build/default/lib/*/ebin -eval "
 cryptic_ws_ui:start(\"$USERNAME\", \"localhost\").
 " -noinput

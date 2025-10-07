@@ -9,7 +9,8 @@
     ?Cryptic WebSocket server with mTLS started on port 8443
     ?\(server@localhost\)[0-9]+\>
 
-
+[shell server-log]
+    !tail -f ./logs/server.log
 
 [shell alice]
     # Start Alice's console
@@ -24,6 +25,9 @@
     !$alice_passphrase
     ?cryptic>
 
+[shell server-log]
+    ?.*cryptic_ws_handler.*Processing validated message type: upload_identity_keys
+    ?.*cryptic_ws_handler.*Processing validated message type: upload_prekey_bundle
 
 
 [shell alice]
