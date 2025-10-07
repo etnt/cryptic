@@ -1,10 +1,15 @@
 [doc Double Ratchet Console Test - Basic Message Flow]
 
 [global alice_passphrase=qwe123]
+[global bob_passphrase=qwe123]
+
+[macro log message]
+    [progress \n$message\n]
+[endmacro]
 
 
 [shell server]
-    # Start the Cryptic server
+    [invoke log "Start the Cryptic server..."]
     !env CRYPTIC_DEBUG=true ../../scripts/start-server.sh
     ?Cryptic WebSocket server with mTLS started on port 8443
     ?\(server@localhost\)[0-9]+\>
@@ -13,7 +18,7 @@
     !tail -f ./logs/server.log
 
 [shell alice]
-    # Start Alice's console
+    [invoke log "Start Alice's console..."]
     !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u alice
     ?Enter passphrase
 
@@ -26,14 +31,48 @@
     ?cryptic>
 
 [shell server-log]
-    ?.*cryptic_ws_handler.*Processing validated message type: upload_identity_keys
-    ?.*cryptic_ws_handler.*Processing validated message type: upload_prekey_bundle
+    ?.*cryptic_ws_handler.*Processing validated message from: alice , type: upload_identity_keys
+    ?.*cryptic_ws_handler.*Processing validated message from: alice , type: upload_prekey_bundle
+
+[shell bob]
+    [invoke log "Start Bob's console..."]
+    !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u bob
+    ?Enter passphrase
+
+[shell bob-log]
+    !tail -f ./logs/client-bob.log
+    ?WebSocket connection established for bob
+
+[shell bob]
+    !$bob_passphrase
+    ?cryptic>
+
+[shell server-log]
+    ?.*cryptic_ws_handler.*Processing validated message from: bob , type: upload_identity_keys
+    ?.*cryptic_ws_handler.*Processing validated message from: bob , type: upload_prekey_bundle
+
+[shell alice
+    [invoke log "Alice sends a message to Bob"]
+    !send bob Hello Bob, this is Alice!
+    ?Message sent to bob
+
+
 
 
 [shell alice]
-    # Quit Alice
+    [invoke log "Quit Alice"]
     !quit
     ?Goodbye!
 
+[shell server-log]
+    ?.*User alice disconnected and removed from connection table
+
+[shell bob]
+    [invoke log "Quit Bob"]
+    !quit
+    ?Goodbye!
+
+[shell server-log]
+    ?.*User bob disconnected and removed from connection table
 
 [cleanup]

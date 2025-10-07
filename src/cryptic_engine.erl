@@ -247,7 +247,7 @@ handle_call({send_message, ToUsername, Message}, From, State) ->
             FinalState = queue_pending_message(
                 ToUsername, Message, From, NewState
             ),
-            {noreply, FinalState};
+            {reply, ok, FinalState};
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
@@ -284,7 +284,62 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @private
-handle_info({websocket_message, _Message}, State) ->
+handle_info(
+    {websocket_message,
+        #{
+            <<"type">> := <<"error">>,
+            <<"message">> := <<"key-bundle-not-found">>
+        } = Message},
+    State
+) ->
+    % Handle key bundle not found error - need to find which user this is for
+    % by matching against pending requests
+    case find_user_for_key_bundle_error(State) of
+        {ok, Username, UpdatedState} ->
+            % Inform user through callback system that recipient was not found
+            CallbackModule = UpdatedState#cryptic_engine_state.callback_module,
+            Context = UpdatedState#cryptic_engine_state.callback_context,
+
+            SystemMessage =
+                <<"User '", Username/binary,
+                    "' not found - message could not be delivered">>,
+            FinalState =
+                case CallbackModule:system_message(SystemMessage, Context) of
+                    {ok, UpdatedContext} ->
+                        UpdatedState#cryptic_engine_state{
+                            callback_context = UpdatedContext
+                        };
+                    {error, _Reason} ->
+                        % Continue even if system message fails
+                        UpdatedState
+                end,
+
+            % Clean up any pending messages for this user (reply OK since they were queued successfully)
+            CleanedState = cleanup_pending_messages_for_user(
+                Username, FinalState
+            ),
+
+            log_info(
+                "User ~s not found, informed user via system message",
+                [Username],
+                CleanedState
+            ),
+            {noreply, CleanedState};
+        not_found ->
+            log_error(
+                "Received key-bundle-not-found but no pending requests found: ~p",
+                [Message],
+                State
+            ),
+            {noreply, State}
+    end;
+handle_info(
+    {websocket_message, #{
+        <<"type">> := _Type,
+        <<"message">> := _Message
+    }},
+    State
+) ->
     % TODO: Handle asynchronous WebSocket messages
     {noreply, State};
 handle_info({key_request_timeout, _RequestId}, State) ->
@@ -584,3 +639,102 @@ generate_request_id() ->
 %% @private
 generate_message_id() ->
     base64:encode(crypto:strong_rand_bytes(16)).
+
+%% @private
+find_user_for_key_bundle_error(State) ->
+    % Find the user with the most recent pending key bundle request
+    % This assumes key-bundle-not-found errors are for the most recent request
+    PendingRequests = State#cryptic_engine_state.pending_key_requests,
+    case find_most_recent_key_request(PendingRequests) of
+        {ok, Username, RequestId} ->
+            % Remove this pending request and return the username
+            UpdatedRequests = remove_pending_request(
+                Username, RequestId, PendingRequests
+            ),
+            UpdatedState = State#cryptic_engine_state{
+                pending_key_requests = UpdatedRequests
+            },
+            {ok, Username, UpdatedState};
+        not_found ->
+            not_found
+    end.
+
+%% @private
+find_most_recent_key_request(PendingRequests) ->
+    % Find the most recent key_bundle request across all users
+    AllRequests = maps:fold(
+        fun(Username, Requests, Acc) ->
+            KeyBundleRequests = [
+                {Username, R}
+             || R <- Requests,
+                R#pending_request.request_type =:= key_bundle
+            ],
+            KeyBundleRequests ++ Acc
+        end,
+        [],
+        PendingRequests
+    ),
+
+    case AllRequests of
+        [] ->
+            not_found;
+        _ ->
+            % Sort by timestamp (most recent first)
+            Sorted = lists:sort(
+                fun({_, R1}, {_, R2}) ->
+                    R1#pending_request.timestamp >= R2#pending_request.timestamp
+                end,
+                AllRequests
+            ),
+            [{Username, Request} | _] = Sorted,
+            {ok, Username, Request#pending_request.request_id}
+    end.
+
+%% @private
+remove_pending_request(Username, RequestId, PendingRequests) ->
+    case maps:get(Username, PendingRequests, []) of
+        [] ->
+            PendingRequests;
+        Requests ->
+            FilteredRequests = [
+                R
+             || R <- Requests,
+                R#pending_request.request_id =/= RequestId
+            ],
+            case FilteredRequests of
+                [] ->
+                    maps:remove(Username, PendingRequests);
+                _ ->
+                    maps:put(Username, FilteredRequests, PendingRequests)
+            end
+    end.
+
+%% @private
+cleanup_pending_messages_for_user(Username, State) ->
+    PendingMessages = State#cryptic_engine_state.pending_messages,
+    case maps:get(Username, PendingMessages, []) of
+        [] ->
+            State;
+        Messages ->
+            % Reply OK to all pending message calls (they were queued successfully)
+            lists:foreach(
+                fun(#pending_message{from = From}) ->
+                    case From of
+                        undefined ->
+                            % No one to reply to
+                            ok;
+                        _ ->
+                            gen_server:reply(From, ok)
+                    end
+                end,
+                Messages
+            ),
+
+            % Remove pending messages for this user
+            UpdatedPendingMessages = maps:remove(Username, PendingMessages),
+            State#cryptic_engine_state{
+                pending_messages = UpdatedPendingMessages,
+                error_count =
+                    State#cryptic_engine_state.error_count + length(Messages)
+            }
+    end.

@@ -17,7 +17,9 @@
     ws_client_pid :: pid() | undefined,
     engine_pid :: pid() | undefined,
     username :: binary(),
-    verbose :: boolean()
+    verbose :: boolean(),
+    console_pid :: pid() | undefined,
+    input_buffer_table :: ets:tid() | undefined
 }).
 
 %%%===================================================================
@@ -58,21 +60,35 @@ main(InitCfg) ->
     %% Prompt for passphrase early, before initializing cryptic engine
     Passphrase = get_passphrase(),
 
+    % Get console PID to pass to callbacks
+    ConsolePid = self(),
+
     % Start cryptic engine with passphrase and WebSocket client PID
     EngineCfg = CertCfg#{
         callback_mod => cryptic_console_callbacks,
         username => Username,
         passphrase => Passphrase,
-        ws_client_pid => WsClientPid
+        ws_client_pid => WsClientPid,
+        console_pid => ConsolePid
     },
     {ok, EnginePid} = cryptic_engine:start_link(EngineCfg),
 
-    % Initialize console state
+    ok = cryptic_ws_client:set_engine_pid(WsClientPid, EnginePid),
+
+    % Create named ETS table for input buffer preservation
+    % Use named table so cryptic_shell can access it directly
+    InputBufferTable = ets:new(cryptic_console_input_buffer, [
+        set, public, named_table
+    ]),
+
+    % Initialize console state with self() PID
     State = #console_state{
         ws_client_pid = WsClientPid,
         engine_pid = EnginePid,
         username = Username,
-        verbose = maps:get(verbose, CertCfg, false)
+        verbose = maps:get(verbose, CertCfg, false),
+        console_pid = ConsolePid,
+        input_buffer_table = InputBufferTable
     },
 
     cryptic_shell:print_success(
@@ -110,8 +126,6 @@ get_passphrase() ->
             ),
             halt(1)
     end.
-
-
 
 %% @doc Setup event management
 -spec setup_event_management(Config :: map()) -> ok.
@@ -170,18 +184,71 @@ get_cert_config(Cfg) ->
         ca_file => CAFile
     }.
 
-%% @doc Main command loop
+%% @doc Main command loop with async message handling
 command_loop(State) ->
-    case cryptic_shell:get_line("cryptic> ") of
-        eof ->
+    % Check for any pending system messages before prompting
+    check_messages(),
+
+    % Check if there was interrupted input to restore
+    BufferTable = State#console_state.input_buffer_table,
+    RestoredInput =
+        case ets:lookup(BufferTable, current_input) of
+            [{current_input, Buffer}] ->
+                ets:delete(BufferTable, current_input),
+                Buffer;
+            [] ->
+                ""
+        end,
+
+    % Spawn a process to get input asynchronously with monitoring
+    ConsolePid = self(),
+    % Capture for closure
+    RestoredInputCopy = RestoredInput,
+    {InputPid, MonitorRef} = spawn_opt(
+        fun() ->
+            % If we have restored input, display it with a notification
+            if
+                RestoredInputCopy =/= "" ->
+                    io:format("[Input restored: ~s] ", [RestoredInputCopy]);
+                true ->
+                    ok
+            end,
+            Result = cryptic_shell:get_line("cryptic> "),
+            % Prepend restored input if any
+            FinalResult =
+                if
+                    RestoredInputCopy =:= "" ->
+                        Result;
+                    Result =:= eof ->
+                        eof;
+                    element(1, Result) =:= error ->
+                        Result;
+                    true ->
+                        RestoredInputCopy ++ Result
+                end,
+            ConsolePid ! {input_result, FinalResult}
+        end,
+        [monitor]
+    ),
+
+    % Wait for either input or messages
+    wait_for_input_or_messages(InputPid, MonitorRef, State).
+
+%% @doc Wait for input result or handle incoming messages
+wait_for_input_or_messages(InputPid, MonitorRef, State) ->
+    receive
+        {input_result, eof} ->
+            demonitor(MonitorRef, [flush]),
             io:format("Exiting...\r\n"),
             cleanup(State),
             ok;
-        {error, Reason} ->
+        {input_result, {error, Reason}} ->
+            demonitor(MonitorRef, [flush]),
             io:format("Input error: ~p\r\n", [Reason]),
             cleanup(State),
             error;
-        Line ->
+        {input_result, Line} ->
+            demonitor(MonitorRef, [flush]),
             Command = string:trim(Line),
             case parse_command(Command) of
                 {quit} ->
@@ -193,7 +260,20 @@ command_loop(State) ->
                 ParsedCmd ->
                     NewState = execute_command(ParsedCmd, State),
                     command_loop(NewState)
-            end
+            end;
+        {'DOWN', MonitorRef, process, InputPid, _Reason} ->
+            % Input process died (we killed it), restart command loop
+            command_loop(State);
+        {system_message, Message} ->
+            % A message arrived while waiting for input
+            % Note: We can't retrieve the actual input buffer from the blocked process
+            % A future enhancement would be to modify cryptic_shell to support this
+            % For now, we just interrupt and restart
+            exit(InputPid, kill),
+            % Display the async message
+            display_async_message(Message),
+            % Continue waiting - the DOWN message will trigger restart
+            wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
 
 %% @doc Parse user commands
@@ -279,7 +359,7 @@ send_message_to_user(ToUsername, Message, State) ->
             ?dbg("Sending message to ~s: ~s~n", [ToUsername, Message]),
             case cryptic_engine:send_message(EnginePid, ToUsername, Message) of
                 ok ->
-                    ?dbg("Message sent successfully~n",[]);
+                    ?dbg("Message sent successfully~n", []);
                 {error, Reason} ->
                     ?error("Failed to send message: ~p~n", [Reason])
             end
@@ -297,15 +377,42 @@ show_help() ->
     io:format("\r\nLine editing keys:\r\n"),
     io:format("  Ctrl+A                     - Beginning of line\r\n"),
     io:format("  Ctrl+E                     - End of line\r\n"),
-    io:format("  Ctrl+F / Right Arrow       - Forward character\r\n"),
-    io:format("  Ctrl+B / Left Arrow        - Backward character\r\n"),
+    io:format("  Ctrl+F / Right Arrow       - Forward one character\r\n"),
+    io:format("  Ctrl+B / Left Arrow        - Back one character\r\n"),
+    io:format("  Ctrl+D                     - Delete character\r\n"),
+    io:format("  Ctrl+H / Backspace         - Delete previous character\r\n"),
     io:format("  Ctrl+K                     - Kill to end of line\r\n"),
     io:format("  Ctrl+U                     - Kill entire line\r\n").
+
+%% @doc Check for and handle any pending messages
+check_messages() ->
+    receive
+        {system_message, Message} ->
+            % Clear line and print system message
+            display_async_message(Message),
+            % Recursively check for more messages
+            check_messages()
+    after 0 ->
+        % No messages, continue
+        ok
+    end.
+
+%% @doc Display an async message without disrupting the prompt
+display_async_message(Message) ->
+    % Clear current line and print system message
+    io:format("\r\n"),
+    cryptic_shell:print_info(binary_to_list(Message)).
 
 %% @doc Cleanup resources
 cleanup(State) ->
     % Clean up the enhanced shell
     cryptic_shell:cleanup(),
+
+    % Clean up ETS table if it exists
+    case State#console_state.input_buffer_table of
+        undefined -> ok;
+        Table -> ets:delete(Table)
+    end,
 
     % Note: We don't stop the engine or ws_client here as they might be shared
     % or managed by the parent process

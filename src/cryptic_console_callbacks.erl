@@ -14,6 +14,7 @@
     send_message_to_peer/4,
     send_message_to_server/3,
     deliver_message/4,
+    system_message/2,
     log_message/3,
     life_cycle/4
 ]).
@@ -128,9 +129,11 @@ send_message_to_server(FromUsername, Message, Context) when
         WSClientPid when is_pid(WSClientPid) ->
             case cryptic_ws_client:send_message(WSClientPid, Message) of
                 ok ->
-                    log_message(debug, 
-                         {"Message sent successfully", []},
-                               UpdatedContext2);
+                    log_message(
+                        debug,
+                        {"Message sent successfully", []},
+                        UpdatedContext2
+                    );
                 {error, Reason} ->
                     {ok, UpdatedContext3} = log_message(
                         error,
@@ -152,6 +155,19 @@ deliver_message(FromUsername, Message, Timestamp, Context) when
     io:format("[MESSAGE] From ~s at ~p: ~s~n", [
         FromUsername, Timestamp, Message
     ]),
+    {ok, Context}.
+
+system_message(Message, Context) when is_binary(Message), is_map(Context) ->
+    % Send message to console process for proper handling
+    case maps:get(console_pid, Context, undefined) of
+        undefined ->
+            % Fallback: print directly if no console PID
+            io:format("\r\n"),
+            cryptic_shell:print_info(binary_to_list(Message));
+        ConsolePid when is_pid(ConsolePid) ->
+            % Send to console process for async handling
+            ConsolePid ! {system_message, Message}
+    end,
     {ok, Context}.
 
 %% @doc Log message

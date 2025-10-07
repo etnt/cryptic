@@ -36,7 +36,9 @@
     % Cursor position (0-based from start)
     cursor = 0 :: non_neg_integer(),
     % Current prompt string
-    prompt :: string()
+    prompt :: string(),
+    % Optional ETS table for buffer persistence
+    buffer_table :: ets:tid() | undefined
 }).
 
 %%%===================================================================
@@ -128,10 +130,30 @@ get_line(Prompt) ->
     % Format prompt with bold styling for better visibility
     FormattedPrompt = ?BOLD(Prompt),
     io:format("~s", [FormattedPrompt]),
+
+    % Check if there's a saved buffer in the named ETS table
+    InitialBuffer =
+        case ets:whereis(cryptic_console_input_buffer) of
+            undefined ->
+                [];
+            _TableRef ->
+                case ets:lookup(cryptic_console_input_buffer, current_input) of
+                    [{current_input, Buffer}] ->
+                        % Clear the saved buffer since we're restoring it
+                        ets:delete(cryptic_console_input_buffer, current_input),
+                        % Display the restored buffer
+                        io:format("~s", [Buffer]),
+                        Buffer;
+                    [] ->
+                        []
+                end
+        end,
+
     LineState = #line_state{
-        buffer = [],
-        cursor = 0,
-        prompt = FormattedPrompt
+        buffer = InitialBuffer,
+        cursor = length(InitialBuffer),
+        prompt = FormattedPrompt,
+        buffer_table = cryptic_console_input_buffer
     },
     line_editor_loop(LineState).
 
@@ -214,14 +236,43 @@ handle_escape_sequence(State) ->
 %% @doc Finish line editing and return result
 finish_line(Buffer) ->
     io:format("\r\n"),
+    % Clear the saved buffer from ETS since input is complete
+    case ets:whereis(cryptic_console_input_buffer) of
+        undefined -> ok;
+        _TableRef -> ets:delete(cryptic_console_input_buffer, current_input)
+    end,
     lists:flatten(Buffer).
 
+%% @doc Save current buffer to ETS table for preservation across restarts
+save_buffer_to_ets(BufferTable, Buffer) ->
+    case BufferTable of
+        undefined ->
+            ok;
+        TableName when is_atom(TableName) ->
+            % Check if the named table exists before writing
+            case ets:whereis(TableName) of
+                undefined -> ok;
+                _Ref -> ets:insert(TableName, {current_input, Buffer})
+            end;
+        TableRef when is_reference(TableRef) ->
+            ets:insert(TableRef, {current_input, Buffer});
+        _ ->
+            ok
+    end.
+
 %% @doc Insert character at cursor position
-insert_char(#line_state{buffer = Buffer, cursor = Cursor} = State, Char) ->
+insert_char(
+    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
+        State,
+    Char
+) ->
     {Left, Right} = lists:split(Cursor, Buffer),
     NewBuffer = Left ++ [Char] ++ Right,
     NewCursor = Cursor + 1,
     NewState = State#line_state{buffer = NewBuffer, cursor = NewCursor},
+
+    % Save buffer to ETS
+    save_buffer_to_ets(BufferTable, NewBuffer),
 
     case Right of
         [] ->
@@ -271,12 +322,19 @@ handle_ctrl_b(#line_state{cursor = Cursor} = State) ->
     line_editor_loop(State#line_state{cursor = Cursor - 1}).
 
 %% @doc Delete character at cursor (Ctrl+D)
-handle_ctrl_d(#line_state{buffer = Buffer, cursor = Cursor} = State) ->
+handle_ctrl_d(
+    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
+        State
+) ->
     case Cursor < length(Buffer) of
         true ->
             {Left, [_ | Right]} = lists:split(Cursor, Buffer),
             NewBuffer = Left ++ Right,
             NewState = State#line_state{buffer = NewBuffer},
+
+            % Save buffer to ETS
+            save_buffer_to_ets(BufferTable, NewBuffer),
+
             redraw_from_cursor(NewState),
             line_editor_loop(NewState);
         false ->
@@ -286,10 +344,16 @@ handle_ctrl_d(#line_state{buffer = Buffer, cursor = Cursor} = State) ->
 %% @doc Backspace (Ctrl+H)
 handle_ctrl_h(#line_state{cursor = 0} = State) ->
     line_editor_loop(State);
-handle_ctrl_h(#line_state{buffer = Buffer, cursor = Cursor} = State) ->
+handle_ctrl_h(
+    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
+        State
+) ->
     {Left, Right} = lists:split(Cursor, Buffer),
     NewBuffer = lists:droplast(Left) ++ Right,
     NewCursor = Cursor - 1,
+
+    % Save buffer to ETS
+    save_buffer_to_ets(BufferTable, NewBuffer),
 
     io:format("\b"),
     NewState = State#line_state{buffer = NewBuffer, cursor = NewCursor},
@@ -297,16 +361,27 @@ handle_ctrl_h(#line_state{buffer = Buffer, cursor = Cursor} = State) ->
     line_editor_loop(NewState).
 
 %% @doc Kill from cursor to end (Ctrl+K)
-handle_ctrl_k(#line_state{buffer = Buffer, cursor = Cursor} = State) ->
+handle_ctrl_k(
+    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
+        State
+) ->
     {Left, _Right} = lists:split(Cursor, Buffer),
     NewState = State#line_state{buffer = Left},
+
+    % Save buffer to ETS
+    save_buffer_to_ets(BufferTable, Left),
+
     io:format("\e[K"),
     line_editor_loop(NewState).
 
 %% @doc Kill entire line (Ctrl+U)
-handle_ctrl_u(#line_state{prompt = Prompt} = State) ->
+handle_ctrl_u(#line_state{prompt = Prompt, buffer_table = BufferTable} = State) ->
     io:format("\r~s", [Prompt]),
     NewState = State#line_state{buffer = [], cursor = 0},
+
+    % Save buffer to ETS
+    save_buffer_to_ets(BufferTable, []),
+
     line_editor_loop(NewState).
 
 %% @doc Redraw line content from cursor to end

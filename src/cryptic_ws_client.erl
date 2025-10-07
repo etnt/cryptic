@@ -53,7 +53,7 @@
     start_link/1, start_link/2, start_link/3,
     send_message/2,
     stop/1,
-    set_ui_pid/2
+    set_engine_pid/2
 ]).
 -export([
     init/1,
@@ -95,6 +95,7 @@
     connected = false,
     pending_commands = [],
     ui_pid,
+    engine_pid :: pid(),
     ping_timer_ref
 }).
 
@@ -187,15 +188,15 @@ send_message(Pid, Command) ->
 stop(Pid) ->
     gen_server:call(Pid, stop).
 
-%% @doc Set the UI process PID for message forwarding.
+%% @doc Set the Engine process PID for message forwarding.
 %%
-%% Registers the UI process PID so that incoming messages from the server
-%% can be forwarded to the user interface. This creates the communication
-%% bridge between the WebSocket client and the terminal UI.
+%% Registers the Engine process PID so that incoming messages from the server
+%% can be forwarded to the engine. This creates the communication
+%% bridge between the WebSocket client and the Cryptic Engine.
 %%
 %% == Forwarded Messages ==
 %%
-%% The following message types are forwarded to the UI:
+%% The following message types are forwarded to the Engine:
 %% <ul>
 %%   <li>`{prekey_received, User, Prekey}' - Public key for encryption</li>
 %%   <li>`{users_list_received, Users}' - List of registered users</li>
@@ -204,10 +205,10 @@ stop(Pid) ->
 %% </ul>
 %%
 %% @param Pid The client process PID
-%% @param UiPid The UI process PID to forward messages to
+%% @param EnginePid The engine process PID to forward messages to
 %% @returns `ok'
-set_ui_pid(Pid, UiPid) ->
-    gen_server:call(Pid, {set_ui_pid, UiPid}).
+set_engine_pid(Pid, EnginePid) ->
+    gen_server:call(Pid, {set_engine_pid, EnginePid}).
 
 %%%===================================================================
 %%% gen_server Callbacks
@@ -286,16 +287,18 @@ init({UIPid, Username, ServerHost, Config}) ->
 handle_call({send_message, Command}, _From, State) ->
     JsonCommand = jsx:encode(Command),
     ?msg_out("~s~n", [maps:get(<<"type">>, Command, <<"unknown...">>)]),
-    ?dbg("send_message: ConnPid=~p, StreamRef=~p , Command=~p~n", 
-        [State#state.conn_pid, State#state.stream_ref, Command]),
+    ?dbg(
+        "send_message: ConnPid=~p, StreamRef=~p , Command=~p~n",
+        [State#state.conn_pid, State#state.stream_ref, Command]
+    ),
     ok = gun:ws_send(
         State#state.conn_pid, State#state.stream_ref, {text, JsonCommand}
     ),
     {reply, ok, State};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
-handle_call({set_ui_pid, UiPid}, _From, State) ->
-    {reply, ok, State#state{ui_pid = UiPid}};
+handle_call({set_engine_pid, EnginePid}, _From, State) ->
+    {reply, ok, State#state{engine_pid = EnginePid}};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -347,7 +350,7 @@ handle_info(
         connected = true, pending_commands = [], ping_timer_ref = PingTimerRef
     }};
 handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
-    %% 1. Decode JSON
+    ?dbg("Received WebSocket message: ~p~n", [Data]),
     case jsx:decode(Data, [return_maps]) of
         DecodedMessage when is_map(DecodedMessage) ->
             %% 2. Verify message follows cryptic_messages module definitions
@@ -357,10 +360,10 @@ handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
                     MessageType = maps:get(
                         <<"type">>, ValidatedMessage, <<"unknown">>
                     ),
-                    ?msg_in("~s~n", [MessageType]),
+                    ?msg_in("Incoming message: ~s~n", [MessageType]),
 
                     %% 3. Dispatch valid message to ui_pid
-                    dispatch_to_ui(ValidatedMessage, State);
+                    dispatch_to_engine(ValidatedMessage, State);
                 {error, ValidationError} ->
                     %% 4. Drop invalid message and log the fact
                     ?warning("Message validation failed: ~p, Original: ~s", [
@@ -505,7 +508,10 @@ connect_websocket(State) ->
         {ok, ConnPid} ->
             case gun:await_up(ConnPid, 5000) of
                 {ok, _Protocol} ->
-                    ?dbg("TLS connection established, upgrading to WebSocket~n", []),
+                    ?dbg(
+                        "TLS connection established, upgrading to WebSocket~n",
+                        []
+                    ),
                     StreamRef = gun:ws_upgrade(ConnPid, "/ws"),
                     NewState = State#state{
                         conn_pid = ConnPid,
@@ -521,23 +527,24 @@ connect_websocket(State) ->
     end.
 
 %% @private
-%% @doc Dispatch a validated message to the UI process.
+%% @doc Dispatch a validated message to the Engine process.
 %%
-%% Forwards all validated messages to the UI process using a standardized
-%% {websocket_message, Message} format. The UI is responsible for handling
+%% Forwards all validated messages to the Engine process using a standardized
+%% {websocket_message, Message} format. The Engine process is responsible for handling
 %% the specific message types according to the cryptic_messages definitions.
 %%
 %% @param ValidatedMessage The validated message map from cryptic_messages
 %% @param State Current client state
 %% @returns `{noreply, State}'
-dispatch_to_ui(ValidatedMessage, State) ->
-    case State#state.ui_pid of
+dispatch_to_engine(ValidatedMessage, State) ->
+    case State#state.engine_pid of
         undefined ->
-            ?warning("No UI PID set, cannot dispatch message: ~p", [
+            ?warning("No Engine PID set, cannot dispatch message: ~p", [
                 ValidatedMessage
             ]);
-        UIPid ->
-            %% Send the validated message to the UI using standardized format
-            UIPid ! {websocket_message, ValidatedMessage}
+        EnginePid ->
+            ?dbg("Dispatching message to Engine: ~p~n", [ValidatedMessage]),
+            %% Send the validated message to the Engine using standardized format
+            EnginePid ! {websocket_message, ValidatedMessage}
     end,
     {noreply, State}.
