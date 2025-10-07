@@ -4,6 +4,217 @@
 %%% all WebSocket messages exchanged between the Cryptic client and server. It
 %%% standardizes message formats and provides type safety for message construction.
 %%%
+%%% == Message Format Reference ==
+%%%
+%%% All messages are JSON objects with a mandatory `type' field. Base64 encoding
+%%% is used for all binary data (keys, signatures, ciphertext, etc.).
+%%%
+%%% === Client to Server Messages ===
+%%%
+%%% Authentication and Key Management:
+%%%
+%%% Upload identity keys (Step 4 of auth flow):
+%%% <pre>
+%%% {
+%%%   "type": "upload_identity_keys",
+%%%   "identity_sign_public": "base64-ed25519-public-key",
+%%%   "identity_dh_public": "base64-x25519-public-key",
+%%%   "signed_prekey_public": "base64-signed-prekey",
+%%%   "signed_prekey_signature": "base64-signature"
+%%% }
+%%% </pre>
+%%%
+%%% Upload prekey bundle (Step 5 of auth flow):
+%%% <pre>
+%%% {
+%%%   "type": "upload_prekey_bundle",
+%%%   "one_time_prekeys": [
+%%%     {
+%%%       "id": "base64-key-id",
+%%%       "public_key": "base64-public-key"
+%%%     }
+%%%   ]
+%%% }
+%%% </pre>
+%%%
+%%% Request user's key bundle for X3DH:
+%%% <pre>
+%%% {
+%%%   "type": "get_key_bundle",
+%%%   "user": "username"
+%%% }
+%%% </pre>
+%%%
+%%% Request current user's key status:
+%%% <pre>
+%%% {
+%%%   "type": "key_status"
+%%% }
+%%% </pre>
+%%%
+%%% Encrypted Messaging:
+%%%
+%%% Send generic encrypted message:
+%%% <pre>
+%%% {
+%%%   "type": "send_encrypted",
+%%%   "to": "username",
+%%%   "message": {}
+%%% }
+%%% </pre>
+%%%
+%%% Send X3DH encrypted message (session initiation):
+%%% <pre>
+%%% {
+%%%   "type": "send_message_x3dh",
+%%%   "to": "username",
+%%%   "message_id": "base64-message-id",
+%%%   "ephemeral_public": "base64-ephemeral-key",
+%%%   "otpk_id": "base64-otpk-id",
+%%%   "ciphertext": "base64-encrypted-data",
+%%%   "nonce": "base64-nonce",
+%%%   "signature": "base64-signature",
+%%%   "metadata": "base64-metadata"
+%%% }
+%%% </pre>
+%%%
+%%% Send Double Ratchet encrypted message (ongoing communication):
+%%% <pre>
+%%% {
+%%%   "type": "send_message_ratchet",
+%%%   "to": "username",
+%%%   "message_id": "base64-message-id",
+%%%   "dh_public": "base64-dh-public-key",
+%%%   "dh_step": 1,
+%%%   "prev_chain_length": 2,
+%%%   "msg_number": 3,
+%%%   "ciphertext": "base64-encrypted-data",
+%%%   "nonce": "base64-nonce"
+%%% }
+%%% </pre>
+%%%
+%%% User and Message Management:
+%%%
+%%% List all users:
+%%% <pre>
+%%% {
+%%%   "type": "list_users"
+%%% }
+%%% </pre>
+%%%
+%%% Get stored messages:
+%%% <pre>
+%%% {
+%%%   "type": "get_messages"
+%%% }
+%%% </pre>
+%%%
+%%% === Server to Client Messages ===
+%%%
+%%% General Responses:
+%%%
+%%% Welcome message on connection:
+%%% <pre>
+%%% {
+%%%   "type": "welcome",
+%%%   "message": "welcome-text"
+%%% }
+%%% </pre>
+%%%
+%%% Success response:
+%%% <pre>
+%%% {
+%%%   "type": "success",
+%%%   "message": "success-message"
+%%% }
+%%% </pre>
+%%%
+%%% Error response:
+%%% <pre>
+%%% {
+%%%   "type": "error",
+%%%   "message": "error-message"
+%%% }
+%%% </pre>
+%%%
+%%% Key Management Responses:
+%%%
+%%% Key status response:
+%%% <pre>
+%%% {
+%%%   "type": "key_status",
+%%%   "status": {},
+%%%   "error": "error-message"
+%%% }
+%%% </pre>
+%%%
+%%% Key bundle response:
+%%% <pre>
+%%% {
+%%%   "type": "key_bundle",
+%%%   "user": "username",
+%%%   "key_id": "base64-key-id",
+%%%   "identity_sign_public": "base64-ed25519-key",
+%%%   "identity_dh_public": "base64-x25519-key",
+%%%   "signed_prekey": "base64-signed-prekey",
+%%%   "signed_prekey_signature": "base64-signature",
+%%%   "one_time_prekey": {
+%%%     "id": "base64-otpk-id",
+%%%     "public_key": "base64-otpk"
+%%%   },
+%%%   "remaining_otpks": 42
+%%% }
+%%% </pre>
+%%%
+%%% User and Message Responses:
+%%%
+%%% User status response:
+%%% <pre>
+%%% {
+%%%   "type": "user_status",
+%%%   "user": "username",
+%%%   "status": "online",
+%%%   "message": "status-description"
+%%% }
+%%% </pre>
+%%%
+%%% Users list response:
+%%% <pre>
+%%% {
+%%%   "type": "users",
+%%%   "users": ["username1", "username2"]
+%%% }
+%%% </pre>
+%%%
+%%% Messages response:
+%%% <pre>
+%%% {
+%%%   "type": "messages",
+%%%   "messages": []
+%%% }
+%%% </pre>
+%%%
+%%% Incoming encrypted message notification:
+%%% <pre>
+%%% {
+%%%   "type": "encrypted_message_received",
+%%%   "from": "sender-username",
+%%%   "message": {},
+%%%   "server_timestamp": 1633610400
+%%% }
+%%% </pre>
+%%%
+%%% Message sent confirmation:
+%%% <pre>
+%%% {
+%%%   "type": "message_sent",
+%%%   "success": true,
+%%%   "to": "recipient",
+%%%   "timestamp": 1633610400,
+%%%   "message": "confirmation-text"
+%%% }
+%%% </pre>
+%%%
 %%% == Message Categories ==
 %%%
 %%% <ul>

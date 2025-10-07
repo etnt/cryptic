@@ -7,6 +7,7 @@
 
 %% Include ANSI escape sequence macros for terminal formatting
 -include("cryptic_ansi.hrl").
+-include("cryptic.hrl").
 
 %% API
 -export([main/1]).
@@ -273,14 +274,14 @@ show_engine_status(State) ->
 send_message_to_user(ToUsername, Message, State) ->
     case State#console_state.engine_pid of
         undefined ->
-            io:format("ERROR: No engine running~n");
+            ?error("No engine running~n", []);
         EnginePid ->
-            io:format("Sending message to ~s: ~s~n", [ToUsername, Message]),
+            ?dbg("Sending message to ~s: ~s~n", [ToUsername, Message]),
             case cryptic_engine:send_message(EnginePid, ToUsername, Message) of
                 ok ->
-                    io:format("Message sent successfully~n");
+                    ?dbg("Message sent successfully~n",[]);
                 {error, Reason} ->
-                    io:format("Failed to send message: ~p~n", [Reason])
+                    ?error("Failed to send message: ~p~n", [Reason])
             end
     end.
 

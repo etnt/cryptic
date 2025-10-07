@@ -235,9 +235,22 @@ init(Config) ->
     end.
 
 %% @private
-handle_call({send_message, _ToUsername, _Message}, _From, State) ->
-    % TODO: Implement message sending
-    {reply, {error, not_implemented}, State};
+handle_call({send_message, ToUsername, Message}, From, State) ->
+    case get_or_create_session(ToUsername, State) of
+        {ok, RatchetEnginePid, NewState} ->
+            % We have an active session, encrypt and send the message
+            send_encrypted_message_to_peer(
+                ToUsername, Message, RatchetEnginePid, NewState
+            );
+        {pending, NewState} ->
+            % Session creation in progress, queue the message
+            FinalState = queue_pending_message(
+                ToUsername, Message, From, NewState
+            ),
+            {noreply, FinalState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
 handle_call(
     {process_incoming_message, _FromUsername, _EncryptedMessage}, _From, State
 ) ->
@@ -361,7 +374,7 @@ upload_prekey_bundle(State) ->
                                 public => PubKey
                             }
                             | Acc
-                        ]   
+                        ]
                     end,
                     [],
                     Map
@@ -416,3 +429,158 @@ log(Level, FormatString, Args, State) ->
             % Ignore logging errors to prevent cascading failures
             ok
     end.
+
+%% @private
+get_or_create_session(ToUsername, State) ->
+    Sessions = State#cryptic_engine_state.sessions,
+    case maps:get(ToUsername, Sessions, undefined) of
+        undefined ->
+            % Check if session creation already in progress
+            PendingRequests = State#cryptic_engine_state.pending_key_requests,
+            case maps:get(ToUsername, PendingRequests, []) of
+                [] ->
+                    % No existing session or pending request, initiate key bundle request
+                    initiate_key_bundle_request(ToUsername, State);
+                _Requests ->
+                    % Session creation already in progress
+                    {pending, State}
+            end;
+        RatchetEnginePid ->
+            {ok, RatchetEnginePid, State}
+    end.
+
+%% @private
+initiate_key_bundle_request(ToUsername, State) ->
+    % Generate request ID for tracking
+    RequestId = generate_request_id(),
+
+    % Construct key bundle request using cryptic_messages
+    {ok, KeyBundleRequest} = cryptic_messages:get_key_bundle(#{
+        user => ToUsername
+    }),
+
+    CallbackModule = State#cryptic_engine_state.callback_module,
+    Context = State#cryptic_engine_state.callback_context,
+
+    % Send request to server asynchronously
+    case
+        CallbackModule:send_message_to_server(
+            State#cryptic_engine_state.username,
+            KeyBundleRequest,
+            Context
+        )
+    of
+        {ok, UpdatedContext} ->
+            % Set up timeout for this request
+            TimeoutRef = erlang:send_after(
+                30000, self(), {key_request_timeout, RequestId}
+            ),
+
+            % Track pending request
+            PendingRequest = #pending_request{
+                request_id = RequestId,
+                % No gen_server:from() for async request
+                from = undefined,
+                request_type = key_bundle,
+                timestamp = erlang:timestamp(),
+                timeout_ref = TimeoutRef
+            },
+
+            PendingRequests = State#cryptic_engine_state.pending_key_requests,
+            NewPendingRequests = maps:put(
+                ToUsername, [PendingRequest], PendingRequests
+            ),
+
+            UpdatedState = State#cryptic_engine_state{
+                callback_context = UpdatedContext,
+                pending_key_requests = NewPendingRequests
+            },
+            {pending, UpdatedState};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+queue_pending_message(ToUsername, Message, From, State) ->
+    MessageId = generate_message_id(),
+
+    PendingMessage = #pending_message{
+        message_id = MessageId,
+        from = From,
+        plaintext = Message,
+        timestamp = erlang:timestamp()
+    },
+
+    PendingMessages = State#cryptic_engine_state.pending_messages,
+    ExistingMessages = maps:get(ToUsername, PendingMessages, []),
+    NewPendingMessages = maps:put(
+        ToUsername,
+        [PendingMessage | ExistingMessages],
+        PendingMessages
+    ),
+
+    State#cryptic_engine_state{
+        pending_messages = NewPendingMessages
+    }.
+
+%% @private
+send_encrypted_message_to_peer(ToUsername, Message, _RatchetEnginePid, State) ->
+    % TODO: Encrypt message using ratchet engine (when cryptic_ratchet_engine is implemented)
+    % For now, we'll send the message as plaintext wrapped in a simple format
+
+    CallbackModule = State#cryptic_engine_state.callback_module,
+    Username = State#cryptic_engine_state.username,
+    Context = State#cryptic_engine_state.callback_context,
+
+    % Create a simple message structure (will be replaced with actual ratchet encryption)
+    MessageData = #{
+        to => ToUsername,
+        message => #{
+            % Temporary - will be ratchet message
+            type => <<"plaintext">>,
+            content => Message,
+            timestamp => erlang:system_time(millisecond)
+        }
+    },
+
+    % Use send_encrypted message type for now
+    {ok, WSMessage} = cryptic_messages:send_encrypted(MessageData),
+
+    case CallbackModule:send_message_to_server(Username, WSMessage, Context) of
+        {ok, UpdatedContext} ->
+            FinalState = State#cryptic_engine_state{
+                callback_context = UpdatedContext,
+                message_count = State#cryptic_engine_state.message_count + 1
+            },
+            log_info("Message sent to ~s", [ToUsername], FinalState),
+            {reply, ok, FinalState};
+        {error, Reason, UpdatedContext} ->
+            FinalState = State#cryptic_engine_state{
+                callback_context = UpdatedContext,
+                error_count = State#cryptic_engine_state.error_count + 1
+            },
+            log_error(
+                "Failed to send message to ~s: ~p",
+                [ToUsername, Reason],
+                FinalState
+            ),
+            {reply, {error, Reason}, FinalState};
+        {error, Reason} ->
+            FinalState = State#cryptic_engine_state{
+                error_count = State#cryptic_engine_state.error_count + 1
+            },
+            log_error(
+                "Failed to send message to ~s: ~p",
+                [ToUsername, Reason],
+                FinalState
+            ),
+            {reply, {error, Reason}, FinalState}
+    end.
+
+%% @private
+generate_request_id() ->
+    base64:encode(crypto:strong_rand_bytes(16)).
+
+%% @private
+generate_message_id() ->
+    base64:encode(crypto:strong_rand_bytes(16)).
