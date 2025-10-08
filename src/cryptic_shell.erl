@@ -1,18 +1,83 @@
-%%% @doc Cryptic Shell - Interactive shell with line editing for Cryptic Console
+%%% @doc Cryptic Shell - Enhanced interactive shell with line editing and history
 %%%
-%%% This module provides an enhanced interactive shell with Emacs-like line editing
-%%% capabilities for the Cryptic messaging application. It supports:
-%%% - Character echoing and proper terminal handling
-%%% - Emacs keybindings (Ctrl+A, Ctrl+E, Ctrl+F, Ctrl+B, etc.)
-%%% - Arrow key navigation
-%%% - Backspace and delete operations
-%%% - Password input with masking
-%%% - ANSI color and formatting support for enhanced visual experience
+%%% This module provides a sophisticated interactive shell with advanced line editing
+%%% capabilities for the Cryptic messaging application. It implements a custom input
+%%% handler with features comparable to modern shells.
 %%%
+%%% == Features ==
+%%% <ul>
+%%%   <li><b>Line Editing</b>: Character-by-character editing with cursor movement</li>
+%%%   <li><b>Emacs Keybindings</b>: Ctrl+A, Ctrl+E, Ctrl+F, Ctrl+B, Ctrl+K, Ctrl+U, etc.</li>
+%%%   <li><b>Arrow Key Support</b>: Left/Right for cursor movement, Up/Down for history</li>
+%%%   <li><b>Command History</b>: Navigate through last 100 commands with Up/Down arrows</li>
+%%%   <li><b>Input Buffer Preservation</b>: Save/restore partial input across process restarts</li>
+%%%   <li><b>Password Input</b>: Secure input with character masking</li>
+%%%   <li><b>ANSI Colors</b>: Rich terminal formatting for better UX</li>
+%%%   <li><b>Escape Sequence Handling</b>: Robust handling of terminal escape codes</li>
+%%% </ul>
+%%%
+%%% == Keybindings ==
+%%% === Navigation ===
+%%% <ul>
+%%%   <li>`Ctrl+A' or `Home' - Move to beginning of line</li>
+%%%   <li>`Ctrl+E' or `End' - Move to end of line</li>
+%%%   <li>`Ctrl+F' or `Right Arrow' - Move forward one character</li>
+%%%   <li>`Ctrl+B' or `Left Arrow' - Move backward one character</li>
+%%% </ul>
+%%%
+%%% === Editing ===
+%%% <ul>
+%%%   <li>`Ctrl+D' or `Delete' - Delete character at cursor</li>
+%%%   <li>`Ctrl+H' or `Backspace' - Delete character before cursor</li>
+%%%   <li>`Ctrl+K' - Kill (delete) to end of line</li>
+%%%   <li>`Ctrl+U' - Kill (delete) entire line</li>
+%%% </ul>
+%%%
+%%% === History ===
+%%% <ul>
+%%%   <li>`Ctrl+P' or `Up Arrow' - Previous command in history</li>
+%%%   <li>`Ctrl+N' or `Down Arrow' - Next command in history</li>
+%%% </ul>
+%%%
+%%% == Architecture ==
+%%% The shell operates in raw terminal mode to intercept individual keystrokes.
+%%% It maintains state in a `line_state' record that tracks:
+%%% <ul>
+%%%   <li>Current input buffer (list of characters)</li>
+%%%   <li>Cursor position within the buffer</li>
+%%%   <li>History navigation state</li>
+%%%   <li>ETS table reference for persistence</li>
+%%% </ul>
+%%%
+%%% == Buffer Persistence ==
+%%% The shell can save partial input to an ETS table (typically `cryptic_console_input_buffer')
+%%% allowing the console to preserve user input when the input process is killed by
+%%% async messages. The buffer is automatically restored on the next prompt.
+%%%
+%%% == Command History ==
+%%% Commands are stored in the same ETS table with keys `{history, N}' where N is the
+%%% command index. The history is circular with a maximum of 100 commands. Empty commands
+%%% and duplicate consecutive commands are not saved.
+%%%
+%%% == Escape Sequence Handling ==
+%%% The shell includes special handling for escape sequences that may appear in the input
+%%% stream after process restarts or ANSI output. It can:
+%%% <ul>
+%%%   <li>Detect and consume ANSI color codes (ESC[...m)</li>
+%%%   <li>Handle broken arrow key sequences (ESC A instead of ESC [ A)</li>
+%%%   <li>Distinguish between escape sequences and user input</li>
+%%% </ul>
+%%%
+%%% @see cryptic_console
+%%%
+%%% @author Cryptic Team
+%%% @version 1.0.0
+
 -module(cryptic_shell).
 
 %% Include ANSI escape sequence macros for terminal formatting
 -include("cryptic_ansi.hrl").
+-include("cryptic.hrl").
 
 %% API
 -export([
@@ -31,14 +96,18 @@
 
 %% Internal state record for line editing
 -record(line_state, {
-    % Current line content
+    %% Current line content
     buffer = [] :: [char()],
-    % Cursor position (0-based from start)
+    %% Cursor position (0-based from start)
     cursor = 0 :: non_neg_integer(),
-    % Current prompt string
+    %% Current prompt string
     prompt :: string(),
-    % Optional ETS table for buffer persistence
-    buffer_table :: ets:tid() | undefined
+    %% Optional ETS table for buffer persistence
+    buffer_table :: ets:tid() | undefined,
+    %% History navigation state
+    history_pos :: undefined | non_neg_integer(),
+    %% Original buffer before history navigation
+    original_buffer = [] :: [char()]
 }).
 
 %%%===================================================================
@@ -56,7 +125,7 @@ start_shell(Options) ->
     Verbose = maps:get(verbose, Options, false),
 
     try
-        % Try OTP 28 raw mode first
+        %% Try OTP 28 raw mode first
         case shell:start_interactive({noshell, raw}) of
             ok ->
                 case Verbose of
@@ -127,11 +196,11 @@ cleanup() ->
 %% @doc Get a line of input with line editing
 -spec get_line(string()) -> string() | eof | {error, term()}.
 get_line(Prompt) ->
-    % Format prompt with bold styling for better visibility
+    %% Format prompt with bold styling for better visibility
     FormattedPrompt = ?BOLD(Prompt),
     io:format("~s", [FormattedPrompt]),
 
-    % Check if there's a saved buffer in the named ETS table
+    %% Check if there's a saved buffer in the named ETS table
     InitialBuffer =
         case ets:whereis(cryptic_console_input_buffer) of
             undefined ->
@@ -139,9 +208,9 @@ get_line(Prompt) ->
             _TableRef ->
                 case ets:lookup(cryptic_console_input_buffer, current_input) of
                     [{current_input, Buffer}] ->
-                        % Clear the saved buffer since we're restoring it
+                        %% Clear the saved buffer since we're restoring it
                         ets:delete(cryptic_console_input_buffer, current_input),
-                        % Display the restored buffer
+                        %% Display the restored buffer
                         io:format("~s", [Buffer]),
                         Buffer;
                     [] ->
@@ -155,12 +224,16 @@ get_line(Prompt) ->
         prompt = FormattedPrompt,
         buffer_table = cryptic_console_input_buffer
     },
+    %% Small delay to let terminal finish processing the prompt ANSI codes
+    %% before we start reading input. This prevents characters from being
+    %% consumed/lost when the terminal is still processing escape sequences.
+    timer:sleep(10),
     line_editor_loop(LineState).
 
 %% @doc Get password input with character masking
 -spec get_password(string()) -> string() | eof.
 get_password(Prompt) ->
-    % Format password prompt with yellow color and bold for security emphasis
+    %% Format password prompt with yellow color and bold for security emphasis
     FormattedPrompt = ?FG_YELLOW_BG_BLACK(?BOLD(Prompt)),
     io:format("~s", [FormattedPrompt]),
     password_loop([]).
@@ -179,67 +252,180 @@ fallback_raw_mode() ->
 %% @doc Main line editor loop
 line_editor_loop(#line_state{buffer = Buffer} = State) ->
     case io:get_chars(standard_io, "", 1) of
-        % Enter keys
-        "\n" -> finish_line(Buffer);
-        "\r" -> finish_line(Buffer);
-        % Escape sequence start
-        "\e" -> handle_escape_sequence(State);
-        % Emacs control keys
+        %% Enter keys
+        "\n" ->
+            finish_line(Buffer);
+        "\r" ->
+            finish_line(Buffer);
+        %% Escape sequence start
+        "\e" ->
+            handle_escape_sequence(State);
+        %% Emacs control keys
 
-        % Ctrl+A - beginning of line
-        [1] -> handle_ctrl_a(State);
-        % Ctrl+E - end of line
-        [5] -> handle_ctrl_e(State);
-        % Ctrl+F - forward char
-        [6] -> handle_ctrl_f(State);
-        % Ctrl+B - backward char
-        [2] -> handle_ctrl_b(State);
-        % Ctrl+D - delete char
-        [4] -> handle_ctrl_d(State);
-        % Ctrl+H - backspace
-        [8] -> handle_ctrl_h(State);
-        % Ctrl+K - kill to end
-        [11] -> handle_ctrl_k(State);
-        % Ctrl+U - kill entire line
-        [21] -> handle_ctrl_u(State);
-        % Regular delete key
+        %% Ctrl+A - beginning of line
+        [1] ->
+            handle_ctrl_a(State);
+        %% Ctrl+E - end of line
+        [5] ->
+            handle_ctrl_e(State);
+        %% Ctrl+F - forward char
+        [6] ->
+            handle_ctrl_f(State);
+        %% Ctrl+B - backward char
+        [2] ->
+            handle_ctrl_b(State);
+        %% Ctrl+D - delete char
+        [4] ->
+            handle_ctrl_d(State);
+        %% Ctrl+H - backspace
+        [8] ->
+            handle_ctrl_h(State);
+        %% Ctrl+K - kill to end
+        [11] ->
+            handle_ctrl_k(State);
+        %% Ctrl+U - kill entire line
+        [21] ->
+            handle_ctrl_u(State);
+        %% Ctrl+P - previous history
+        [16] ->
+            handle_ctrl_p(State);
+        %% Ctrl+N - next history
+        [14] ->
+            handle_ctrl_n(State);
+        %% Regular delete key
 
-        % DEL acts like backspace
-        [127] -> handle_ctrl_h(State);
-        % EOF
-        eof -> eof;
-        % Skip other control characters
-        [C] when C < 32 -> line_editor_loop(State);
-        % Regular printable character
-        [Char] -> insert_char(State, Char)
+        %% DEL acts like backspace
+        [127] ->
+            handle_ctrl_h(State);
+        %% EOF
+        eof ->
+            eof;
+        %% Skip other control characters
+        [C] when C < 32 ->
+            line_editor_loop(State);
+        %% Regular printable character
+        [Char] ->
+            insert_char(State, Char)
     end.
 
 %% @doc Handle escape sequences (arrow keys, etc.)
 handle_escape_sequence(State) ->
+    %% Read one character at a time to avoid blocking issues
     case io:get_chars(standard_io, "", 1) of
         "[" ->
+            %% Now read the command character
             case io:get_chars(standard_io, "", 1) of
-                % Up arrow - ignore for now
-                "A" -> line_editor_loop(State);
-                % Down arrow - ignore for now
-                "B" -> line_editor_loop(State);
-                % Right arrow
-                "C" -> handle_ctrl_f(State);
-                % Left arrow
-                "D" -> handle_ctrl_b(State);
-                _ -> line_editor_loop(State)
+                "A" ->
+                    %% Up arrow
+                    handle_ctrl_p(State);
+                "B" ->
+                    %% Down arrow
+                    handle_ctrl_n(State);
+                "C" ->
+                    %% Right arrow
+                    handle_ctrl_f(State);
+                "D" ->
+                    %% Left arrow
+                    handle_ctrl_b(State);
+                %% Might be an ANSI sequence like ESC[0m or ESC[1;36m
+                [C] when C >= $0, C =< $9 ->
+                    %% Consume the rest of the ANSI sequence (digits, semicolons, until 'm')
+                    consume_ansi_sequence(State);
+                %% Unknown sequence - consume and ignore
+                _Other ->
+                    line_editor_loop(State)
             end;
+        %% Special case: After process restart, we sometimes get ESC A instead of ESC [ A
+        %% This happens because the [ character gets consumed somewhere during restart
+        %% Treat bare arrow keys (A/B/C/D) after ESC as arrow key sequences
+        "A" ->
+            handle_ctrl_p(State);
+        "B" ->
+            handle_ctrl_n(State);
+        "C" ->
+            handle_ctrl_f(State);
+        "D" ->
+            handle_ctrl_b(State);
+        %% Other escape sequences - might be from ANSI codes in terminal output
+        %% Numeric start - consume ANSI sequence
+        [C] when C >= $0, C =< $9 ->
+            consume_ansi_sequence(State);
+        %% Regular character after ESC - treat as user input
+        [Char] ->
+            insert_char(State, Char);
+        %% Anything else - ignore
+        _Other ->
+            line_editor_loop(State)
+    end.
+
+%% @doc Consume the rest of an ANSI escape sequence
+%% ANSI sequences are like ESC[0m or ESC[1;36m - consume until 'm'
+consume_ansi_sequence(State) ->
+    case io:get_chars(standard_io, "", 1) of
+        [C] when C >= $0, C =< $9; C == $; ->
+            %% Continue consuming
+            consume_ansi_sequence(State);
+        "m" ->
+            %% End of ANSI sequence
+            line_editor_loop(State);
         _ ->
+            %% Unexpected - just continue
             line_editor_loop(State)
     end.
 
 %% @doc Finish line editing and return result
 finish_line(Buffer) ->
     io:format("\r\n"),
-    % Clear the saved buffer from ETS since input is complete
+    %% Clear the saved buffer from ETS since input is complete
     case ets:whereis(cryptic_console_input_buffer) of
-        undefined -> ok;
-        _TableRef -> ets:delete(cryptic_console_input_buffer, current_input)
+        undefined ->
+            ok;
+        TableRef ->
+            ets:delete(TableRef, current_input),
+            %% Save to history if it's not empty and not a duplicate of the last entry
+            FlatBuffer = lists:flatten(Buffer),
+            case string:trim(FlatBuffer) of
+                %% Don't save empty commands
+                "" ->
+                    ok;
+                TrimmedCmd ->
+                    %% Get current history count
+                    HistoryCount =
+                        case ets:lookup(TableRef, history_count) of
+                            [{history_count, Count}] -> Count;
+                            [] -> 0
+                        end,
+                    %% Check if it's different from the last command
+                    ShouldSave =
+                        case HistoryCount of
+                            0 ->
+                                true;
+                            _ ->
+                                case
+                                    ets:lookup(
+                                        TableRef, {history, HistoryCount - 1}
+                                    )
+                                of
+                                    [{_, LastCmd}] -> TrimmedCmd =/= LastCmd;
+                                    [] -> true
+                                end
+                        end,
+                    case ShouldSave of
+                        true ->
+                            %% Save command to history
+                            ets:insert(TableRef, {
+                                {history, HistoryCount}, TrimmedCmd
+                            }),
+                            %% Update history count
+                            ets:insert(
+                                TableRef, {history_count, HistoryCount + 1}
+                            ),
+                            %% Keep only last 100 commands
+                            cleanup_old_history(TableRef, HistoryCount + 1);
+                        false ->
+                            ok
+                    end
+            end
     end,
     lists:flatten(Buffer).
 
@@ -249,7 +435,7 @@ save_buffer_to_ets(BufferTable, Buffer) ->
         undefined ->
             ok;
         TableName when is_atom(TableName) ->
-            % Check if the named table exists before writing
+            %% Check if the named table exists before writing
             case ets:whereis(TableName) of
                 undefined -> ok;
                 _Ref -> ets:insert(TableName, {current_input, Buffer})
@@ -271,15 +457,15 @@ insert_char(
     NewCursor = Cursor + 1,
     NewState = State#line_state{buffer = NewBuffer, cursor = NewCursor},
 
-    % Save buffer to ETS
+    %% Save buffer to ETS
     save_buffer_to_ets(BufferTable, NewBuffer),
 
     case Right of
         [] ->
-            % Inserting at end - just echo
+            %% Inserting at end - just echo
             io:format("~c", [Char]);
         _ ->
-            % Inserting in middle - redraw
+            %% Inserting in middle - redraw
             io:format("~c", [Char]),
             redraw_from_cursor(NewState)
     end,
@@ -332,7 +518,7 @@ handle_ctrl_d(
             NewBuffer = Left ++ Right,
             NewState = State#line_state{buffer = NewBuffer},
 
-            % Save buffer to ETS
+            %% Save buffer to ETS
             save_buffer_to_ets(BufferTable, NewBuffer),
 
             redraw_from_cursor(NewState),
@@ -352,7 +538,7 @@ handle_ctrl_h(
     NewBuffer = lists:droplast(Left) ++ Right,
     NewCursor = Cursor - 1,
 
-    % Save buffer to ETS
+    %% Save buffer to ETS
     save_buffer_to_ets(BufferTable, NewBuffer),
 
     io:format("\b"),
@@ -368,7 +554,7 @@ handle_ctrl_k(
     {Left, _Right} = lists:split(Cursor, Buffer),
     NewState = State#line_state{buffer = Left},
 
-    % Save buffer to ETS
+    %% Save buffer to ETS
     save_buffer_to_ets(BufferTable, Left),
 
     io:format("\e[K"),
@@ -379,10 +565,178 @@ handle_ctrl_u(#line_state{prompt = Prompt, buffer_table = BufferTable} = State) 
     io:format("\r~s", [Prompt]),
     NewState = State#line_state{buffer = [], cursor = 0},
 
-    % Save buffer to ETS
+    %% Save buffer to ETS
     save_buffer_to_ets(BufferTable, []),
 
     line_editor_loop(NewState).
+
+%% @doc Navigate to previous history entry (Ctrl+P, Up Arrow)
+handle_ctrl_p(#line_state{buffer_table = undefined} = State) ->
+    %% No history available
+    line_editor_loop(State);
+handle_ctrl_p(
+    #line_state{
+        buffer_table = BufferTable,
+        history_pos = HistoryPos,
+        buffer = CurrentBuffer,
+        original_buffer = OriginalBuffer,
+        prompt = Prompt
+    } = State
+) ->
+    case ets:whereis(BufferTable) of
+        undefined ->
+            line_editor_loop(State);
+        TableRef ->
+            %% Get history count
+            HistoryCount =
+                case ets:lookup(TableRef, history_count) of
+                    [{history_count, Count}] -> Count;
+                    [] -> 0
+                end,
+
+            case HistoryCount of
+                0 ->
+                    %% No history
+                    line_editor_loop(State);
+                _ ->
+                    %% Determine new position
+                    NewPos =
+                        case HistoryPos of
+                            undefined ->
+                                %% First time navigating - save current buffer and go to most recent
+                                HistoryCount - 1;
+                            Pos when Pos > 0 ->
+                                %% Go to previous entry
+                                Pos - 1;
+                            _ ->
+                                %% Already at oldest
+                                HistoryPos
+                        end,
+
+                    %% Only update if position changed
+                    case NewPos =:= HistoryPos of
+                        true ->
+                            line_editor_loop(State);
+                        false ->
+                            %% Retrieve history entry
+                            case ets:lookup(TableRef, {history, NewPos}) of
+                                [{_, HistoryCmd}] ->
+                                    %% Save original buffer on first navigation
+                                    NewOriginal =
+                                        case HistoryPos of
+                                            undefined -> CurrentBuffer;
+                                            _ -> OriginalBuffer
+                                        end,
+
+                                    %% Replace current line with history entry
+                                    replace_line_with_text(
+                                        Prompt, HistoryCmd, State#line_state{
+                                            history_pos = NewPos,
+                                            original_buffer = NewOriginal
+                                        }
+                                    );
+                                [] ->
+                                    line_editor_loop(State)
+                            end
+                    end
+            end
+    end.
+
+%% @doc Navigate to next history entry (Ctrl+N, Down Arrow)
+handle_ctrl_n(#line_state{buffer_table = undefined} = State) ->
+    %% No history available
+    line_editor_loop(State);
+handle_ctrl_n(
+    #line_state{
+        history_pos = undefined
+    } = State
+) ->
+    %% Not navigating history, nothing to do
+    line_editor_loop(State);
+handle_ctrl_n(
+    #line_state{
+        buffer_table = BufferTable,
+        history_pos = HistoryPos,
+        original_buffer = OriginalBuffer,
+        prompt = Prompt
+    } = State
+) ->
+    case ets:whereis(BufferTable) of
+        undefined ->
+            line_editor_loop(State);
+        TableRef ->
+            %% Get history count
+            HistoryCount =
+                case ets:lookup(TableRef, history_count) of
+                    [{history_count, Count}] -> Count;
+                    [] -> 0
+                end,
+
+            NewPos = HistoryPos + 1,
+
+            case NewPos >= HistoryCount of
+                true ->
+                    %% Return to original buffer
+                    replace_line_with_text(
+                        Prompt, OriginalBuffer, State#line_state{
+                            history_pos = undefined,
+                            original_buffer = []
+                        }
+                    );
+                false ->
+                    %% Go to next entry
+                    case ets:lookup(TableRef, {history, NewPos}) of
+                        [{_, HistoryCmd}] ->
+                            replace_line_with_text(
+                                Prompt, HistoryCmd, State#line_state{
+                                    history_pos = NewPos
+                                }
+                            );
+                        [] ->
+                            line_editor_loop(State)
+                    end
+            end
+    end.
+
+%% @doc Replace current line with new text
+replace_line_with_text(Prompt, NewText, State) ->
+    %% Clear current line
+    io:format("\r~s\e[K", [Prompt]),
+
+    %% Convert text to buffer
+    NewBuffer =
+        case is_list(NewText) of
+            true -> NewText;
+            false -> []
+        end,
+
+    %% Display new text
+    io:format("~s", [NewBuffer]),
+
+    %% Update state
+    NewState = State#line_state{
+        buffer = NewBuffer,
+        cursor = length(NewBuffer)
+    },
+
+    line_editor_loop(NewState).
+
+%% @doc Clean up old history entries, keeping only the last MaxHistory entries
+cleanup_old_history(TableRef, CurrentCount) ->
+    MaxHistory = 100,
+    case CurrentCount > MaxHistory of
+        true ->
+            %% Delete oldest entries
+            NumToDelete = CurrentCount - MaxHistory,
+            lists:foreach(
+                fun(N) ->
+                    ets:delete(TableRef, {history, N})
+                end,
+                lists:seq(0, NumToDelete - 1)
+            );
+        false ->
+            ok
+    end.
 
 %% @doc Redraw line content from cursor to end
 redraw_from_cursor(#line_state{buffer = Buffer, cursor = Cursor}) ->

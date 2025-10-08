@@ -1,5 +1,9 @@
 [doc Double Ratchet Console Test - Basic Message Flow]
 
+#[config shell_cmd=/bin/bash]
+#[config shell_prompt_cmd=bind 'set enable-bracketed-paste off'; unset PROMPT_COMMAND; export PS1="SH-PROMPT:"]
+#[config shell_prompt_regexp=^SH-PROMPT:]
+
 [global alice_passphrase=qwe123]
 [global bob_passphrase=qwe123]
 
@@ -34,6 +38,12 @@
     ?.*cryptic_ws_handler.*Processing validated message from: alice , type: upload_identity_keys
     ?.*cryptic_ws_handler.*Processing validated message from: alice , type: upload_prekey_bundle
 
+[shell alice]
+    [invoke log "Alice tries to send a message to Bob, who does not exist yet"]
+    !send bob Hi Bob, this is Alice!
+    ?User 'bob' not found - message could not be delivered
+    ?cryptic>
+
 [shell bob]
     [invoke log "Start Bob's console..."]
     !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u bob
@@ -50,13 +60,6 @@
 [shell server-log]
     ?.*cryptic_ws_handler.*Processing validated message from: bob , type: upload_identity_keys
     ?.*cryptic_ws_handler.*Processing validated message from: bob , type: upload_prekey_bundle
-
-[shell alice
-    [invoke log "Alice sends a message to Bob"]
-    !send bob Hello Bob, this is Alice!
-    ?Message sent to bob
-
-
 
 
 [shell alice]

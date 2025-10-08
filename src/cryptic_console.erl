@@ -1,8 +1,87 @@
-%%% @doc Cryptic Console - Console interface for the Cryptic Engine
+%%% @doc Cryptic Console - Interactive terminal interface for the Cryptic Engine
 %%%
-%%% This module provides a console interface for the Cryptic messaging engine.
-%%% It handles initialization, event management, and basic user interaction.
+%%% This module provides a sophisticated console interface for the Cryptic messaging engine
+%%% with support for asynchronous message handling, input buffer preservation across
+%%% interruptions, and command history.
 %%%
+%%% == Features ==
+%%% <ul>
+%%%   <li>Non-blocking async message delivery while waiting for user input</li>
+%%%   <li>Input buffer preservation when interrupted by system messages</li>
+%%%   <li>Command history navigation with Up/Down arrows and Ctrl+P/Ctrl+N</li>
+%%%   <li>Line editing with Emacs-style keybindings</li>
+%%%   <li>ANSI colored output for better readability</li>
+%%%   <li>Secure passphrase input with character masking</li>
+%%% </ul>
+%%%
+%%% == Architecture ==
+%%% The console uses a two-process design to handle asynchronous events:
+%%%
+%%% <ul>
+%%%   <li><b>Console Process</b>: Main loop that manages state and handles messages</li>
+%%%   <li><b>Input Process</b>: Spawned per-prompt to wait for user input (can be killed)</li>
+%%% </ul>
+%%%
+%%% This design allows the console to respond to async messages (like incoming chat messages)
+%%% while blocking on user input. When a message arrives, the input process is killed,
+%%% the message is displayed, and a new input process is spawned.
+%%%
+%%% == Process Flow ==
+%%% <pre>
+%%% ┌─────────────────────────────────────────────────────────────┐
+%%% │ Console Process (main loop)                                 │
+%%% └─────────────────────────────────────────────────────────────┘
+%%%                            │
+%%%                            ▼
+%%%                    command_loop(State)
+%%%                            │
+%%%                            ├─ check_messages() (handle any pending async messages)
+%%%                            │
+%%%                            ├─ spawn_input_process() → Input Process
+%%%                            │                               │
+%%%                            │                               ├─ display prompt
+%%%                            │                               ├─ cryptic_shell:get_line()
+%%%                            │                               └─ wait for user input...
+%%%                            │
+%%%                            ▼
+%%%          wait_for_input_or_messages(InputPid, MonitorRef, State)
+%%%                            │
+%%%                            ├─ Waiting for one of:
+%%%                            │  • {input_result, Line}    ← Input arrived
+%%%                            │  • {system_message, Msg}   ← Async message
+%%%                            │  • {'DOWN', ...}           ← Input process died
+%%%                            │
+%%%                            ▼
+%%%             ┌──────────────┴──────────────┐
+%%%             │                             │
+%%%     User typed something         Async message arrived
+%%%             │                             │
+%%%             ▼                             ▼
+%%% {input_result, Line}          {system_message, Msg}
+%%%             │                             │
+%%%             ├─ parse_command()            ├─ exit(InputPid, kill)
+%%%             ├─ execute_command()          ├─ display_async_message()
+%%%             │                             ├─ wait for {'DOWN', ...}
+%%%             ▼                             │
+%%%     command_loop(NewState) ───────────────┘
+%%%     (spawn new Input process)
+%%% </pre>
+%%%
+%%% == Input Buffer Preservation ==
+%%% When an async message interrupts user input, any partially typed text is preserved
+%%% in an ETS table (`cryptic_console_input_buffer') and restored when the prompt returns.
+%%% This prevents data loss and improves user experience.
+%%%
+%%% == Command History ==
+%%% The console maintains a history of up to 100 commands in the same ETS table,
+%%% accessible via Up/Down arrows or Ctrl+P/Ctrl+N keybindings.
+%%%
+%%% @see cryptic_shell
+%%% @see cryptic_engine
+%%%
+%%% @author Cryptic Team
+%%% @version 1.0.0
+
 -module(cryptic_console).
 
 %% Include ANSI escape sequence macros for terminal formatting
@@ -60,10 +139,10 @@ main(InitCfg) ->
     %% Prompt for passphrase early, before initializing cryptic engine
     Passphrase = get_passphrase(),
 
-    % Get console PID to pass to callbacks
+    %% Get console PID to pass to callbacks
     ConsolePid = self(),
 
-    % Start cryptic engine with passphrase and WebSocket client PID
+    %% Start cryptic engine with passphrase and WebSocket client PID
     EngineCfg = CertCfg#{
         callback_mod => cryptic_console_callbacks,
         username => Username,
@@ -75,13 +154,13 @@ main(InitCfg) ->
 
     ok = cryptic_ws_client:set_engine_pid(WsClientPid, EnginePid),
 
-    % Create named ETS table for input buffer preservation
-    % Use named table so cryptic_shell can access it directly
+    %% Create named ETS table for input buffer preservation
+    %% Use named table so cryptic_shell can access it directly
     InputBufferTable = ets:new(cryptic_console_input_buffer, [
         set, public, named_table
     ]),
 
-    % Initialize console state with self() PID
+    %% Initialize console state with self() PID
     State = #console_state{
         ws_client_pid = WsClientPid,
         engine_pid = EnginePid,
@@ -95,7 +174,7 @@ main(InitCfg) ->
         "Cryptic Console ready. Type 'help' for commands."
     ),
 
-    % Start command loop
+    %% Start command loop
     command_loop(State).
 
 %%%===================================================================
@@ -132,7 +211,7 @@ get_passphrase() ->
 setup_event_management(Config) ->
     Username = maps:get(username, Config),
 
-    % Start the event manager for logging
+    %% Start the event manager for logging
     case gen_event:start_link({local, cryptic_event_manager}) of
         {ok, _} ->
             ok;
@@ -143,7 +222,7 @@ setup_event_management(Config) ->
             throw(event_manager)
     end,
 
-    % Set up event handlers for UI client with client configuration
+    %% Set up event handlers for UI client with client configuration
     EventCfg = Config#{
         log_type => client,
         log_dir => "logs",
@@ -186,10 +265,10 @@ get_cert_config(Cfg) ->
 
 %% @doc Main command loop with async message handling
 command_loop(State) ->
-    % Check for any pending system messages before prompting
+    %% Check for any pending system messages before prompting
     check_messages(),
 
-    % Check if there was interrupted input to restore
+    %% Check if there was interrupted input to restore
     BufferTable = State#console_state.input_buffer_table,
     RestoredInput =
         case ets:lookup(BufferTable, current_input) of
@@ -200,13 +279,23 @@ command_loop(State) ->
                 ""
         end,
 
-    % Spawn a process to get input asynchronously with monitoring
+    %% Spawn a process to get input asynchronously with monitoring
+    {InputPid, MonitorRef} = spawn_input_process(RestoredInput),
+
+    %% Wait for either input or messages
+    wait_for_input_or_messages(InputPid, MonitorRef, State).
+
+%% @doc Spawn an input process to get user input asynchronously
+%% The input process will wait for user input and send the result back
+%% to the console process, then terminate.
+-spec spawn_input_process(RestoredInput :: string()) -> {pid(), reference()}.
+spawn_input_process(RestoredInput) ->
     ConsolePid = self(),
-    % Capture for closure
+    %% Capture for closure
     RestoredInputCopy = RestoredInput,
-    {InputPid, MonitorRef} = spawn_opt(
+    spawn_opt(
         fun() ->
-            % If we have restored input, display it with a notification
+            %% If we have restored input, display it with a notification
             if
                 RestoredInputCopy =/= "" ->
                     io:format("[Input restored: ~s] ", [RestoredInputCopy]);
@@ -214,7 +303,7 @@ command_loop(State) ->
                     ok
             end,
             Result = cryptic_shell:get_line("cryptic> "),
-            % Prepend restored input if any
+            %% Prepend restored input if any
             FinalResult =
                 if
                     RestoredInputCopy =:= "" ->
@@ -229,10 +318,7 @@ command_loop(State) ->
             ConsolePid ! {input_result, FinalResult}
         end,
         [monitor]
-    ),
-
-    % Wait for either input or messages
-    wait_for_input_or_messages(InputPid, MonitorRef, State).
+    ).
 
 %% @doc Wait for input result or handle incoming messages
 wait_for_input_or_messages(InputPid, MonitorRef, State) ->
@@ -262,17 +348,17 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
                     command_loop(NewState)
             end;
         {'DOWN', MonitorRef, process, InputPid, _Reason} ->
-            % Input process died (we killed it), restart command loop
+            %% Input process died (we killed it), restart command loop
             command_loop(State);
         {system_message, Message} ->
-            % A message arrived while waiting for input
-            % Note: We can't retrieve the actual input buffer from the blocked process
-            % A future enhancement would be to modify cryptic_shell to support this
-            % For now, we just interrupt and restart
+            %% A message arrived while waiting for input
+            %% Note: We can't retrieve the actual input buffer from the blocked process
+            %% A future enhancement would be to modify cryptic_shell to support this
+            %% For now, we just interrupt and restart
             exit(InputPid, kill),
-            % Display the async message
+            %% Display the async message
             display_async_message(Message),
-            % Continue waiting - the DOWN message will trigger restart
+            %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
 
@@ -379,6 +465,8 @@ show_help() ->
     io:format("  Ctrl+E                     - End of line\r\n"),
     io:format("  Ctrl+F / Right Arrow       - Forward one character\r\n"),
     io:format("  Ctrl+B / Left Arrow        - Back one character\r\n"),
+    io:format("  Ctrl+P / Up Arrow          - Previous command in history\r\n"),
+    io:format("  Ctrl+N / Down Arrow        - Next command in history\r\n"),
     io:format("  Ctrl+D                     - Delete character\r\n"),
     io:format("  Ctrl+H / Backspace         - Delete previous character\r\n"),
     io:format("  Ctrl+K                     - Kill to end of line\r\n"),
@@ -388,34 +476,38 @@ show_help() ->
 check_messages() ->
     receive
         {system_message, Message} ->
-            % Clear line and print system message
+            %% Clear line and print system message
             display_async_message(Message),
-            % Recursively check for more messages
+            %% Recursively check for more messages
             check_messages()
     after 0 ->
-        % No messages, continue
+        %% No messages, continue
         ok
     end.
 
 %% @doc Display an async message without disrupting the prompt
 display_async_message(Message) ->
-    % Clear current line and print system message
+    %% Clear current line and print system message
     io:format("\r\n"),
-    cryptic_shell:print_info(binary_to_list(Message)).
+    cryptic_shell:print_info(binary_to_list(Message)),
+    %% Force flush output streams
+    io:format("~s", [""]),
+    %% Longer delay to ensure terminal has processed all ANSI sequences
+    timer:sleep(100).
 
 %% @doc Cleanup resources
 cleanup(State) ->
-    % Clean up the enhanced shell
+    %% Clean up the enhanced shell
     cryptic_shell:cleanup(),
 
-    % Clean up ETS table if it exists
+    %% Clean up ETS table if it exists
     case State#console_state.input_buffer_table of
         undefined -> ok;
         Table -> ets:delete(Table)
     end,
 
-    % Note: We don't stop the engine or ws_client here as they might be shared
-    % or managed by the parent process
+    %% Note: We don't stop the engine or ws_client here as they might be shared
+    %% or managed by the parent process
     case State#console_state.verbose of
         true ->
             io:format("Cleanup complete\r\n");

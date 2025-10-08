@@ -20,6 +20,32 @@ main(Args) ->
 
     %% Parse command line options using eclip
     case eclip:parse(Args, spec(), #{}) of
+        {ok, {_Spec, _Env, Opts, _Extra}} when is_map(Opts) ->
+            %% Extract options from the parsed result
+            Username = maps:get(username, Opts),
+            ServerHost = maps:get(server_host, Opts, "localhost"),
+            ServerPort = maps:get(server_port, Opts, 8443),
+            Verbose = maps:get(verbose, Opts, false),
+
+            %% Build configuration map
+            Config = #{
+                username => list_to_binary(Username),
+                server_host => ServerHost,
+                server_port => ServerPort,
+                verbose => Verbose
+            },
+
+            %% Display startup banner
+            case Verbose of
+                true ->
+                    io:format("=== Cryptic Console ===~n"),
+                    io:format("Config: ~p~n", [Config]);
+                false ->
+                    io:format("=== Cryptic Console ===~n")
+            end,
+
+            %% Start the console
+            cryptic_console:main(Config);
         {done, _} ->
             %% Help was shown or similar, exit gracefully
             ok;
@@ -65,29 +91,8 @@ spec() ->
                 type => flag,
                 help => "Enable verbose output"
             }
-        ],
-        cb => fun start_console/6
+        ]
     }.
-
-%% @doc Callback function for eclip
-start_console(_Env, _CmdStack, Username, ServerHost, ServerPort, Verbose) ->
-    Config = #{
-        username => list_to_binary(Username),
-        server_host => ServerHost,
-        server_port => ServerPort,
-        verbose => Verbose
-    },
-
-    case Verbose of
-        true ->
-            io:format("=== Cryptic Console ===~n"),
-            io:format("Config: ~p~n", [Config]);
-        false ->
-            io:format("=== Cryptic Console ===~n")
-    end,
-
-    %% Start the console
-    cryptic_console:main(Config).
 
 %% @doc Set up code paths relative to the script location
 setup_code_paths() ->
