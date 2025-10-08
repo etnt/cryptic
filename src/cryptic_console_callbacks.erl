@@ -5,6 +5,8 @@
 %%%
 -module(cryptic_console_callbacks).
 
+-behaviour(cryptic_engine).
+
 %% Callback exports for cryptic_engine behavior
 -export([
     load_identity_keys/2,
@@ -15,6 +17,7 @@
     send_message_to_server/3,
     deliver_message/4,
     system_message/2,
+    message_undeliverable/5,
     log_message/3,
     life_cycle/4
 ]).
@@ -35,7 +38,11 @@ load_identity_keys(Username, Context) when is_binary(Username) andalso
 
        % Transform the format to what cryptic_engine expects
        EngineKeys = #{
-           identity_key => {
+           identity_sign_key => {
+               maps:get(identity_sign_public, RawKeys),
+               maps:get(identity_sign_private, RawKeys)
+           },
+           identity_dh_key => {
                maps:get(identity_dh_public, RawKeys),
                maps:get(identity_dh_private, RawKeys)
            },
@@ -170,6 +177,35 @@ system_message(Message, Context) when is_binary(Message), is_map(Context) ->
     end,
     {ok, Context}.
 
+%% @doc Handle undeliverable messages
+message_undeliverable(ToUsername, MessageId, MessageText, Reason, Context) when
+    is_binary(ToUsername), is_binary(MessageId), is_binary(MessageText),
+    is_map(Context)
+->
+    % Log the undeliverable message
+    {ok, UpdatedContext1} = log_message(
+        warning,
+        {"Message ~s to ~s undeliverable: ~p", [MessageId, ToUsername, Reason]},
+        Context
+    ),
+    
+    % Optionally notify user via system message
+    SystemMsg = iolist_to_binary([
+        <<"Message to ">>, ToUsername,
+        <<" could not be delivered: ">>,
+        format_undeliverable_reason(Reason),
+        <<" (\"">>, MessageText, <<"\")">>
+    ]),
+    
+    case maps:get(console_pid, UpdatedContext1, undefined) of
+        undefined ->
+            io:format("\r\n[UNDELIVERABLE] ~s~n", [SystemMsg]);
+        ConsolePid when is_pid(ConsolePid) ->
+            ConsolePid ! {system_message, SystemMsg}
+    end,
+    
+    {ok, UpdatedContext1}.
+
 %% @doc Log message
 log_message(Level, {_FormatString, _Args} = Msg, Context) when
     is_atom(Level) andalso is_list(_FormatString) andalso
@@ -198,6 +234,18 @@ life_cycle(Event, Reason, Username, Context) when
 %%%===================================================================
 %%% Helper Functions
 %%%===================================================================
+
+%% @doc Format undeliverable message reason for user display
+format_undeliverable_reason(user_not_found) ->
+    <<"user not found">>;
+format_undeliverable_reason({x3dh_failed, _}) ->
+    <<"encryption failed">>;
+format_undeliverable_reason({ratchet_init_failed, _}) ->
+    <<"session initialization failed">>;
+format_undeliverable_reason({send_failed, _}) ->
+    <<"network error">>;
+format_undeliverable_reason(Reason) ->
+    iolist_to_binary(io_lib:format("~p", [Reason])).
 
 %% @doc Transform one-time prekeys from cryptic_lib format to engine format
 transform_one_time_prekeys(OTPKeys) ->

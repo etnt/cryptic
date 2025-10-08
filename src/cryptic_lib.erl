@@ -1922,6 +1922,10 @@ x3dh_sender_init_with_session_key(SenderKeys, RecipientBundle, Message) ->
         ?dbg("DEBUG: RecipientKeyId: ~p~n", [RecipientKeyId]),
 
         %% Verify signed prekey signature
+        ?dbg("DEBUG: About to verify signature", []),
+        ?dbg("DEBUG: RecipientSpkPub: ~p", [RecipientSpkPub]),
+        ?dbg("DEBUG: SpkSignature: ~p", [SpkSignature]),
+        ?dbg("DEBUG: RecipientIdPub (for verification): ~p", [RecipientIdPub]),
         case verify_signature(RecipientSpkPub, SpkSignature, RecipientIdPub) of
             false ->
                 {error, invalid_signed_prekey_signature};

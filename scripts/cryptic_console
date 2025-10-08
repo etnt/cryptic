@@ -27,6 +27,9 @@ main(Args) ->
             ServerPort = maps:get(server_port, Opts, 8443),
             Verbose = maps:get(verbose, Opts, false),
 
+            %% Start Erlang distribution using username as node name
+            start_distribution(Username, Verbose),
+
             %% Build configuration map
             Config = #{
                 username => list_to_binary(Username),
@@ -39,7 +42,8 @@ main(Args) ->
             case Verbose of
                 true ->
                     io:format("=== Cryptic Console ===~n"),
-                    io:format("Config: ~p~n", [Config]);
+                    io:format("Config: ~p~n", [Config]),
+                    io:format("Node: ~p~n", [node()]);
                 false ->
                     io:format("=== Cryptic Console ===~n")
             end,
@@ -128,3 +132,30 @@ setup_code_paths() ->
         end,
         EbinPaths
     ).
+
+%% @doc Start Erlang distribution using username as node name
+%% @param Username The username (will be used as node name)
+%% @param Verbose Whether to print debug info
+start_distribution(Username, Verbose) ->
+    %% Create node name as username@localhost
+    NodeName = list_to_atom(Username ++ "@localhost"),
+
+    %% Start distribution with short name
+    case net_kernel:start([NodeName, shortnames]) of
+        {ok, _Pid} ->
+            case Verbose of
+                true ->
+                    io:format("Distribution started: ~p~n", [node()]),
+                    io:format("Connect with: erl -sname debug -remsh ~p~n", [node()]);
+                false ->
+                    ok
+            end;
+        {error, {already_started, _Pid}} ->
+            case Verbose of
+                true -> io:format("Distribution already running: ~p~n", [node()]);
+                false -> ok
+            end;
+        {error, Reason} ->
+            io:format("Failed to start distribution: ~p~n", [Reason]),
+            io:format("Continuing without distribution...~n")
+    end.

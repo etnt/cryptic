@@ -628,17 +628,17 @@ initiate_key_bundle_request(ToUsername, State) ->
     end.
 
 create_session_from_key_bundle(ToUsername, KeyBundle, State) ->
-    % Perform X3DH calculation
+    %% Perform X3DH calculation
     case perform_x3dh_sender(KeyBundle, State) of
         {ok, SharedSecret, EphemeralKey} ->
-            % Create new ratchet engine session
+            %% Create new ratchet engine session
             {ok, RatchetEnginePid} = cryptic_ratchet_engine:start_link(
                 ratchet_callback_module, #{}, #{}),
-            
+
             ok = cryptic_ratchet_engine:init_as_sender(RatchetEnginePid, 
                                                      SharedSecret, EphemeralKey),
-            
-            % Update state with new session
+
+            %% Update state with new session
             NewSessions = maps:put(ToUsername, RatchetEnginePid, 
                                  State#cryptic_engine_state.sessions),
             SessionInfo = #session_info{
@@ -651,7 +651,7 @@ create_session_from_key_bundle(ToUsername, KeyBundle, State) ->
             },
             NewSessionStates = maps:put(ToUsername, SessionInfo,
                                       State#cryptic_engine_state.session_states),
-            
+
             NewState = State#cryptic_engine_state{
                 sessions = NewSessions,
                 session_states = NewSessionStates
