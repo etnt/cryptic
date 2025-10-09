@@ -356,8 +356,18 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             %% A future enhancement would be to modify cryptic_shell to support this
             %% For now, we just interrupt and restart
             exit(InputPid, kill),
-            %% Display the async message
-            display_async_message(Message),
+            %% Display the system message
+            display_system_message(Message),
+            %% Continue waiting - the DOWN message will trigger restart
+            wait_for_input_or_messages(InputPid, MonitorRef, State);
+        {deliver_message, FromUsername, Message, Timestamp} ->
+            %% A chat message arrived while waiting for input
+            %% Note: We can't retrieve the actual input buffer from the blocked process
+            %% A future enhancement would be to modify cryptic_shell to support this
+            %% For now, we just interrupt and restart
+            exit(InputPid, kill),
+            %% Display the user message
+            display_user_message(FromUsername, Message, Timestamp),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
@@ -445,6 +455,9 @@ send_message_to_user(ToUsername, Message, State) ->
             ?dbg("Sending message to ~s: ~s~n", [ToUsername, Message]),
             case cryptic_engine:send_message(EnginePid, ToUsername, Message) of
                 ok ->
+                    %% Display sent message confirmation with timestamp
+                    Timestamp = erlang:timestamp(),
+                    cryptic_shell:print_sent_message(ToUsername, Message, Timestamp),
                     ?dbg("Message sent successfully~n", []);
                 {error, Reason} ->
                     ?error("Failed to send message: ~p~n", [Reason])
@@ -477,7 +490,12 @@ check_messages() ->
     receive
         {system_message, Message} ->
             %% Clear line and print system message
-            display_async_message(Message),
+            display_system_message(Message),
+            %% Recursively check for more messages
+            check_messages();
+        {deliver_message, FromUsername, Message, Timestamp} ->
+            %% Clear line and print delivered message
+            display_user_message(FromUsername, Message, Timestamp),
             %% Recursively check for more messages
             check_messages()
     after 0 ->
@@ -485,8 +503,17 @@ check_messages() ->
         ok
     end.
 
+display_user_message(FromUsername, Message, Timestamp) ->
+    %% Print the user message (cryptic_shell handles line clearing)
+    cryptic_shell:print_user_message(FromUsername, Message, Timestamp),
+    %% Force flush output streams
+    io:format("~s", [""]),
+    %% Longer delay to ensure terminal has processed all ANSI sequences
+    timer:sleep(100).
+
+
 %% @doc Display an async message without disrupting the prompt
-display_async_message(Message) ->
+display_system_message(Message) ->
     %% Clear current line and print system message
     io:format("\r\n"),
     cryptic_shell:print_info(binary_to_list(Message)),

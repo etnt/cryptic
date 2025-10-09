@@ -156,12 +156,11 @@ send_message_to_server(FromUsername, Message, Context) when
 %%%===================================================================
 
 %% @doc Deliver message to UI
-deliver_message(FromUsername, Message, Timestamp, Context) when
-    is_binary(FromUsername), is_binary(Message), is_map(Context)
-->
-    io:format("[MESSAGE] From ~s at ~p: ~s~n", [
-        FromUsername, Timestamp, Message
-    ]),
+deliver_message(FromUsername, Message, Timestamp, Context)
+  when is_list(FromUsername) andalso is_binary(Message) andalso
+       is_map(Context) ->
+    ConsolePid = maps:get(console_pid, Context),
+    ConsolePid ! {deliver_message, FromUsername, Message, Timestamp},
     {ok, Context}.
 
 system_message(Message, Context) when is_binary(Message), is_map(Context) ->
@@ -250,10 +249,11 @@ format_undeliverable_reason(Reason) ->
 %% @doc Transform one-time prekeys from cryptic_lib format to engine format
 transform_one_time_prekeys(OTPKeys) ->
     lists:map(
-        fun(#{id := Id, public := Public, private := _Private}) ->
+        fun(#{id := Id, public := Public, private := Private}) ->
             #{
                 id => Id,
-                public => Public
+                public => Public,
+                private => Private
             }
         end,
         OTPKeys

@@ -86,7 +86,9 @@
     get_line/1,
     get_password/1,
     cleanup/0,
-    % Enhanced output functions with ANSI formatting
+    %% Enhanced output functions with ANSI formatting
+    print_user_message/3,
+    print_sent_message/3,
     print_success/1,
     print_error/1,
     print_warning/1,
@@ -785,6 +787,40 @@ handle_password_backspace([_Last | Rest]) ->
 %%%===================================================================
 %%% Enhanced Output Functions with ANSI Formatting
 %%%===================================================================
+
+print_user_message(FromUser, Message, Timestamp)
+  when is_list(FromUser) andalso is_binary(Message) ->
+    %% Clear the current line first (in case we're interrupting a prompt)
+    io:format("\r~s", [?CLEAR_LINE]),
+    %% Should print like:
+    %% <bob> Hello there (12:34:56)
+    %% where each part is colored differently.
+    {{_Year, _Month, _Day}, {Hour, Minute, Second}} = calendar:now_to_universal_time(Timestamp),
+    TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
+    io:format("~s: ~s (~s)\r\n", [
+        ?FG_CYAN("<" ++ FromUser ++ ">"),
+        ?FG_WHITE(binary_to_list(Message)),
+        ?FG_YELLOW(TimeStr)
+    ]).
+
+%% @doc Print a sent message to show confirmation
+%% Formats as: <You => bob> Message text (HH:MM:SS)
+-spec print_sent_message(ToUser :: string() | binary(), Message :: binary(), Timestamp :: erlang:timestamp()) -> ok.
+print_sent_message(ToUser, Message, Timestamp) when is_binary(ToUser) ->
+    print_sent_message(binary_to_list(ToUser), Message, Timestamp);
+print_sent_message(ToUser, Message, Timestamp)
+  when is_list(ToUser) andalso is_binary(Message) ->
+    %% Move up one line and clear it to remove the command input
+    io:format("~s\r~s", [?CURSOR_UP(1), ?CLEAR_LINE]),
+    %% Should print like:
+    %% <You => bob> Message text (12:34:56)
+    {{_Year, _Month, _Day}, {Hour, Minute, Second}} = calendar:now_to_universal_time(Timestamp),
+    TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
+    io:format("~s ~s (~s)\r\n", [
+        ?FG_GREEN("<You => " ++ ToUser ++ ">"),
+        ?FG_WHITE(binary_to_list(Message)),
+        ?FG_YELLOW(TimeStr)
+    ]).
 
 %% @doc Print success message with green formatting
 -spec print_success(string()) -> ok.
