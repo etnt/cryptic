@@ -32,6 +32,11 @@
 %%% === Lifecycle Operations ===
 %%% - `life_cycle/4' - Handle lifecycle events
 %%%
+%%% @author Cryptic Team
+%%% @version 0.2.0
+%%% @since 0.1.0
+%%% @end
+
 -module(cryptic_engine).
 
 -behaviour(gen_server).
@@ -41,7 +46,7 @@
 %%% Callback Definitions
 %%%===================================================================
 
-%% @doc Load identity keys for a user
+%% Load identity keys for a user
 %%
 %% This callback should load or create the user's long-term identity keys,
 %% signed prekey, and one-time prekeys. If keys don't exist, they should be
@@ -55,7 +60,7 @@
 %%   - `signed_prekey' => `{KeyId, PublicKey, PrivateKey}'
 %%   - `signed_prekey_signature' => `Signature'
 %%   - `one_time_prekeys' => `#{KeyId => {PublicKey, PrivateKey}}'
-%% @returns `{error, Reason, Context}' on failure
+%% `{error, Reason, Context}' on failure
 -callback load_identity_keys(
     Username :: binary(),
     Context :: map()
@@ -63,7 +68,7 @@
     {ok, IdentityKeys :: map(), UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Save identity keys for a user
+%% Save identity keys for a user
 -callback save_identity_keys(
     Username :: binary(),
     IdentityKeys :: map(),
@@ -72,7 +77,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Load session state for a peer
+%% Load session state for a peer
 -callback load_session_state(
     Username :: binary(),
     PeerUsername :: binary(),
@@ -81,7 +86,7 @@
     {ok, SessionState :: map(), UpdatedContext :: map()} |
     {error, not_found | term(), Context :: map()}.
 
-%% @doc Save session state for a peer
+%% Save session state for a peer
 -callback save_session_state(
     Username :: binary(),
     PeerUsername :: binary(),
@@ -91,7 +96,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Send a message directly to a peer
+%% Send a message directly to a peer
 -callback send_message_to_peer(
     FromUsername :: binary(),
     ToUsername :: binary(),
@@ -101,7 +106,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Send a message to the server
+%% Send a message to the server
 %%
 %% This is the primary network operation for sending messages through the
 %% server infrastructure (e.g., via WebSocket).
@@ -113,7 +118,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Deliver a decrypted message to the user
+%% Deliver a decrypted message to the user
 %%
 %% Called when a message has been successfully decrypted and is ready
 %% to be displayed to the user.
@@ -126,7 +131,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Display a system message to the user
+%% Display a system message to the user
 %%
 %% System messages include status updates, error notifications, and
 %% informational messages from the engine.
@@ -137,7 +142,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Notify about an undeliverable message
+%% Notify about an undeliverable message
 %%
 %% Called when a queued message cannot be delivered (e.g., recipient not found).
 %% This allows the application to log or notify the user about the failure.
@@ -151,7 +156,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Log a message at the specified level
+%% Log a message at the specified level
 %%
 %% Levels: debug, info, warning, error
 -callback log_message(
@@ -162,7 +167,7 @@
     {ok, UpdatedContext :: map()} |
     {error, Reason :: term(), Context :: map()}.
 
-%% @doc Handle lifecycle events
+%% Handle lifecycle events
 -callback life_cycle(
     Event :: atom(),
     Reason :: term(),

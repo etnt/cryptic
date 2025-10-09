@@ -26,8 +26,8 @@ jobs:
       - name: Install Erlang/OTP
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "27"
-          rebar3-version: "3.23"
+          otp-version: "28"
+          rebar3-version: "3.24"
 
       - name: Install dependencies
         run: |
@@ -52,7 +52,7 @@ jobs:
         run: rebar3 compile
 
       - name: Generate documentation
-        run: rebar3 edoc
+        run: rebar3 ex_doc
 
       - name: Setup Pages
         id: pages

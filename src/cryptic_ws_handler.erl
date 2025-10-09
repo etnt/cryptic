@@ -250,25 +250,18 @@ websocket_handle(_Data, State) ->
 %% @param State The current WebSocket state
 %% @returns {Replies, State} with optional response frames to send to client
 websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
-    %% Handle incoming messages - check if it's a Double Ratchet message
-    case maps:get(message_type, Message, <<"text">>) of
-        <<"ratchet">> ->
-            %% Process Double Ratchet message
-            handle_incoming_ratchet_message(FromUser, Message, Username, State);
-        _ ->
-            %% Regular message or X3DH message - forward as-is
-            Response = #{
-                type => <<"message">>,
-                from => FromUser,
-                to => Username,
-                message => Message
-            },
-            ResponseJson = jsx:encode(Response),
-            ?msg_out("Forwarding message from ~s to ~s: ~s", [
-                FromUser, Username, ResponseJson
-            ]),
-            {[{text, ResponseJson}], State}
-    end;
+    %% Regular message or X3DH message - forward as-is
+    Response = #{
+        type => <<"message">>,
+        from => FromUser,
+        to => Username,
+        message => Message
+    },
+    ResponseJson = jsx:encode(Response),
+    ?msg_out("Forwarding message from ~s to ~s: ~s", [
+        FromUser, Username, ResponseJson
+    ]),
+    {[{text, ResponseJson}], State};
 websocket_info({send_message, RoomMessage}, State) ->
     %% Handle room message forwarding from broadcast_to_room_members
     ?dbg("DEBUG WS: Received send_message: ~p", [RoomMessage]),
@@ -777,106 +770,6 @@ extract_cn_from_sequence([RDN | Rest]) ->
         error -> extract_cn_from_sequence(Rest)
     end.
 
-%%% Double Ratchet Message Processing %%%
-
-%% @doc Handle incoming Double Ratchet message
-%%
-%% Processes an encrypted Double Ratchet message by:
-%% 1. Loading the ratchet state for this conversation
-%% 2. Decrypting the message using the ratchet protocol
-%% 3. Updating and storing the new ratchet state
-%% 4. Forwarding the decrypted message to the recipient
-%%
-%% @param FromUser Sender username
-%% @param Message Double Ratchet message blob
-%% @param ToUser Recipient username
-%% @param State WebSocket state
-%% @returns {Replies, State} with response frames
-handle_incoming_ratchet_message(FromUser, Message, ToUser, State) ->
-    ConversationId = create_conversation_id(FromUser, ToUser),
-
-    try
-        %% Load ratchet state for this conversation
-        case get_ratchet_state(ConversationId) of
-            {ok, RatchetState} ->
-                %% Extract Double Ratchet message components
-                DhPublic = base64:decode(maps:get(dh_public, Message)),
-                DhStep = maps:get(dh_step, Message),
-                PrevChainLength = maps:get(prev_chain_length, Message),
-                MsgNumber = maps:get(msg_number, Message),
-                Ciphertext = base64:decode(maps:get(ciphertext, Message)),
-                Nonce = base64:decode(maps:get(nonce, Message)),
-
-                %% Create ratchet message structure
-                RatchetMessage = #{
-                    dh_public => DhPublic,
-                    dh_step => DhStep,
-                    prev_chain_length => PrevChainLength,
-                    msg_number => MsgNumber,
-                    ciphertext => Ciphertext,
-                    nonce => Nonce
-                },
-
-                %% Decrypt message using Double Ratchet
-                case
-                    cryptic_double_ratchet:decrypt_message(
-                        RatchetMessage, RatchetState
-                    )
-                of
-                    {ok, Plaintext, NewRatchetState} ->
-                        %% Update stored ratchet state
-                        update_ratchet_state(ConversationId, NewRatchetState),
-
-                        %% Forward decrypted message to recipient
-                        Response = #{
-                            type => <<"message_decrypted">>,
-                            from => list_to_binary(FromUser),
-                            to => list_to_binary(ToUser),
-                            message_id => maps:get(
-                                message_id, Message, <<"unknown">>
-                            ),
-                            plaintext => Plaintext,
-                            timestamp => maps:get(server_timestamp, Message)
-                        },
-                        ResponseJson = jsx:encode(Response),
-                        ?msg_out("Decrypted ratchet message from ~s: ~p", [
-                            FromUser, Plaintext
-                        ]),
-                        {[{text, ResponseJson}], State};
-                    {error, decrypt_error} ->
-                        %% Decryption failed - send error response
-                        ErrorResponse = #{
-                            type => <<"message_error">>,
-                            from => list_to_binary(FromUser),
-                            error => <<"decryption_failed">>,
-                            message_id => maps:get(
-                                message_id, Message, <<"unknown">>
-                            )
-                        },
-                        {[{text, jsx:encode(ErrorResponse)}], State}
-                end;
-            {error, not_found} ->
-                %% No ratchet state - this shouldn't happen for established conversations
-                ErrorResponse = #{
-                    type => <<"message_error">>,
-                    from => list_to_binary(FromUser),
-                    error => <<"no_ratchet_state">>,
-                    message_id => maps:get(message_id, Message, <<"unknown">>)
-                },
-                {[{text, jsx:encode(ErrorResponse)}], State}
-        end
-    catch
-        error:Reason ->
-            %% Handle any processing errors
-            ProcessingErrorResponse = #{
-                type => <<"message_error">>,
-                from => list_to_binary(FromUser),
-                error => <<"processing_failed">>,
-                reason => atom_to_binary(Reason, utf8),
-                message_id => maps:get(message_id, Message, <<"unknown">>)
-            },
-            {[{text, jsx:encode(ProcessingErrorResponse)}], State}
-    end.
 
 %% @doc Create a unique conversation identifier for two users
 %%

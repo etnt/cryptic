@@ -8,7 +8,7 @@ A professional implementation of an end-to-end encrypted chat system built in Er
 
 For local documentation generation:
 ```bash
-rebar3 edoc
+rebar3 ex_doc
 # Open doc/index.html in your browser
 ```
 
