@@ -138,9 +138,12 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                         MessageType = maps:get(
                             <<"type">>, ValidatedMessage, <<"unknown">>
                         ),
-                        ?dbg("Processing validated message from: ~s , type: ~s", [
-                            Username, MessageType
-                        ]),
+                        ?dbg(
+                            "Processing validated message from: ~s , type: ~s",
+                            [
+                                Username, MessageType
+                            ]
+                        ),
 
                         %% 3. Process valid message with command handler
                         case
@@ -566,7 +569,8 @@ handle_command(
 %% Handle X3DH protocol messages (SESSION-MESSAGE-FLOW.md implementation)
 handle_command(
     #{
-        <<"type">> := <<"send_message_x3dh">>,
+        <<"type">> := <<"x3dh">>,
+        <<"from">> := FromUserB,
         <<"to">> := ToUserB,
         <<"message_id">> := MessageIdB64,
         <<"ephemeral_public">> := EphemeralPubB64,
@@ -579,88 +583,95 @@ handle_command(
     Username,
     _State
 ) ->
-    ToUser = binary_to_list(ToUserB),
+    %% Validate that the 'from' field matches the authenticated user
+    case binary_to_list(FromUserB) of
+        Username ->
+            ToUser = binary_to_list(ToUserB),
 
-    %% Create X3DH message blob with complete metadata
-    MessageBlob = #{
-        from => Username,
-        to => ToUser,
-        message_type => <<"x3dh">>,
-        message_id => MessageIdB64,
-        ephemeral_public => EphemeralPubB64,
-        otpk_id => OtpkIdB64,
-        ciphertext => CiphertextB64,
-        nonce => NonceB64,
-        signature => SignatureB64,
-        metadata => MetadataB64,
-        server_timestamp => erlang:system_time(second)
-    },
+            %% Create X3DH message blob with complete metadata
+            MessageBlob = #{
+                from => Username,
+                to => ToUser,
+                message_type => <<"x3dh">>,
+                message_id => MessageIdB64,
+                ephemeral_public => EphemeralPubB64,
+                otpk_id => OtpkIdB64,
+                ciphertext => CiphertextB64,
+                nonce => NonceB64,
+                signature => SignatureB64,
+                metadata => MetadataB64,
+                server_timestamp => erlang:system_time(second)
+            },
 
-    %% Try to deliver immediately if user is online
-    case find_user_connection(ToUser) of
-        {ok, Pid} ->
-            %% User is online - deliver immediately without storing
-            Pid ! {message, Username, MessageBlob};
-        not_found ->
-            %% User is offline - store message for later retrieval
-            cryptic_lib:store_message(ToUser, MessageBlob)
-    end,
+            %% Try to deliver immediately if user is online
+            case find_user_connection(ToUser) of
+                {ok, Pid} ->
+                    %% User is online - deliver immediately without storing
+                    Pid ! {message, Username, MessageBlob};
+                not_found ->
+                    %% User is offline - store message for later retrieval
+                    cryptic_lib:store_message(ToUser, MessageBlob)
+            end,
 
-    {reply, #{
-        type => <<"message_sent">>,
-        success => true,
-        message => <<"X3DH message sent">>
-    }};
+            {reply, #{
+                type => <<"message_sent">>,
+                success => true,
+                message => <<"X3DH message sent">>
+            }};
+        _OtherUser ->
+            %% The 'from' field doesn't match the authenticated user
+            {reply, #{
+                type => <<"error">>,
+                success => false,
+                message =>
+                    <<"Authentication error: 'from' field doesn't match authenticated user">>
+            }}
+    end;
 %% Handle Double Ratchet protocol messages (efficient ongoing messaging after X3DH)
 handle_command(
     #{
-        <<"type">> := <<"send_message_ratchet">>,
-        <<"to">> := ToUserB,
-        <<"message_id">> := MessageIdB64,
-        <<"dh_public">> := DhPublicB64,
-        <<"dh_step">> := DhStep,
-        <<"prev_chain_length">> := PrevChainLength,
-        <<"msg_number">> := MsgNumber,
-        <<"ciphertext">> := CiphertextB64,
-        <<"nonce">> := NonceB64
-    },
+        <<"type">> := <<"ratchet">>,
+        <<"from">> := FromUserB,
+        <<"to">> := ToUserB
+    } = RatchetMessage,
     Username,
     _State
 ) ->
-    ToUser = binary_to_list(ToUserB),
+    %% Validate that the 'from' field matches the authenticated user
+    case binary_to_list(FromUserB) of
+        Username ->
+            ToUser = binary_to_list(ToUserB),
 
-    %% Create Double Ratchet message blob
-    MessageBlob = #{
-        from => Username,
-        to => ToUser,
-        message_type => <<"ratchet">>,
-        message_id => MessageIdB64,
-        dh_public => DhPublicB64,
-        dh_step => DhStep,
-        prev_chain_length => PrevChainLength,
-        msg_number => MsgNumber,
-        ciphertext => CiphertextB64,
-        nonce => NonceB64,
-        server_timestamp => erlang:system_time(second)
-    },
+            %% Add server metadata to the message
+            MessageBlob = RatchetMessage#{
+                <<"message_type">> => <<"ratchet">>,
+                <<"server_timestamp">> => erlang:system_time(second)
+            },
 
-    %% Try to deliver immediately if user is online
-    case find_user_connection(ToUser) of
-        {ok, Pid} ->
-            %% User is online - deliver immediately without storing
-            Pid ! {message, Username, MessageBlob};
-        not_found ->
-            %% User is offline - store message for later retrieval
-            cryptic_lib:store_message(ToUser, MessageBlob)
-    end,
+            %% Try to deliver immediately if user is online
+            case find_user_connection(ToUser) of
+                {ok, Pid} ->
+                    %% User is online - deliver immediately without storing
+                    Pid ! {message, Username, MessageBlob};
+                not_found ->
+                    %% User is offline - store message for later retrieval
+                    cryptic_lib:store_message(ToUser, MessageBlob)
+            end,
 
-    {reply, #{
-        type => <<"message_sent">>,
-        success => true,
-        message => <<"Double Ratchet message sent">>
-    }};
-
-
+            {reply, #{
+                type => <<"message_sent">>,
+                success => true,
+                message => <<"Double Ratchet message sent">>
+            }};
+        _OtherUser ->
+            %% The 'from' field doesn't match the authenticated user
+            {reply, #{
+                type => <<"error">>,
+                success => false,
+                message =>
+                    <<"Authentication error: 'from' field doesn't match authenticated user">>
+            }}
+    end;
 handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
     Messages = cryptic_lib:get_messages(Username),
     Response = #{
@@ -699,7 +710,6 @@ handle_command(#{<<"type">> := <<"key_status">>}, Username, _State) ->
 handle_command(Command, Username, _State) ->
     ?dbg("Unknown command from ~s: ~p", [Username, Command]),
     {error, "Unknown command"}.
-
 
 %% @doc Extract client identity from SSL/TLS certificate
 %%
@@ -769,7 +779,6 @@ extract_cn_from_sequence([RDN | Rest]) ->
         {ok, CN} -> {ok, CN};
         error -> extract_cn_from_sequence(Rest)
     end.
-
 
 %% @doc Create a unique conversation identifier for two users
 %%

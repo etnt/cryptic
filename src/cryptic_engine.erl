@@ -65,8 +65,8 @@
     Username :: binary(),
     Context :: map()
 ) ->
-    {ok, IdentityKeys :: map(), UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, IdentityKeys :: map(), UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Save identity keys for a user
 -callback save_identity_keys(
@@ -74,8 +74,8 @@
     IdentityKeys :: map(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Load session state for a peer
 -callback load_session_state(
@@ -83,8 +83,8 @@
     PeerUsername :: binary(),
     Context :: map()
 ) ->
-    {ok, SessionState :: map(), UpdatedContext :: map()} |
-    {error, not_found | term(), Context :: map()}.
+    {ok, SessionState :: map(), UpdatedContext :: map()}
+    | {error, not_found | term(), Context :: map()}.
 
 %% Save session state for a peer
 -callback save_session_state(
@@ -93,8 +93,8 @@
     SessionState :: map(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Send a message directly to a peer
 -callback send_message_to_peer(
@@ -103,8 +103,8 @@
     Message :: term(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Send a message to the server
 %%
@@ -115,8 +115,8 @@
     Message :: map(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Deliver a decrypted message to the user
 %%
@@ -128,8 +128,8 @@
     Timestamp :: erlang:timestamp(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Display a system message to the user
 %%
@@ -139,8 +139,8 @@
     Message :: binary(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Notify about an undeliverable message
 %%
@@ -153,8 +153,8 @@
     Reason :: term(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Log a message at the specified level
 %%
@@ -164,8 +164,8 @@
     Message :: {FormatString :: string(), Args :: list()},
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %% Handle lifecycle events
 -callback life_cycle(
@@ -174,8 +174,8 @@
     Username :: binary(),
     Context :: map()
 ) ->
-    {ok, UpdatedContext :: map()} |
-    {error, Reason :: term(), Context :: map()}.
+    {ok, UpdatedContext :: map()}
+    | {error, Reason :: term(), Context :: map()}.
 
 %%%===================================================================
 %%% API
@@ -520,7 +520,9 @@ handle_info(
     ?dbg("Received message from ~s: ~p", [FromUsername, MessagePayload]),
 
     % Process the incoming encrypted message
-    case handle_incoming_encrypted_message(FromUsername, MessagePayload, State) of
+    case
+        handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
+    of
         {ok, UpdatedState} ->
             {noreply, UpdatedState};
         {error, Reason, UpdatedState} ->
@@ -580,8 +582,12 @@ handle_key_bundle_response(Message, State) ->
             %% Extract key bundle and create session
             case extract_key_bundle_from_message(Message) of
                 {ok, KeyBundle} ->
-                    ?dbg("DEBUG: Successfully extracted KeyBundle: ~p~n", [KeyBundle]),
-                    handle_session_creation(Username, KeyBundle, PendingRequests, State);
+                    ?dbg("DEBUG: Successfully extracted KeyBundle: ~p~n", [
+                        KeyBundle
+                    ]),
+                    handle_session_creation(
+                        Username, KeyBundle, PendingRequests, State
+                    );
                 {error, ParseError} ->
                     log_error(
                         "Key bundle parse failed for user ~p: ~p",
@@ -609,20 +615,20 @@ handle_session_creation(Username, KeyBundle, PendingRequests, State) ->
             message_count = 0,
             x3dh_completed = false
         },
-        
+
         NewSessionStates = maps:put(
             Username,
             SessionInfo,
             State#cryptic_engine_state.session_states
         ),
-        
+
         % Store key bundle for later use when sending first message
         NewKeyBundles = maps:put(
             Username,
             KeyBundle,
             State#cryptic_engine_state.key_bundles
         ),
-        
+
         % Clear the pending request for this user
         NewPendingRequests = maps:remove(Username, PendingRequests),
 
@@ -912,32 +918,44 @@ process_pending_messages(ToUsername, State) ->
             {noreply, State};
         [FirstMessage | RestMessages] ->
             % Process the first message with X3DH
-            case send_first_message_with_x3dh(ToUsername, FirstMessage, State) of
+            case
+                send_first_message_with_x3dh(ToUsername, FirstMessage, State)
+            of
                 {ok, UpdatedState} ->
                     % Reply to the caller
                     gen_server:reply(
                         FirstMessage#pending_message.from, ok
                     ),
-                    
+
                     % Now we have an active ratchet session, process remaining messages
                     FinalState = lists:foldl(
-                        fun(#pending_message{from = From, plaintext = Msg}, AccState) ->
+                        fun(
+                            #pending_message{from = From, plaintext = Msg},
+                            AccState
+                        ) ->
                             Sessions = AccState#cryptic_engine_state.sessions,
                             case maps:get(ToUsername, Sessions, undefined) of
                                 undefined ->
-                                    gen_server:reply(From, {error, session_lost}),
+                                    gen_server:reply(
+                                        From, {error, session_lost}
+                                    ),
                                     AccState;
                                 RatchetEnginePid ->
                                     case
                                         send_encrypted_message_to_peer(
-                                            ToUsername, Msg, RatchetEnginePid, AccState
+                                            ToUsername,
+                                            Msg,
+                                            RatchetEnginePid,
+                                            AccState
                                         )
                                     of
                                         {reply, ok, NewState} ->
                                             gen_server:reply(From, ok),
                                             NewState;
                                         {reply, {error, Reason}, NewState} ->
-                                            gen_server:reply(From, {error, Reason}),
+                                            gen_server:reply(
+                                                From, {error, Reason}
+                                            ),
                                             NewState
                                     end
                             end
@@ -947,7 +965,9 @@ process_pending_messages(ToUsername, State) ->
                     ),
 
                     % Remove processed messages
-                    UpdatedPendingMessages = maps:remove(ToUsername, PendingMessages),
+                    UpdatedPendingMessages = maps:remove(
+                        ToUsername, PendingMessages
+                    ),
                     FinalestState = FinalState#cryptic_engine_state{
                         pending_messages = UpdatedPendingMessages
                     },
@@ -982,19 +1002,31 @@ send_encrypted_message_to_peer(ToUsername, Message, RatchetEnginePid, State) ->
     % Use the ratchet engine to encrypt the message
     case cryptic_ratchet_engine:encrypt_message(RatchetEnginePid, Message) of
         {ok, EncryptedData} ->
-            % Create encrypted message structure
+            % Generate message ID
+            MessageId = cryptic_lib:rand_bytes(16),
+
+            % EncryptedData contains: #{dh_public, dh_step, prev_chain_length,
+            %                           msg_number, ciphertext, nonce}
+            % These fields need to be base64-encoded for transmission
             MessageData = #{
+                from => Username,
                 to => ToUsername,
-                message => #{
-                    type => <<"ratchet_encrypted">>,
-                    encrypted_data => EncryptedData,
-                    timestamp => erlang:system_time(millisecond)
-                }
+                message_id => base64:encode(MessageId),
+                dh_public => base64:encode(maps:get(dh_public, EncryptedData)),
+                dh_step => maps:get(dh_step, EncryptedData),
+                prev_chain_length => maps:get(prev_chain_length, EncryptedData),
+                msg_number => maps:get(msg_number, EncryptedData),
+                ciphertext => base64:encode(
+                    maps:get(ciphertext, EncryptedData)
+                ),
+                nonce => base64:encode(maps:get(nonce, EncryptedData))
             },
 
-            % Use send_encrypted message type
-            {ok, WSMessage} = cryptic_messages:send_encrypted(MessageData),
-
+            % Use send_message_ratchet to create proper message structure
+            {ok, WSMessage} = cryptic_messages:send_message_ratchet(
+                MessageData
+            ),
+            ?dbg("Sending ratchet-encrypted message: ~p~n", [WSMessage]),
             case
                 CallbackModule:send_message_to_server(
                     Username, WSMessage, Context
@@ -1006,9 +1038,13 @@ send_encrypted_message_to_peer(ToUsername, Message, RatchetEnginePid, State) ->
                         message_count =
                             State#cryptic_engine_state.message_count + 1
                     },
-                    log_info("Ratchet-encrypted message sent to ~s", [
-                        ToUsername
-                    ], FinalState),
+                    log_info(
+                        "Ratchet-encrypted message sent to ~s",
+                        [
+                            ToUsername
+                        ],
+                        FinalState
+                    ),
                     {reply, ok, FinalState};
                 {error, Reason, UpdatedContext} ->
                     FinalState = State#cryptic_engine_state{
@@ -1066,13 +1102,23 @@ send_first_message_with_x3dh(ToUsername, PendingMessage, State) ->
             case perform_x3dh_with_message(KeyBundle, Message, State) of
                 {ok, MessageBlob, MessageId, SessionKey} ->
                     % Send the X3DH-encrypted message to server
-                    case send_x3dh_message_to_server(ToUsername, MessageBlob, MessageId, State) of
+                    case
+                        send_x3dh_message_to_server(
+                            ToUsername, MessageBlob, MessageId, State
+                        )
+                    of
                         {ok, UpdatedState} ->
                             % Now initialize the ratchet with the session key
-                            case initialize_ratchet_session(ToUsername, SessionKey, UpdatedState) of
+                            case
+                                initialize_ratchet_session(
+                                    ToUsername, SessionKey, UpdatedState
+                                )
+                            of
                                 {ok, FinalState} ->
                                     % Remove key bundle (no longer needed)
-                                    NewKeyBundles = maps:remove(ToUsername, KeyBundles),
+                                    NewKeyBundles = maps:remove(
+                                        ToUsername, KeyBundles
+                                    ),
                                     {ok, FinalState#cryptic_engine_state{
                                         key_bundles = NewKeyBundles
                                     }};
@@ -1166,23 +1212,26 @@ send_x3dh_message_to_server(ToUsername, MessageBlob, MessageId, State) ->
     } = Metadata,
 
     %% Construct X3DH message for server (without 'type', send_message_x3dh adds it)
+    OtpkIdEncoded =
+        case OtpkId of
+            undefined -> null;
+            _ -> base64:encode(OtpkId)
+        end,
+
     X3DHMessageData = #{
+        from => Username,
         to => ToUsername,
         message_id => base64:encode(MessageId),
         ephemeral_public => base64:encode(EphemeralPub),
-        otpk_id =>
-            case OtpkId of
-                undefined -> null;
-                _ -> base64:encode(OtpkId)
-            end,
+        otpk_id => OtpkIdEncoded,
         ciphertext => base64:encode(Ciphertext),
         nonce => base64:encode(Nonce),
         signature => base64:encode(MessageSignature),
         metadata => base64:encode(erlang:term_to_binary(Metadata))
     },
-
+    ?dbg("Sending X3DH message data: ~p~n", [X3DHMessageData]),
     {ok, WSMessage} = cryptic_messages:send_message_x3dh(X3DHMessageData),
-
+    ?dbg("WebSocket X3DH message: ~p~n", [WSMessage]),
     case
         CallbackModule:send_message_to_server(
             Username, WSMessage, Context
@@ -1249,7 +1298,7 @@ initialize_ratchet_session(ToUsername, SessionKey, State) ->
             RatchetEnginePid,
             State#cryptic_engine_state.sessions
         ),
-        
+
         %% Update session info to mark X3DH as completed and session as active
         SessionStates = State#cryptic_engine_state.session_states,
         SessionInfo = maps:get(ToUsername, SessionStates),
@@ -1257,7 +1306,8 @@ initialize_ratchet_session(ToUsername, SessionKey, State) ->
             state = active,
             x3dh_completed = true,
             last_activity = erlang:timestamp(),
-            message_count = 1  % First message was the X3DH one
+            % First message was the X3DH one
+            message_count = 1
         },
         NewSessionStates = maps:put(
             ToUsername,
@@ -1269,7 +1319,7 @@ initialize_ratchet_session(ToUsername, SessionKey, State) ->
             sessions = NewSessions,
             session_states = NewSessionStates
         },
-        
+
         {ok, FinalState}
     catch
         ErrorClass:ErrorReason:Stacktrace ->
@@ -1373,22 +1423,25 @@ cleanup_pending_messages_for_user(Username, State) ->
             % (they were already queued successfully, so we already replied OK to the callers)
             CallbackModule = State#cryptic_engine_state.callback_module,
             Context = State#cryptic_engine_state.callback_context,
-            
+
             MessageCount = length(Messages),
             log_info(
                 "Cleaning up ~p pending message(s) for non-existent user ~s",
                 [MessageCount, Username],
                 State
             ),
-            
+
             % Optionally notify via callback about undeliverable messages
             lists:foreach(
                 fun(#pending_message{message_id = MsgId, plaintext = Msg}) ->
-                    case CallbackModule:message_undeliverable(
-                        Username, MsgId, Msg, user_not_found, Context
-                    ) of
+                    case
+                        CallbackModule:message_undeliverable(
+                            Username, MsgId, Msg, user_not_found, Context
+                        )
+                    of
                         {ok, _} -> ok;
-                        {error, _} -> ok  % Ignore callback errors
+                        % Ignore callback errors
+                        {error, _} -> ok
                     end
                 end,
                 Messages
@@ -1405,13 +1458,16 @@ cleanup_pending_messages_for_user(Username, State) ->
 
 %% @private
 %% @doc Handle incoming encrypted message (called from async websocket handler)
-handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
-  when is_list(FromUsername)->
+handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
+    is_list(FromUsername)
+->
     % Check message type to determine how to decrypt
     case maps:get(<<"message_type">>, MessagePayload, undefined) of
         <<"x3dh">> ->
             % X3DH message - may be initializing a new session
-            case handle_x3dh_message_async(FromUsername, MessagePayload, State) of
+            case
+                handle_x3dh_message_async(FromUsername, MessagePayload, State)
+            of
                 {ok, UpdatedState} ->
                     {ok, UpdatedState};
                 {error, Reason} ->
@@ -1419,7 +1475,11 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
             end;
         <<"ratchet">> ->
             % Double Ratchet message - existing session
-            case handle_ratchet_message_async(FromUsername, MessagePayload, State) of
+            case
+                handle_ratchet_message_async(
+                    FromUsername, MessagePayload, State
+                )
+            of
                 {ok, UpdatedState} ->
                     {ok, UpdatedState};
                 {error, Reason} ->
@@ -1443,16 +1503,19 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
 
 %% @private
 %% @doc Handle Double Ratchet message - decrypt using existing session
-handle_x3dh_message_async(FromUsername, MessagePayload, State)
-  when is_list(FromUsername) ->
+handle_x3dh_message_async(FromUsername, MessagePayload, State) when
+    is_list(FromUsername)
+->
     % Check if we already have a session with this user
     Sessions = State#cryptic_engine_state.sessions,
     case maps:get(FromUsername, Sessions, undefined) of
         undefined ->
             % No existing session - initialize from X3DH message
-            case initialize_receiver_session_from_x3dh(
-                FromUsername, MessagePayload, State
-            ) of
+            case
+                initialize_receiver_session_from_x3dh(
+                    FromUsername, MessagePayload, State
+                )
+            of
                 {ok, Plaintext, UpdatedState} ->
                     % Deliver decrypted message to UI
                     deliver_message_to_ui_async(
@@ -1516,20 +1579,26 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
         Ciphertext = base64:decode(maps:get(<<"ciphertext">>, MessagePayload)),
         Nonce = base64:decode(maps:get(<<"nonce">>, MessagePayload)),
         Signature = base64:decode(maps:get(<<"signature">>, MessagePayload)),
-        EncodedMetadata = base64:decode(maps:get(<<"metadata">>, MessagePayload)),
+        EncodedMetadata = base64:decode(
+            maps:get(<<"metadata">>, MessagePayload)
+        ),
 
         % Decode metadata to extract sender identity and other info
         Metadata = erlang:binary_to_term(EncodedMetadata),
         SenderIdPub = maps:get(sender_identity_sign_public, Metadata),
 
         % Extract receiver keys from state
-        {_IdentityDhPub, IdentityDhPriv} = State#cryptic_engine_state.identity_dh_key,
-        {_SignedPrekeyId, _SignedPrekeyPub, SignedPrekeyPriv} = State#cryptic_engine_state.signed_prekey,
+        {_IdentityDhPub, IdentityDhPriv} =
+            State#cryptic_engine_state.identity_dh_key,
+        {_SignedPrekeyId, _SignedPrekeyPub, SignedPrekeyPriv} =
+            State#cryptic_engine_state.signed_prekey,
         OneTimePrekeys = State#cryptic_engine_state.one_time_prekeys,
 
         % Find the one-time prekey that was used
         OtpkId = base64:decode(maps:get(<<"otpk_id">>, MessagePayload)),
-        ?dbg("Received X3DH message from ~s using OTPK ID: ~p~n", [FromUsername, OtpkId]),
+        ?dbg("Received X3DH message from ~s using OTPK ID: ~p~n", [
+            FromUsername, OtpkId
+        ]),
         ?dbg("Available one-time prekeys: ~p~n", [OneTimePrekeys]),
 
         % OneTimePrekeys is a list of maps: [#{id => KeyId, public => PubKey, private => PrivKey}]
@@ -1565,17 +1634,21 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
                 },
 
                 % Perform X3DH receiver operation with correct parameters
-                case cryptic_lib:x3dh_receiver_decrypt_with_session_key(
-                    ReceiverKeys,
-                    MessageBlob,
-                    SenderIdPub,
-                    OtpkPriv
-                ) of
+                case
+                    cryptic_lib:x3dh_receiver_decrypt_with_session_key(
+                        ReceiverKeys,
+                        MessageBlob,
+                        SenderIdPub,
+                        OtpkPriv
+                    )
+                of
                     {ok, {Plaintext, _MessageId, SessionKey}} ->
                         % Initialize ratchet engine as receiver
-                        case initialize_receiver_ratchet_session(
-                            FromUsername, SessionKey, State
-                        ) of
+                        case
+                            initialize_receiver_ratchet_session(
+                                FromUsername, SessionKey, State
+                            )
+                        of
                             {ok, UpdatedState} ->
                                 log_info(
                                     "Initialized receiver session with ~s via X3DH",
@@ -1590,7 +1663,9 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
                         {error, {x3dh_decrypt_failed, Reason}}
                 end;
             [KeyWithoutPrivate | _] ->
-                ?dbg("Found matching key but it has no private field: ~p~n", [KeyWithoutPrivate]),
+                ?dbg("Found matching key but it has no private field: ~p~n", [
+                    KeyWithoutPrivate
+                ]),
                 {error, one_time_prekey_missing_private}
         end
     catch
@@ -1626,9 +1701,11 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, State) ->
         DHKeyPair = cryptic_nif:gen_keypair(),
 
         % Initialize as receiver with the session key from X3DH
-        case cryptic_ratchet_engine:init_as_receiver(
-            RatchetEnginePid, SessionKey, DHKeyPair
-        ) of
+        case
+            cryptic_ratchet_engine:init_as_receiver(
+                RatchetEnginePid, SessionKey, DHKeyPair
+            )
+        of
             ok ->
                 % Create session info
                 SessionInfo = #session_info{
@@ -1636,7 +1713,8 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, State) ->
                     session_id = generate_session_id(),
                     state = active,
                     last_activity = erlang:timestamp(),
-                    message_count = 1,  % Received first message
+                    % Received first message
+                    message_count = 1,
                     x3dh_completed = true
                 },
 
@@ -1696,9 +1774,11 @@ decrypt_ratchet_message(RatchetEnginePid, MessagePayload) ->
         },
 
         % Decrypt using ratchet engine
-        case cryptic_ratchet_engine:decrypt_message(
-            RatchetEnginePid, RatchetMessage
-        ) of
+        case
+            cryptic_ratchet_engine:decrypt_message(
+                RatchetEnginePid, RatchetMessage
+            )
+        of
             {ok, Plaintext} ->
                 {ok, Plaintext};
             {error, Reason} ->
@@ -1711,15 +1791,20 @@ decrypt_ratchet_message(RatchetEnginePid, MessagePayload) ->
 
 %% @private
 %% @doc Deliver message to UI (async version)
-deliver_message_to_ui_async(FromUsername, DecryptedMessage, State)
-  when is_list(FromUsername) ->
+deliver_message_to_ui_async(FromUsername, DecryptedMessage, State) when
+    is_list(FromUsername)
+->
     CallbackModule = State#cryptic_engine_state.callback_module,
     Context = State#cryptic_engine_state.callback_context,
     Timestamp = erlang:timestamp(),
-    ?dbg("Delivering message from ~s to UI: ~p~n", [FromUsername, DecryptedMessage]),
-    try CallbackModule:deliver_message(
-        FromUsername, DecryptedMessage, Timestamp, Context
-    ) of
+    ?dbg("Delivering message from ~s to UI: ~p~n", [
+        FromUsername, DecryptedMessage
+    ]),
+    try
+        CallbackModule:deliver_message(
+            FromUsername, DecryptedMessage, Timestamp, Context
+        )
+    of
         {ok, UpdatedContext} ->
             NewState = State#cryptic_engine_state{
                 callback_context = UpdatedContext,
@@ -1772,7 +1857,7 @@ update_session_activity(PeerUsername, State) ->
 %% @doc Handle state changes in ratchet engine sessions
 handle_state_change(_EngineRef, FromState, ToState, Context) ->
     PeerUsername = maps:get(peer_username, Context, <<"unknown">>),
-    ?dbg("Ratchet session ~p: ~p → ~p", [PeerUsername, FromState, ToState]),
+    ?dbg("Ratchet session ~p: ~p -> ~p", [PeerUsername, FromState, ToState]),
     ok.
 
 %% @doc Handle message encryption/decryption events
@@ -1784,7 +1869,7 @@ handle_message_event(_EngineRef, Event, Data, Context) ->
             ?dbg("Message encrypted for ~p", [PeerUsername]);
         decrypt_success ->
             Message = maps:get(plaintext, Data),
-            ?dbg("Message from ~p: ~p~n", [PeerUsername,Message]),
+            ?dbg("Message from ~p: ~p~n", [PeerUsername, Message]),
             Timestamp = erlang:timestamp(),
             CallbackMod:deliver_message(PeerUsername, Data, Timestamp, Context);
         encrypt_error ->

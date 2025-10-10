@@ -66,7 +66,8 @@
 %%% Send X3DH encrypted message (session initiation):
 %%% <pre>
 %%% {
-%%%   "type": "send_message_x3dh",
+%%%   "type": "x3dh",
+%%%   "from": "sender_username",
 %%%   "to": "username",
 %%%   "message_id": "base64-message-id",
 %%%   "ephemeral_public": "base64-ephemeral-key",
@@ -81,7 +82,8 @@
 %%% Send Double Ratchet encrypted message (ongoing communication):
 %%% <pre>
 %%% {
-%%%   "type": "send_message_ratchet",
+%%%   "type": "ratchet",
+%%%   "from": "sender_username",
 %%%   "to": "username",
 %%%   "message_id": "base64-message-id",
 %%%   "dh_public": "base64-dh-public-key",
@@ -287,8 +289,8 @@
     | get_key_bundle
     | key_status
     | send_encrypted
-    | send_message_x3dh
-    | send_message_ratchet
+    | x3dh
+    | ratchet
     | list_users
     | get_messages
     | welcome
@@ -426,7 +428,7 @@ send_encrypted(MsgMap) ->
             Error
     end.
 
-%% @doc Construct the `send_message_x3dh' message
+%% @doc Construct the `x3dh' message
 %%
 %% Sends an X3DH encrypted message for session establishment.
 %% Contains all X3DH protocol components including metadata.
@@ -446,7 +448,8 @@ send_message_x3dh(MsgMap) ->
     case mk_payload(send_message_x3dh, MsgMap) of
         {ok, Payload} ->
             {ok, #{
-                <<"type">> => <<"send_message_x3dh">>,
+                <<"type">> => <<"x3dh">>,
+                <<"from">> => maps:get(from, Payload),
                 <<"to">> => maps:get(to, Payload),
                 <<"message_id">> => maps:get(message_id, Payload),
                 <<"ephemeral_public">> => maps:get(ephemeral_public, Payload),
@@ -460,7 +463,7 @@ send_message_x3dh(MsgMap) ->
             Error
     end.
 
-%% @doc Construct the `send_message_ratchet' message
+%% @doc Construct the `ratchet' message
 %%
 %% Sends a Double Ratchet encrypted message for ongoing communication.
 %% Used after X3DH session establishment.
@@ -480,7 +483,8 @@ send_message_ratchet(MsgMap) ->
     case mk_payload(send_message_ratchet, MsgMap) of
         {ok, Payload} ->
             {ok, #{
-                <<"type">> => <<"send_message_ratchet">>,
+                <<"type">> => <<"ratchet">>,
+                <<"from">> => maps:get(from, Payload),
                 <<"to">> => maps:get(to, Payload),
                 <<"message_id">> => maps:get(message_id, Payload),
                 <<"dh_public">> => maps:get(dh_public, Payload),
@@ -841,12 +845,20 @@ mk_payload(send_encrypted, MsgMap) ->
     validate_required_fields(RequiredFields, MsgMap);
 mk_payload(send_message_x3dh, MsgMap) ->
     RequiredFields = [
-        to, message_id, ephemeral_public, ciphertext, nonce, signature, metadata
+        from,
+        to,
+        message_id,
+        ephemeral_public,
+        ciphertext,
+        nonce,
+        signature,
+        metadata
     ],
     % otpk_id is optional (can be null)
     validate_required_fields(RequiredFields, MsgMap);
 mk_payload(send_message_ratchet, MsgMap) ->
     RequiredFields = [
+        from,
         to,
         message_id,
         dh_public,
@@ -991,6 +1003,45 @@ validate_message_by_type(<<"get_key_bundle">>, Message) ->
         User when is_binary(User) -> {ok, Message};
         _ -> {error, invalid_user}
     end;
+validate_message_by_type(<<"ratchet">>, Message) ->
+    %% Validate ratchet message has all required fields
+    %% Note: dh_step, prev_chain_length, msg_number are integers, others are binary
+    RequiredFields = [
+        <<"from">>,
+        <<"to">>,
+        <<"message_id">>,
+        <<"dh_public">>,
+        <<"ciphertext">>,
+        <<"nonce">>
+    ],
+    case validate_binary_fields(RequiredFields, Message) of
+        {ok, _} ->
+            %% Also check integer fields exist
+            case
+                {
+                    maps:is_key(<<"dh_step">>, Message),
+                    maps:is_key(<<"prev_chain_length">>, Message),
+                    maps:is_key(<<"msg_number">>, Message)
+                }
+            of
+                {true, true, true} -> {ok, Message};
+                _ -> {error, missing_integer_fields}
+            end;
+        Error ->
+            Error
+    end;
+validate_message_by_type(<<"x3dh">>, Message) ->
+    RequiredFields = [
+        <<"from">>,
+        <<"to">>,
+        <<"message_id">>,
+        <<"ephemeral_public">>,
+        <<"ciphertext">>,
+        <<"nonce">>,
+        <<"signature">>,
+        <<"metadata">>
+    ],
+    validate_binary_fields(RequiredFields, Message);
 validate_message_by_type(Type, Message) ->
     % For other message types, just verify type field exists
     case maps:get(<<"type">>, Message) of

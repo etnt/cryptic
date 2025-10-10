@@ -15,7 +15,6 @@
 [shell server]
     [invoke log "Start the Cryptic server..."]
     !env CRYPTIC_DEBUG=true ../../scripts/start-server.sh
-    ?Cryptic WebSocket server with mTLS started on port 8443
     ?\(server@localhost\)[0-9]+\>
 
 [shell server-log]
@@ -61,6 +60,35 @@
     ?.*cryptic_ws_handler.*Processing validated message from: bob , type: upload_identity_keys
     ?.*cryptic_ws_handler.*Processing validated message from: bob , type: upload_prekey_bundle
 
+[shell alice]
+    [invoke log "Alice sends a message to Bob"]
+    !send bob Hi Bob, this is Alice!
+    ?<You => bob>.*Hi Bob, this is Alice!
+    ?cryptic>
+
+[shell bob]
+    [invoke log "Bob receives Alice's message"]
+    ?<alice>.*Hi Bob, this is Alice!
+
+[shell alice]
+    [invoke log "Alice sends another message to Bob"]
+    !send bob How are you?
+    ?<You => bob>.*How are you?
+    ?cryptic>
+
+[shell bob]
+    [invoke log "Bob receives Alice's second message"]
+    ?<alice>.*How are you?
+    ?cryptic>
+    [invoke log "Bob replies to Alice"]
+    !send alice Hi Alice, I am fine, thanks!
+    ?<You => alice>.*Hi Alice, I am fine, thanks!
+    ?cryptic>
+
+[shell alice]
+    [invoke log "Alice receives Bob's reply"]
+    ?<bob>.*Hi Alice, I am fine, thanks!
+    ?cryptic>
 
 [shell alice]
     [invoke log "Quit Alice"]
