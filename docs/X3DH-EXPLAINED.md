@@ -1,4 +1,4 @@
-# X3DH Keys, Notation, Calculations and Double-Ratchet
+# X3DH and Double-Ratchet
 
 X3DH is not “just more Diffie–Hellman”—it is a protocol for asynchronous,
 authenticated key exchange with strong forward secrecy, designed to work
@@ -73,8 +73,9 @@ cryptographic “secret-sharing dance” be:
 So, it’s not a different kind of cryptography, just a better track for
 the same race.
 
-Example: To find 2 × G (“double G”) you:
+Example: To find 2 × G (“double G”) where G = (x,y) = (9, 147816...) you:
 
+  0. You don't just double the x and y numbers, instead do...
   1. Draw the tangent line to the curve right at point G.
   2. See where that line crosses the curve again.
   3. Reflect that crossing point across the x-axis.
@@ -149,7 +150,7 @@ SK = HKDF( SK_input, Salt, Info)
 ```
 
 Both clients are doing the same calculations and obtains exactly the
-same SK, which then s used to decrypt the first message and start a
+same SK, which then is used to decrypt the first message and start a
 Double Ratchet session.
 
 **Summary table**:

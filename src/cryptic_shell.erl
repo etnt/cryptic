@@ -80,37 +80,26 @@
 -include("cryptic.hrl").
 
 %% API
--export([
-    start_shell/0,
-    start_shell/1,
-    get_line/1,
-    get_password/1,
-    cleanup/0,
+-export([start_shell/0, start_shell/1, get_line/1, get_password/1, cleanup/0,
+         print_user_message/3, print_sent_message/3, print_success/1, print_error/1,
+         print_warning/1, print_info/1, print_highlight/1]).
+
     %% Enhanced output functions with ANSI formatting
-    print_user_message/3,
-    print_sent_message/3,
-    print_success/1,
-    print_error/1,
-    print_warning/1,
-    print_info/1,
-    print_highlight/1
-]).
 
 %% Internal state record for line editing
--record(line_state, {
-    %% Current line content
-    buffer = [] :: [char()],
-    %% Cursor position (0-based from start)
-    cursor = 0 :: non_neg_integer(),
-    %% Current prompt string
-    prompt :: string(),
-    %% Optional ETS table for buffer persistence
-    buffer_table :: ets:tid() | undefined,
-    %% History navigation state
-    history_pos :: undefined | non_neg_integer(),
-    %% Original buffer before history navigation
-    original_buffer = [] :: [char()]
-}).
+-record(line_state,
+        {%% Current line content
+         buffer = [] :: [char()],
+         %% Cursor position (0-based from start)
+         cursor = 0 :: non_neg_integer(),
+         %% Current prompt string
+         prompt :: string(),
+         %% Optional ETS table for buffer persistence
+         buffer_table :: ets:tid() | undefined,
+         %% History navigation state
+         history_pos :: undefined | non_neg_integer(),
+         %% Original buffer before history navigation
+         original_buffer = [] :: [char()]}).
 
 %%%===================================================================
 %%% API Functions
@@ -132,9 +121,7 @@ start_shell(Options) ->
             ok ->
                 case Verbose of
                     true ->
-                        io:format("~s\r\n", [
-                            ?FG_GREEN(?BOLD("Cryptic Shell (OTP 28 raw mode)"))
-                        ]);
+                        io:format("~s\r\n", [?FG_GREEN(?BOLD("Cryptic Shell (OTP 28 raw mode)"))]);
                     false ->
                         ok
                 end,
@@ -142,15 +129,8 @@ start_shell(Options) ->
             {error, _Reason} ->
                 case Verbose of
                     true ->
-                        io:format(
-                            "~s\r\n", [
-                                ?FG_YELLOW(
-                                    ?BOLD(
-                                        "OTP 28 mode failed, trying fallback..."
-                                    )
-                                )
-                            ]
-                        );
+                        io:format("~s\r\n",
+                                  [?FG_YELLOW(?BOLD("OTP 28 mode failed, trying fallback..."))]);
                     false ->
                         ok
                 end,
@@ -160,15 +140,8 @@ start_shell(Options) ->
         error:undef ->
             case Verbose of
                 true ->
-                    io:format(
-                        "~s\r\n", [
-                            ?FG_YELLOW(
-                                ?BOLD(
-                                    "OTP 28 shell function not available, trying fallback..."
-                                )
-                            )
-                        ]
-                    );
+                    io:format("~s\r\n",
+                              [?FG_YELLOW(?BOLD("OTP 28 shell function not available, trying fallback..."))]);
                 false ->
                     ok
             end,
@@ -176,14 +149,10 @@ start_shell(Options) ->
         _:Error ->
             case Verbose of
                 true ->
-                    io:format("~s\r\n", [
-                        ?FG_WHITE_BG_RED(
-                            ?BOLD(
-                                "Shell setup error: " ++
-                                    lists:flatten(io_lib:format("~p", [Error]))
-                            )
-                        )
-                    ]);
+                    io:format("~s\r\n",
+                              [?FG_WHITE_BG_RED(?BOLD("Shell setup error: "
+                                                      ++ lists:flatten(
+                                                             io_lib:format("~p", [Error]))))]);
                 false ->
                     ok
             end,
@@ -220,12 +189,11 @@ get_line(Prompt) ->
                 end
         end,
 
-    LineState = #line_state{
-        buffer = InitialBuffer,
-        cursor = length(InitialBuffer),
-        prompt = FormattedPrompt,
-        buffer_table = cryptic_console_input_buffer
-    },
+    LineState =
+        #line_state{buffer = InitialBuffer,
+                    cursor = length(InitialBuffer),
+                    prompt = FormattedPrompt,
+                    buffer_table = cryptic_console_input_buffer},
     %% Small delay to let terminal finish processing the prompt ANSI codes
     %% before we start reading input. This prevents characters from being
     %% consumed/lost when the terminal is still processing escape sequences.
@@ -247,8 +215,10 @@ get_password(Prompt) ->
 %% @doc Fallback to older raw mode approach
 fallback_raw_mode() ->
     case io:setopts(standard_io, [raw]) of
-        ok -> ok;
-        {error, Reason} -> {error, Reason}
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% @doc Main line editor loop
@@ -263,7 +233,6 @@ line_editor_loop(#line_state{buffer = Buffer} = State) ->
         "\e" ->
             handle_escape_sequence(State);
         %% Emacs control keys
-
         %% Ctrl+A - beginning of line
         [1] ->
             handle_ctrl_a(State);
@@ -295,7 +264,6 @@ line_editor_loop(#line_state{buffer = Buffer} = State) ->
         [14] ->
             handle_ctrl_n(State);
         %% Regular delete key
-
         %% DEL acts like backspace
         [127] ->
             handle_ctrl_h(State);
@@ -394,8 +362,10 @@ finish_line(Buffer) ->
                     %% Get current history count
                     HistoryCount =
                         case ets:lookup(TableRef, history_count) of
-                            [{history_count, Count}] -> Count;
-                            [] -> 0
+                            [{history_count, Count}] ->
+                                Count;
+                            [] ->
+                                0
                         end,
                     %% Check if it's different from the last command
                     ShouldSave =
@@ -403,25 +373,19 @@ finish_line(Buffer) ->
                             0 ->
                                 true;
                             _ ->
-                                case
-                                    ets:lookup(
-                                        TableRef, {history, HistoryCount - 1}
-                                    )
-                                of
-                                    [{_, LastCmd}] -> TrimmedCmd =/= LastCmd;
-                                    [] -> true
+                                case ets:lookup(TableRef, {history, HistoryCount - 1}) of
+                                    [{_, LastCmd}] ->
+                                        TrimmedCmd =/= LastCmd;
+                                    [] ->
+                                        true
                                 end
                         end,
                     case ShouldSave of
                         true ->
                             %% Save command to history
-                            ets:insert(TableRef, {
-                                {history, HistoryCount}, TrimmedCmd
-                            }),
+                            ets:insert(TableRef, {{history, HistoryCount}, TrimmedCmd}),
                             %% Update history count
-                            ets:insert(
-                                TableRef, {history_count, HistoryCount + 1}
-                            ),
+                            ets:insert(TableRef, {history_count, HistoryCount + 1}),
                             %% Keep only last 100 commands
                             cleanup_old_history(TableRef, HistoryCount + 1);
                         false ->
@@ -439,8 +403,10 @@ save_buffer_to_ets(BufferTable, Buffer) ->
         TableName when is_atom(TableName) ->
             %% Check if the named table exists before writing
             case ets:whereis(TableName) of
-                undefined -> ok;
-                _Ref -> ets:insert(TableName, {current_input, Buffer})
+                undefined ->
+                    ok;
+                _Ref ->
+                    ets:insert(TableName, {current_input, Buffer})
             end;
         TableRef when is_reference(TableRef) ->
             ets:insert(TableRef, {current_input, Buffer});
@@ -449,11 +415,11 @@ save_buffer_to_ets(BufferTable, Buffer) ->
     end.
 
 %% @doc Insert character at cursor position
-insert_char(
-    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
-        State,
-    Char
-) ->
+insert_char(#line_state{buffer = Buffer,
+                        cursor = Cursor,
+                        buffer_table = BufferTable} =
+                State,
+            Char) ->
     {Left, Right} = lists:split(Cursor, Buffer),
     NewBuffer = Left ++ [Char] ++ Right,
     NewCursor = Cursor + 1,
@@ -510,10 +476,10 @@ handle_ctrl_b(#line_state{cursor = Cursor} = State) ->
     line_editor_loop(State#line_state{cursor = Cursor - 1}).
 
 %% @doc Delete character at cursor (Ctrl+D)
-handle_ctrl_d(
-    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
-        State
-) ->
+handle_ctrl_d(#line_state{buffer = Buffer,
+                          cursor = Cursor,
+                          buffer_table = BufferTable} =
+                  State) ->
     case Cursor < length(Buffer) of
         true ->
             {Left, [_ | Right]} = lists:split(Cursor, Buffer),
@@ -532,10 +498,10 @@ handle_ctrl_d(
 %% @doc Backspace (Ctrl+H)
 handle_ctrl_h(#line_state{cursor = 0} = State) ->
     line_editor_loop(State);
-handle_ctrl_h(
-    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
-        State
-) ->
+handle_ctrl_h(#line_state{buffer = Buffer,
+                          cursor = Cursor,
+                          buffer_table = BufferTable} =
+                  State) ->
     {Left, Right} = lists:split(Cursor, Buffer),
     NewBuffer = lists:droplast(Left) ++ Right,
     NewCursor = Cursor - 1,
@@ -549,10 +515,10 @@ handle_ctrl_h(
     line_editor_loop(NewState).
 
 %% @doc Kill from cursor to end (Ctrl+K)
-handle_ctrl_k(
-    #line_state{buffer = Buffer, cursor = Cursor, buffer_table = BufferTable} =
-        State
-) ->
+handle_ctrl_k(#line_state{buffer = Buffer,
+                          cursor = Cursor,
+                          buffer_table = BufferTable} =
+                  State) ->
     {Left, _Right} = lists:split(Cursor, Buffer),
     NewState = State#line_state{buffer = Left},
 
@@ -576,15 +542,12 @@ handle_ctrl_u(#line_state{prompt = Prompt, buffer_table = BufferTable} = State) 
 handle_ctrl_p(#line_state{buffer_table = undefined} = State) ->
     %% No history available
     line_editor_loop(State);
-handle_ctrl_p(
-    #line_state{
-        buffer_table = BufferTable,
-        history_pos = HistoryPos,
-        buffer = CurrentBuffer,
-        original_buffer = OriginalBuffer,
-        prompt = Prompt
-    } = State
-) ->
+handle_ctrl_p(#line_state{buffer_table = BufferTable,
+                          history_pos = HistoryPos,
+                          buffer = CurrentBuffer,
+                          original_buffer = OriginalBuffer,
+                          prompt = Prompt} =
+                  State) ->
     case ets:whereis(BufferTable) of
         undefined ->
             line_editor_loop(State);
@@ -592,8 +555,10 @@ handle_ctrl_p(
             %% Get history count
             HistoryCount =
                 case ets:lookup(TableRef, history_count) of
-                    [{history_count, Count}] -> Count;
-                    [] -> 0
+                    [{history_count, Count}] ->
+                        Count;
+                    [] ->
+                        0
                 end,
 
             case HistoryCount of
@@ -626,17 +591,18 @@ handle_ctrl_p(
                                     %% Save original buffer on first navigation
                                     NewOriginal =
                                         case HistoryPos of
-                                            undefined -> CurrentBuffer;
-                                            _ -> OriginalBuffer
+                                            undefined ->
+                                                CurrentBuffer;
+                                            _ ->
+                                                OriginalBuffer
                                         end,
 
                                     %% Replace current line with history entry
-                                    replace_line_with_text(
-                                        Prompt, HistoryCmd, State#line_state{
-                                            history_pos = NewPos,
-                                            original_buffer = NewOriginal
-                                        }
-                                    );
+                                    replace_line_with_text(Prompt,
+                                                           HistoryCmd,
+                                                           State#line_state{history_pos = NewPos,
+                                                                            original_buffer =
+                                                                                NewOriginal});
                                 [] ->
                                     line_editor_loop(State)
                             end
@@ -648,21 +614,14 @@ handle_ctrl_p(
 handle_ctrl_n(#line_state{buffer_table = undefined} = State) ->
     %% No history available
     line_editor_loop(State);
-handle_ctrl_n(
-    #line_state{
-        history_pos = undefined
-    } = State
-) ->
+handle_ctrl_n(#line_state{history_pos = undefined} = State) ->
     %% Not navigating history, nothing to do
     line_editor_loop(State);
-handle_ctrl_n(
-    #line_state{
-        buffer_table = BufferTable,
-        history_pos = HistoryPos,
-        original_buffer = OriginalBuffer,
-        prompt = Prompt
-    } = State
-) ->
+handle_ctrl_n(#line_state{buffer_table = BufferTable,
+                          history_pos = HistoryPos,
+                          original_buffer = OriginalBuffer,
+                          prompt = Prompt} =
+                  State) ->
     case ets:whereis(BufferTable) of
         undefined ->
             line_editor_loop(State);
@@ -670,8 +629,10 @@ handle_ctrl_n(
             %% Get history count
             HistoryCount =
                 case ets:lookup(TableRef, history_count) of
-                    [{history_count, Count}] -> Count;
-                    [] -> 0
+                    [{history_count, Count}] ->
+                        Count;
+                    [] ->
+                        0
                 end,
 
             NewPos = HistoryPos + 1,
@@ -679,21 +640,17 @@ handle_ctrl_n(
             case NewPos >= HistoryCount of
                 true ->
                     %% Return to original buffer
-                    replace_line_with_text(
-                        Prompt, OriginalBuffer, State#line_state{
-                            history_pos = undefined,
-                            original_buffer = []
-                        }
-                    );
+                    replace_line_with_text(Prompt,
+                                           OriginalBuffer,
+                                           State#line_state{history_pos = undefined,
+                                                            original_buffer = []});
                 false ->
                     %% Go to next entry
                     case ets:lookup(TableRef, {history, NewPos}) of
                         [{_, HistoryCmd}] ->
-                            replace_line_with_text(
-                                Prompt, HistoryCmd, State#line_state{
-                                    history_pos = NewPos
-                                }
-                            );
+                            replace_line_with_text(Prompt,
+                                                   HistoryCmd,
+                                                   State#line_state{history_pos = NewPos});
                         [] ->
                             line_editor_loop(State)
                     end
@@ -708,18 +665,17 @@ replace_line_with_text(Prompt, NewText, State) ->
     %% Convert text to buffer
     NewBuffer =
         case is_list(NewText) of
-            true -> NewText;
-            false -> []
+            true ->
+                NewText;
+            false ->
+                []
         end,
 
     %% Display new text
     io:format("~s", [NewBuffer]),
 
     %% Update state
-    NewState = State#line_state{
-        buffer = NewBuffer,
-        cursor = length(NewBuffer)
-    },
+    NewState = State#line_state{buffer = NewBuffer, cursor = length(NewBuffer)},
 
     line_editor_loop(NewState).
 
@@ -730,12 +686,8 @@ cleanup_old_history(TableRef, CurrentCount) ->
         true ->
             %% Delete oldest entries
             NumToDelete = CurrentCount - MaxHistory,
-            lists:foreach(
-                fun(N) ->
-                    ets:delete(TableRef, {history, N})
-                end,
-                lists:seq(0, NumToDelete - 1)
-            );
+            lists:foreach(fun(N) -> ets:delete(TableRef, {history, N}) end,
+                          lists:seq(0, NumToDelete - 1));
         false ->
             ok
     end.
@@ -747,11 +699,10 @@ redraw_from_cursor(#line_state{buffer = Buffer, cursor = Cursor}) ->
 
     io:format("\e[K~s", [RightText]),
     BackDistance = length(Right),
-    if
-        BackDistance > 0 ->
-            io:format("~s", [lists:duplicate(BackDistance, "\b")]);
-        true ->
-            ok
+    if BackDistance > 0 ->
+           io:format("~s", [lists:duplicate(BackDistance, "\b")]);
+       true ->
+           ok
     end.
 
 %% @doc Password input loop with masking
@@ -789,38 +740,41 @@ handle_password_backspace([_Last | Rest]) ->
 %%%===================================================================
 
 print_user_message(FromUser, Message, Timestamp)
-  when is_list(FromUser) andalso is_binary(Message) ->
+    when is_list(FromUser) andalso is_binary(Message) ->
     %% Clear the current line first (in case we're interrupting a prompt)
     io:format("\r~s", [?CLEAR_LINE]),
     %% Should print like:
     %% <bob> Hello there (12:34:56)
     %% where each part is colored differently.
-    {{_Year, _Month, _Day}, {Hour, Minute, Second}} = calendar:now_to_universal_time(Timestamp),
+    {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
+        calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
-    io:format("~s: ~s (~s)\r\n", [
-        ?FG_CYAN("<" ++ FromUser ++ ">"),
-        ?FG_WHITE(binary_to_list(Message)),
-        ?FG_YELLOW(TimeStr)
-    ]).
+    io:format("~s: ~s (~s)\r\n",
+              [?FG_CYAN("<" ++ FromUser ++ ">"),
+               ?FG_WHITE(binary_to_list(Message)),
+               ?FG_YELLOW(TimeStr)]).
 
 %% @doc Print a sent message to show confirmation
-%% Formats as: <You => bob> Message text (HH:MM:SS)
--spec print_sent_message(ToUser :: string() | binary(), Message :: binary(), Timestamp :: erlang:timestamp()) -> ok.
+%% Formats as: &lt;You => bob&gt; Message text (HH:MM:SS)
+-spec print_sent_message(ToUser :: string() | binary(),
+                         Message :: binary(),
+                         Timestamp :: erlang:timestamp()) ->
+                            ok.
 print_sent_message(ToUser, Message, Timestamp) when is_binary(ToUser) ->
     print_sent_message(binary_to_list(ToUser), Message, Timestamp);
 print_sent_message(ToUser, Message, Timestamp)
-  when is_list(ToUser) andalso is_binary(Message) ->
+    when is_list(ToUser) andalso is_binary(Message) ->
     %% Move up one line and clear it to remove the command input
     io:format("~s\r~s", [?CURSOR_UP(1), ?CLEAR_LINE]),
     %% Should print like:
     %% <You => bob> Message text (12:34:56)
-    {{_Year, _Month, _Day}, {Hour, Minute, Second}} = calendar:now_to_universal_time(Timestamp),
+    {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
+        calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
-    io:format("~s ~s (~s)\r\n", [
-        ?FG_GREEN("<You => " ++ ToUser ++ ">"),
-        ?FG_WHITE(binary_to_list(Message)),
-        ?FG_YELLOW(TimeStr)
-    ]).
+    io:format("~s ~s (~s)\r\n",
+              [?FG_GREEN("<You => " ++ ToUser ++ ">"),
+               ?FG_WHITE(binary_to_list(Message)),
+               ?FG_YELLOW(TimeStr)]).
 
 %% @doc Print success message with green formatting
 -spec print_success(string()) -> ok.
