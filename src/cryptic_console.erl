@@ -386,8 +386,21 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
     end.
 
 %% @doc Parse user commands
+%% Supports both full commands and shortcut commands (prefixed with ':')
 parse_command("") ->
     {noop};
+%% Shortcut commands (colon-prefixed)
+parse_command(":h") ->
+    {help};
+parse_command(":q") ->
+    {quit};
+parse_command(":st") ->
+    {status};
+parse_command(":es") ->
+    {engine_status};
+parse_command(":v") ->
+    {verbose, toggle};
+%% Full commands
 parse_command("help") ->
     {help};
 parse_command("quit") ->
@@ -400,9 +413,18 @@ parse_command("engine_status") ->
     {engine_status};
 parse_command("verbose") ->
     {verbose, toggle};
+%% Check for shortcut send command ":s <username> <message>"
 parse_command(Line) ->
-    Parts = string:tokens(Line, " "),
-    parse_command_parts(Parts).
+    case string:prefix(Line, ":s ") of
+        nomatch ->
+            %% Not a shortcut, parse as regular command
+            Parts = string:tokens(Line, " "),
+            parse_command_parts(Parts);
+        Rest ->
+            %% Shortcut send command
+            Parts = string:tokens(Rest, " "),
+            parse_command_parts(["send" | Parts])
+    end.
 
 parse_command_parts(["send", ToUsername | MessageParts]) ->
     Message = string:join(MessageParts, " "),

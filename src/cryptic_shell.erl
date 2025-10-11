@@ -954,11 +954,12 @@ print_help() ->
     %% Commands section
     io:format(?BOLD(?FG_CYAN("Available Commands:")) ++ "\r\n"),
     io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
-    io:format(?FG_GREEN("  send") ++ " " ++ ?FG_YELLOW("<username> <message>") ++ "  - Send message to user\r\n"),
-    io:format(?FG_GREEN("  status") ++ "                     - Show console status\r\n"),
-    io:format(?FG_GREEN("  engine_status") ++ "              - Show engine status\r\n"),
-    io:format(?FG_GREEN("  help") ++ "                       - Show this help\r\n"),
-    io:format(?FG_GREEN("  quit") ++ "                       - Exit console\r\n"),
+    io:format(?FG_GREEN("  send") ++ " " ++ ?FG_YELLOW("<username> <message>") ++ "  - Send message to user " ++ ?FG_MAGENTA("(:s)") ++ "\r\n"),
+    io:format(?FG_GREEN("  status") ++ "                     - Show console status " ++ ?FG_MAGENTA("(:st)") ++ "\r\n"),
+    io:format(?FG_GREEN("  engine_status") ++ "              - Show engine status " ++ ?FG_MAGENTA("(:es)") ++ "\r\n"),
+    io:format(?FG_GREEN("  verbose") ++ "                    - Toggle verbose mode " ++ ?FG_MAGENTA("(:v)") ++ "\r\n"),
+    io:format(?FG_GREEN("  help") ++ "                       - Show this help " ++ ?FG_MAGENTA("(:h)") ++ "\r\n"),
+    io:format(?FG_GREEN("  quit") ++ "                       - Exit console " ++ ?FG_MAGENTA("(:q)") ++ "\r\n"),
 
     %% Line editing section
     io:format("\r\n"),
