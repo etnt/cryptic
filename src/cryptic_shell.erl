@@ -82,7 +82,8 @@
 %% API
 -export([start_shell/0, start_shell/1, get_line/1, get_password/1, cleanup/0,
          print_user_message/3, print_sent_message/3, print_success/1, print_error/1,
-         print_warning/1, print_info/1, print_highlight/1]).
+         print_warning/1, print_info/1, print_highlight/1, print_engine_status/1,
+         print_help/0, print_console_status/1]).
 
     %% Enhanced output functions with ANSI formatting
 
@@ -800,3 +801,243 @@ print_info(Message) ->
 -spec print_highlight(string()) -> ok.
 print_highlight(Message) ->
     io:format("~s\r\n", [?FG_WHITE_BG_BLUE(?BOLD("[***] " ++ Message))]).
+
+%% @doc Print engine status on alternate screen
+%% Takes a status map and displays it in a formatted view on the alternate screen buffer.
+%% This keeps the main message area clean and uncluttered.
+-spec print_engine_status(map()) -> ok.
+print_engine_status(Status) ->
+    %% Switch to alternate screen buffer
+    io:format(?ALT_SCREEN_ON),
+    io:format(?CLEAR_SCREEN),
+    io:format(?MVTO_ROW_COL(1, 1)),
+    
+    %% Display header with border
+    io:format(?BOLD("╔═══════════════════════════════════════════════════════════════╗") ++ "\r\n"),
+    io:format(?BOLD("║") ++ ?FG_CYAN("              CRYPTIC ENGINE STATUS                            ") ++ ?BOLD("║") ++ "\r\n"),
+    io:format(?BOLD("╚═══════════════════════════════════════════════════════════════╝") ++ "\r\n\r\n"),
+
+    %% Format username
+    Username = maps:get(username, Status, <<"unknown">>),
+    UsernameStr = case Username of
+        U when is_binary(U) -> binary_to_list(U);
+        U when is_list(U) -> U;
+        _ -> "unknown"
+    end,
+    io:format(?FG_GREEN("  Username:         ") ++ UsernameStr ++ "\r\n"),
+
+    %% Format active sessions
+    ActiveSessions = maps:get(active_sessions, Status, 0),
+    io:format(?FG_GREEN("  Active Sessions:  ") ++ integer_to_list(ActiveSessions) ++ "\r\n"),
+
+    %% Format message count
+    MessageCount = maps:get(message_count, Status, 0),
+    io:format(?FG_GREEN("  Messages Sent:    ") ++ integer_to_list(MessageCount) ++ "\r\n"),
+
+    %% Format error count with conditional coloring
+    ErrorCount = maps:get(error_count, Status, 0),
+    ErrorStr = integer_to_list(ErrorCount),
+    ErrorColored = if ErrorCount > 0 -> ?FG_RED(ErrorStr);
+                      true -> ErrorStr
+                   end,
+    io:format(?FG_GREEN("  Errors:           ") ++ ErrorColored ++ "\r\n"),
+
+    %% Format uptime
+    Uptime = maps:get(uptime, Status, 0),
+    UptimeFormatted = format_uptime(Uptime),
+    io:format(?FG_GREEN("  Uptime:           ") ++ UptimeFormatted ++ "\r\n"),
+
+    %% Display session details if any
+    SessionDetails = maps:get(session_details, Status, []),
+    case SessionDetails of
+        [] ->
+            ok;
+        _ ->
+            io:format("\r\n"),
+            io:format(?BOLD(?FG_CYAN("Active Ratchet Sessions:")) ++ "\r\n"),
+            io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
+
+            lists:foreach(fun format_session_info/1, SessionDetails),
+
+            %% Add metric explanation
+            io:format("\r\n"),
+            io:format(
+                ?FG_CYAN(
+                "  Step X: ") ++ ?FG_MAGENTA("Number of DH ratchet steps (key rotations) that have occurred") ++ "\r\n"
+                ?FG_CYAN(
+                "  Chain[X init/Y resp]:") ++ ?FG_MAGENTA(" Current initiator/responder chain message counters") ++ "\r\n"
+                ?FG_MAGENTA(
+                "                        These reset to 0 when DH ratchet steps occur") ++ "\r\n"
+                ?FG_CYAN(
+                "  Prev[X msgs]:") ++ ?FG_MAGENTA(" Messages from the previous receiving chain") ++ "\r\n"
+                ?FG_CYAN(
+                "  Skipped[X keys]:") ++ ?FG_MAGENTA(" Out-of-order messages cached for delayed delivery") ++ "\r\n"
+            )
+    end,
+
+    %% Show instructions and wait for keypress
+    io:format("\r\n\r\n"),
+    io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
+
+    %% Wait for a keypress
+    io:get_chars("", 1),
+
+    %% Return to main screen buffer
+    io:format(?ALT_SCREEN_OFF).
+
+%% @doc Format and display a single session info line
+%% Helper function for print_engine_status/1
+-spec format_session_info(map()) -> ok.
+format_session_info(SessionInfo) ->
+    PeerUsername = maps:get(peer_username, SessionInfo, <<"unknown">>),
+    Peer = case PeerUsername of
+        P when is_binary(P) -> binary_to_list(P);
+        P when is_list(P) -> P;
+        _ -> "unknown"
+    end,
+    DHStep = maps:get(dh_ratchet_step, SessionInfo, 0),
+    CurrentSend = maps:get(send_msg_number, SessionInfo, 0),
+    CurrentRecv = maps:get(recv_msg_number, SessionInfo, 0),
+    PrevChain = maps:get(prev_recv_chain_length, SessionInfo, 0),
+    SkippedKeys = maps:get(skipped_keys_count, SessionInfo, 0),
+
+    %% Format with colors
+    PeerColored = ?FG_CYAN(Peer),
+    io:format("  " ++ PeerColored ++ ": "),
+    io:format(?FG_GREEN("Step ") ++ integer_to_list(DHStep) ++ ", "),
+    io:format(?FG_GREEN("Chain")++"[" ++ integer_to_list(CurrentSend) ++ ?FG_YELLOW(" init") ++  ", "),
+    io:format(integer_to_list(CurrentRecv) ++ ?FG_YELLOW(" resp") ++ "], "),
+    io:format(?FG_GREEN("Prev") ++ "[" ++ integer_to_list(PrevChain) ++ ?FG_YELLOW(" msgs") ++ "]" ++ ", "),
+    io:format(?FG_GREEN("Skipped") ++ "[" ++ integer_to_list(SkippedKeys) ++ ?FG_YELLOW(" keys") ++ "]\r\n").
+
+
+%% @doc Format uptime from microseconds to human-readable string
+%% Helper function for print_engine_status/1
+-spec format_uptime(non_neg_integer()) -> string().
+format_uptime(Microseconds) ->
+    Seconds = Microseconds div 1000000,
+    Minutes = Seconds div 60,
+    Hours = Minutes div 60,
+    Days = Hours div 24,
+
+    RemainderHours = Hours rem 24,
+    RemainderMinutes = Minutes rem 60,
+    RemainderSeconds = Seconds rem 60,
+
+    if
+        Days > 0 ->
+            lists:flatten(io_lib:format("~B days, ~B hours, ~B minutes",
+                                       [Days, RemainderHours, RemainderMinutes]));
+        Hours > 0 ->
+            lists:flatten(io_lib:format("~B hours, ~B minutes",
+                                       [Hours, RemainderMinutes]));
+        Minutes > 0 ->
+            lists:flatten(io_lib:format("~B minutes, ~B seconds",
+                                       [Minutes, RemainderSeconds]));
+        true ->
+            lists:flatten(io_lib:format("~B seconds", [Seconds]))
+    end.
+
+%% @doc Display help information on alternate screen
+-spec print_help() -> ok.
+print_help() ->
+    %% Switch to alternate screen buffer
+    io:format(?ALT_SCREEN_ON),
+    io:format(?CLEAR_SCREEN),
+    io:format(?MVTO_ROW_COL(1, 1)),
+
+    %% Display header with border
+    io:format(?BOLD("╔═══════════════════════════════════════════════════════════════╗") ++ "\r\n"),
+    io:format(?BOLD("║") ++ ?FG_CYAN("              CRYPTIC CONSOLE HELP                             ") ++ ?BOLD("║") ++ "\r\n"),
+    io:format(?BOLD("╚═══════════════════════════════════════════════════════════════╝") ++ "\r\n\r\n"),
+
+    %% Commands section
+    io:format(?BOLD(?FG_CYAN("Available Commands:")) ++ "\r\n"),
+    io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
+    io:format(?FG_GREEN("  send") ++ " " ++ ?FG_YELLOW("<username> <message>") ++ "  - Send message to user\r\n"),
+    io:format(?FG_GREEN("  status") ++ "                     - Show console status\r\n"),
+    io:format(?FG_GREEN("  engine_status") ++ "              - Show engine status\r\n"),
+    io:format(?FG_GREEN("  help") ++ "                       - Show this help\r\n"),
+    io:format(?FG_GREEN("  quit") ++ "                       - Exit console\r\n"),
+
+    %% Line editing section
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Line Editing Keys:")) ++ "\r\n"),
+    io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
+    io:format(?FG_GREEN("  Ctrl+A") ++ "                     - Beginning of line\r\n"),
+    io:format(?FG_GREEN("  Ctrl+E") ++ "                     - End of line\r\n"),
+    io:format(?FG_GREEN("  Ctrl+F / Right Arrow") ++ "       - Forward one character\r\n"),
+    io:format(?FG_GREEN("  Ctrl+B / Left Arrow") ++ "        - Back one character\r\n"),
+    io:format(?FG_GREEN("  Ctrl+P / Up Arrow") ++ "          - Previous command in history\r\n"),
+    io:format(?FG_GREEN("  Ctrl+N / Down Arrow") ++ "        - Next command in history\r\n"),
+    io:format(?FG_GREEN("  Ctrl+D") ++ "                     - Delete character\r\n"),
+    io:format(?FG_GREEN("  Ctrl+H / Backspace") ++ "         - Delete previous character\r\n"),
+    io:format(?FG_GREEN("  Ctrl+K") ++ "                     - Kill to end of line\r\n"),
+    io:format(?FG_GREEN("  Ctrl+U") ++ "                     - Kill entire line\r\n"),
+
+    %% Show instructions and wait for keypress
+    io:format("\r\n\r\n"),
+    io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
+    
+    %% Wait for a keypress
+    io:get_chars("", 1),
+    
+    %% Return to main screen buffer
+    io:format(?ALT_SCREEN_OFF).
+
+%% @doc Display console status information on alternate screen
+-spec print_console_status(map()) -> ok.
+print_console_status(Status) ->
+    %% Switch to alternate screen buffer
+    io:format(?ALT_SCREEN_ON),
+    io:format(?CLEAR_SCREEN),
+    io:format(?MVTO_ROW_COL(1, 1)),
+    
+    %% Display header with border
+    io:format(?BOLD("╔═══════════════════════════════════════════════════════════════╗") ++ "\r\n"),
+    io:format(?BOLD("║") ++ ?FG_CYAN("              CRYPTIC CONSOLE STATUS                          ") ++ ?BOLD("║") ++ "\r\n"),
+    io:format(?BOLD("╚═══════════════════════════════════════════════════════════════╝") ++ "\r\n\r\n"),
+
+    %% Format username
+    Username = maps:get(username, Status, "unknown"),
+    io:format(?FG_GREEN("  Username:         ") ++ Username ++ "\r\n"),
+
+    %% Format server connection
+    ServerHost = maps:get(server_host, Status, "unknown"),
+    ServerPort = maps:get(server_port, Status, 0),
+    io:format(?FG_GREEN("  Server:           ") ++ ServerHost ++ ":" ++ integer_to_list(ServerPort) ++ "\r\n"),
+
+    %% Format connection status
+    WsConnected = maps:get(ws_client_connected, Status, false),
+    WsStatus = case WsConnected of
+        true -> ?FG_GREEN("Connected");
+        false -> ?FG_RED("Disconnected")
+    end,
+    io:format(?FG_GREEN("  WebSocket:        ") ++ WsStatus ++ "\r\n"),
+
+    %% Format engine status
+    EngineRunning = maps:get(engine_running, Status, false),
+    EngineStatus = case EngineRunning of
+        true -> ?FG_GREEN("Running");
+        false -> ?FG_RED("Stopped")
+    end,
+    io:format(?FG_GREEN("  Engine:           ") ++ EngineStatus ++ "\r\n"),
+
+    %% Format verbose mode
+    Verbose = maps:get(verbose, Status, false),
+    VerboseStr = case Verbose of
+        true -> ?FG_YELLOW("Enabled");
+        false -> "Disabled"
+    end,
+    io:format(?FG_GREEN("  Verbose Mode:     ") ++ VerboseStr ++ "\r\n"),
+
+    %% Show instructions and wait for keypress
+    io:format("\r\n\r\n"),
+    io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
+    
+    %% Wait for a keypress
+    io:get_chars("", 1),
+    
+    %% Return to main screen buffer
+    io:format(?ALT_SCREEN_OFF).
+
