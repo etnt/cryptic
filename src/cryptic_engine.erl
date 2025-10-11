@@ -534,7 +534,7 @@ handle_info(
     FromUsername = maps:get(<<"from">>, MessageData),
     MessagePayload = maps:get(<<"message">>, MessageData),
 
-    ?dbg("Received message from ~s: ~p", [FromUsername, MessagePayload]),
+    ?dbg("Received message from ~s: ~p~n", [FromUsername, MessagePayload]),
 
     % Process the incoming encrypted message
     case
@@ -582,37 +582,36 @@ code_change(_OldVsn, State, _Extra) ->
 handle_key_bundle_response(Message, State) ->
     Username = maps:get(<<"user">>, Message),
 
-    %% Find pending request for this user
+    %% Find pending request for this user (if any)
     PendingRequests = State#cryptic_engine_state.pending_key_requests,
-    case maps:get(Username, PendingRequests, []) of
+    MaybePendingRequest = maps:get(Username, PendingRequests, []),
+    
+    %% Cancel timeout if there was a pending request
+    case MaybePendingRequest of
+        [PendingRequest | _] ->
+            erlang:cancel_timer(PendingRequest#pending_request.timeout_ref);
         [] ->
+            %% No pending request - this might be from async request for X3DH fallback
+            ?dbg("Received key bundle for ~s (no pending request - likely X3DH fallback)~n", 
+                 [Username])
+    end,
+
+    %% Extract key bundle and store it regardless of pending request status
+    case extract_key_bundle_from_message(Message) of
+        {ok, KeyBundle} ->
+            ?dbg("DEBUG: Successfully extracted KeyBundle: ~p~n", [
+                KeyBundle
+            ]),
+            handle_session_creation(
+                Username, KeyBundle, PendingRequests, State
+            );
+        {error, ParseError} ->
             log_error(
-                "Unexpected key bundle response for user: ~p",
-                [Username],
+                "Key bundle parse failed for user ~p: ~p",
+                [Username, ParseError],
                 State
             ),
-            {noreply, State};
-        [PendingRequest | _] ->
-            %% Cancel timeout for this pending request
-            erlang:cancel_timer(PendingRequest#pending_request.timeout_ref),
-
-            %% Extract key bundle and create session
-            case extract_key_bundle_from_message(Message) of
-                {ok, KeyBundle} ->
-                    ?dbg("DEBUG: Successfully extracted KeyBundle: ~p~n", [
-                        KeyBundle
-                    ]),
-                    handle_session_creation(
-                        Username, KeyBundle, PendingRequests, State
-                    );
-                {error, ParseError} ->
-                    log_error(
-                        "Key bundle parse failed for user ~p: ~p",
-                        [Username, ParseError],
-                        State
-                    ),
-                    {noreply, State}
-            end
+            {noreply, State}
     end.
 
 %% @private
@@ -1085,6 +1084,20 @@ send_encrypted_message_to_peer(ToUsername, Message, RatchetEnginePid, State) ->
                     ),
                     {reply, {error, Reason}, FinalState}
             end;
+        {error, must_receive_first} ->
+            %% This should rarely happen now that we include ratchet DH key in X3DH metadata
+            %% But if old clients don't include it, we still get this error
+            FinalState = State#cryptic_engine_state{
+                error_count = State#cryptic_engine_state.error_count + 1
+            },
+            log_error(
+                "Cannot send to ~s: sender's DH ratchet key not available. "
+                "This may happen with older clients that don't include ratchet key in X3DH metadata.",
+                [ToUsername],
+                FinalState
+            ),
+            {reply, {error, {ratchet_encryption_failed, must_receive_first}},
+                FinalState};
         {error, RatchetError} ->
             FinalState = State#cryptic_engine_state{
                 error_count = State#cryptic_engine_state.error_count + 1
@@ -1115,9 +1128,10 @@ send_first_message_with_x3dh(ToUsername, PendingMessage, State) ->
             {error, key_bundle_not_found};
         KeyBundle ->
             % Perform X3DH with the actual first message
+            % X3DH will generate an ephemeral keypair which becomes our initial ratchet DH keypair (A₀)
             Message = PendingMessage#pending_message.plaintext,
             case perform_x3dh_with_message(KeyBundle, Message, State) of
-                {ok, MessageBlob, MessageId, SessionKey} ->
+                {ok, MessageBlob, MessageId, SessionKey, {EphemeralPub, EphemeralPriv}} ->
                     % Send the X3DH-encrypted message to server
                     case
                         send_x3dh_message_to_server(
@@ -1125,10 +1139,11 @@ send_first_message_with_x3dh(ToUsername, PendingMessage, State) ->
                         )
                     of
                         {ok, UpdatedState} ->
-                            % Now initialize the ratchet with the session key
+                            % Initialize ratchet with the ephemeral keypair from X3DH
+                            % Per protocol: X3DH ephemeral key IS the initial Double Ratchet DH key (A₀)
                             case
-                                initialize_ratchet_session(
-                                    ToUsername, SessionKey, UpdatedState
+                                initialize_ratchet_session_with_keypair(
+                                    ToUsername, SessionKey, {EphemeralPub, EphemeralPriv}, UpdatedState
                                 )
                             of
                                 {ok, FinalState} ->
@@ -1153,8 +1168,8 @@ send_first_message_with_x3dh(ToUsername, PendingMessage, State) ->
 %% @private
 %% @doc Perform X3DH key agreement with an actual message to encrypt
 %%
-%% This calls cryptic_lib:x3dh_sender_init_with_session_key with the actual message
-%% and returns both the encrypted message blob and the session key for ratchet initialization.
+%% This calls cryptic_lib:x3dh_sender_init_with_session_key with the actual message.
+%% The X3DH ephemeral keypair becomes the initial Double Ratchet DH keypair per protocol spec.
 perform_x3dh_with_message(PeerKeyBundle, Message, StateData) ->
     SenderKeys = #{
         identity_dh_private => element(
@@ -1193,13 +1208,14 @@ perform_x3dh_with_message(PeerKeyBundle, Message, StateData) ->
                 SenderKeys, TransformedBundle, Message
             )
         of
-            {ok, {MessageBlob, MessageId, SessionKey}} ->
+            {ok, {MessageBlob, MessageId, SessionKey, EphemeralKeypair}} ->
                 log_info(
                     "X3DH encryption successful, session key size: ~p bytes",
                     [byte_size(SessionKey)],
                     StateData
                 ),
-                {ok, MessageBlob, MessageId, SessionKey};
+                %% Return the ephemeral keypair - it's the initial Double Ratchet DH keypair
+                {ok, MessageBlob, MessageId, SessionKey, EphemeralKeypair};
             {error, ErrorReason} ->
                 {error, {x3dh_failed, error, ErrorReason}}
         end
@@ -1285,15 +1301,15 @@ send_x3dh_message_to_server(ToUsername, MessageBlob, MessageId, State) ->
     end.
 
 %% @private
-%% @doc Initialize Double Ratchet session with session key from X3DH
-initialize_ratchet_session(ToUsername, SessionKey, State) ->
+%% @doc Initialize ratchet session with the X3DH ephemeral keypair
+%%
+%% Per X3DH/Double-Ratchet protocol: The ephemeral keypair generated during X3DH
+%% IS the sender's initial Double Ratchet DH keypair (A₀). This function uses that
+%% keypair to initialize the ratchet engine as sender.
+initialize_ratchet_session_with_keypair(ToUsername, SessionKey, {RatchetDHPub, RatchetDHPriv}, State) ->
     try
-        %% Generate a NEW ephemeral keypair for the Double Ratchet
-        %% This is separate from the X3DH ephemeral key
-        {RatchetEphemeralPub, RatchetEphemeralPriv} = cryptic_lib:gen_keypair(),
-
         log_info(
-            "Initializing ratchet with session key (~p bytes) for ~s",
+            "Initializing ratchet with session key (~p bytes) and provided keypair for ~s",
             [byte_size(SessionKey), ToUsername],
             State
         ),
@@ -1306,7 +1322,7 @@ initialize_ratchet_session(ToUsername, SessionKey, State) ->
         ok = cryptic_ratchet_engine:init_as_sender(
             RatchetEnginePid,
             SessionKey,
-            {RatchetEphemeralPub, RatchetEphemeralPriv}
+            {RatchetDHPub, RatchetDHPriv}
         ),
 
         %% Update state with active ratchet session
@@ -1481,7 +1497,7 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
     % Normalize username to binary for consistent session key format
     % (outgoing messages use binary keys, incoming must match)
     FromUsernameBin = list_to_binary(FromUsername),
-    
+
     % Check message type to determine how to decrypt
     case maps:get(<<"message_type">>, MessagePayload, undefined) of
         <<"x3dh">> ->
@@ -1550,14 +1566,54 @@ handle_x3dh_message_async(FromUsername, MessagePayload, State) when
                     ),
                     {error, Reason}
             end;
-        _RatchetEnginePid ->
-            % We already have a session - this shouldn't happen with X3DH
-            log_error(
-                "Received X3DH message from ~s but session already exists",
-                [FromUsername],
-                State
-            ),
-            {error, session_already_exists}
+        RatchetEnginePid ->
+            % We already have a session - check if we should accept this X3DH message
+            % This can happen when:
+            % 1. Both parties initiate simultaneously (race condition)
+            % 2. Receiver sends X3DH fallback reply (receiver_init -> sender_init upgrade)
+            
+            % Get the current ratchet state
+            case cryptic_ratchet_engine:get_state_info(RatchetEnginePid) of
+                StateInfo when is_map(StateInfo) ->
+                    CurrentState = maps:get(current_state, StateInfo, unknown),
+                    case CurrentState of
+                        sender_init ->
+                            % We're in sender_init - peer is replying with X3DH fallback
+                            % Process this X3DH message to extract session key and upgrade
+                            ?dbg("Received X3DH reply from ~s while in sender_init, processing for upgrade~n", 
+                                 [FromUsername]),
+                            case process_x3dh_reply_in_sender_init(
+                                FromUsername, MessagePayload, RatchetEnginePid, State
+                            ) of
+                                {ok, Plaintext, UpdatedState} ->
+                                    deliver_message_to_ui_async(
+                                        FromUsername, Plaintext, UpdatedState
+                                    );
+                                {error, Reason} ->
+                                    log_error(
+                                        "Failed to process X3DH reply from ~s: ~p",
+                                        [FromUsername, Reason],
+                                        State
+                                    ),
+                                    {error, Reason}
+                            end;
+                        _OtherState ->
+                            % In any other state, X3DH message is unexpected
+                            log_error(
+                                "Received X3DH message from ~s but session already exists in state ~p",
+                                [FromUsername, CurrentState],
+                                State
+                            ),
+                            {error, session_already_exists}
+                    end;
+                _Error ->
+                    log_error(
+                        "Received X3DH message from ~s but session already exists (state unknown)",
+                        [FromUsername],
+                        State
+                    ),
+                    {error, session_already_exists}
+            end
     end.
 
 %% @private
@@ -1573,7 +1629,7 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
             ),
             {error, no_session};
         RatchetEnginePid ->
-            % Decrypt using the ratchet engine
+            %% Decrypt using the ratchet engine
             case decrypt_ratchet_message(RatchetEnginePid, MessagePayload) of
                 {ok, Plaintext} ->
                     % Update session activity timestamp
@@ -1590,6 +1646,109 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
                     ),
                     {error, Reason}
             end
+    end.
+
+%% @private
+%% @doc Process X3DH reply when we're in sender_init state
+%%
+%% This happens when:
+%% 1. We (Dave) sent first message to peer (Alice) via X3DH -> we're in sender_init
+%% 2. Peer (Alice) was in receiver_init and used X3DH fallback to reply
+%% 3. We receive Alice's X3DH message and need to:
+%%    - Decrypt it using our one-time prekey
+%%    - Extract the session key Alice generated
+%%    - Activate our receiving chain with that session key
+%%    - Upgrade to bidirectional state
+%%
+%% NOTE: This is currently a partial implementation for X3DH fallback scenario.
+%% With our current fix (including sender's DH key in X3DH metadata), this fallback
+%% should rarely be needed.
+process_x3dh_reply_in_sender_init(FromUsername, MessagePayload, _RatchetEnginePid, State) ->
+    try
+        % Extract X3DH components from Alice's message
+        Ciphertext = base64:decode(maps:get(<<"ciphertext">>, MessagePayload)),
+        Nonce = base64:decode(maps:get(<<"nonce">>, MessagePayload)),
+        Signature = base64:decode(maps:get(<<"signature">>, MessagePayload)),
+        EncodedMetadata = base64:decode(maps:get(<<"metadata">>, MessagePayload)),
+        
+        % Decode metadata
+        Metadata = erlang:binary_to_term(EncodedMetadata),
+        SenderIdPub = maps:get(sender_identity_sign_public, Metadata),
+        
+        % Extract our receiver keys
+        {_IdentityDhPub, IdentityDhPriv} = State#cryptic_engine_state.identity_dh_key,
+        {_SignedPrekeyId, _SignedPrekeyPub, SignedPrekeyPriv} = State#cryptic_engine_state.signed_prekey,
+        OneTimePrekeys = State#cryptic_engine_state.one_time_prekeys,
+        
+        % Find the one-time prekey that was used
+        OtpkId = base64:decode(maps:get(<<"otpk_id">>, MessagePayload)),
+        ?dbg("Processing X3DH reply from ~s using OTPK ID: ~p~n", [FromUsername, OtpkId]),
+        
+        MatchingKey = lists:filter(
+            fun(KeyMap) ->
+                case KeyMap of
+                    #{id := KeyId} -> KeyId =:= OtpkId;
+                    _ -> false
+                end
+            end,
+            OneTimePrekeys
+        ),
+        
+        case MatchingKey of
+            [#{private := OtpkPriv} | _] ->
+                ?dbg("Found matching one-time prekey for X3DH reply~n", []),
+                
+                ReceiverKeys = #{
+                    identity_dh_private => IdentityDhPriv,
+                    signed_prekey_private => SignedPrekeyPriv
+                },
+                
+                MessageBlob = #{
+                    metadata => Metadata,
+                    signature => Signature,
+                    ciphertext => Ciphertext,
+                    nonce => Nonce
+                },
+                
+                % Decrypt the X3DH message to get plaintext and session key
+                case cryptic_lib:x3dh_receiver_decrypt_with_session_key(
+                    ReceiverKeys, MessageBlob, SenderIdPub, OtpkPriv
+                ) of
+                    {ok, {Plaintext, _MessageId, _SessionKey}} ->
+                        % We have the session key Alice generated
+                        % Now we need to activate our receiving chain
+                        ?dbg("Decrypted X3DH reply, activating receiving chain~n", []),
+                        
+                        % The ratchet engine needs to process this as the first receiving message
+                        % to activate the receiving chain and transition to bidirectional
+                        % For now, just return the plaintext - the session is already initialized
+                        % TODO: May need to update ratchet state with peer's DH key from metadata
+                        % TODO: Use _SessionKey to activate receiving chain if needed
+                        
+                        log_info(
+                            "Processed X3DH reply from ~s in sender_init state",
+                            [FromUsername],
+                            State
+                        ),
+                        {ok, Plaintext, State};
+                    {error, Reason} ->
+                        {error, {x3dh_decrypt_failed, Reason}}
+                end;
+            [] ->
+                ?dbg("No matching one-time prekey found for ID: ~p~n", [OtpkId]),
+                {error, one_time_prekey_not_found};
+            [KeyWithoutPrivate | _] ->
+                ?dbg("Found matching key but it has no private field: ~p~n", [KeyWithoutPrivate]),
+                {error, one_time_prekey_missing_private}
+        end
+    catch
+        ErrorClass:ErrorReason:Stacktrace ->
+            log_error(
+                "Exception processing X3DH reply from ~s: ~p:~p~nStacktrace: ~p",
+                [FromUsername, ErrorClass, ErrorReason, Stacktrace],
+                State
+            ),
+            {error, {exception, ErrorClass, ErrorReason}}
     end.
 
 %% @private
@@ -1664,10 +1823,15 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
                     )
                 of
                     {ok, {Plaintext, _MessageId, SessionKey}} ->
-                        % Initialize ratchet engine as receiver
+                        % Extract sender's ephemeral public key from X3DH metadata
+                        % This IS the sender's initial Double Ratchet DH public key (A₀)
+                        % Per X3DH/Double-Ratchet spec: Alice's X3DH ephemeral key becomes her initial ratchet DH key
+                        SenderEphemeralPub = maps:get(ephemeral_public, Metadata, undefined),
+
+                        % Initialize ratchet engine as receiver with sender's ephemeral key as remote DH key
                         case
                             initialize_receiver_ratchet_session(
-                                FromUsername, SessionKey, State
+                                FromUsername, SessionKey, SenderEphemeralPub, State
                             )
                         of
                             {ok, UpdatedState} ->
@@ -1676,6 +1840,9 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
                                     [FromUsername],
                                     UpdatedState
                                 ),
+                                % Request sender's key bundle so we can reply via X3DH if needed
+                                % This is asynchronous - we don't wait for the response
+                                request_key_bundle_async(FromUsername, UpdatedState),
                                 {ok, Plaintext, UpdatedState};
                             {error, Reason} ->
                                 {error, {ratchet_init_failed, Reason}}
@@ -1701,7 +1868,8 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
 
 %% @private
 %% @doc Initialize ratchet session as receiver after X3DH
-initialize_receiver_ratchet_session(PeerUsername, SessionKey, State) ->
+%% If SenderRatchetDHPub is provided, the receiver can immediately send (bidirectional)
+initialize_receiver_ratchet_session(PeerUsername, SessionKey, SenderRatchetDHPub, State) ->
     try
         % Start ratchet engine with our callback
         CallbackModule = State#cryptic_engine_state.callback_module,
@@ -1728,6 +1896,28 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, State) ->
             )
         of
             ok ->
+                % If sender included their ratchet DH public key, activate sending chain
+                case SenderRatchetDHPub of
+                    undefined ->
+                        ?dbg("No sender ratchet DH key provided, staying in receiver_init~n", []);
+                    _ ->
+                        ?dbg("Sender ratchet DH key provided, setting remote DH key~n", []),
+                        % Set the remote DH key to enable sending immediately
+                        % This transitions from receiver_init to bidirectional
+                        case cryptic_ratchet_engine:set_remote_dh_key(
+                            RatchetEnginePid, SenderRatchetDHPub
+                        ) of
+                            ok ->
+                                ?dbg("Successfully set remote DH key, now bidirectional~n", []);
+                            {error, SetKeyError} ->
+                                log_error(
+                                    "Failed to set remote DH key for ~s: ~p",
+                                    [PeerUsername, SetKeyError],
+                                    State
+                                )
+                        end
+                end,
+
                 % Create session info
                 SessionInfo = #session_info{
                     peer_username = PeerUsername,
@@ -1770,6 +1960,49 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, State) ->
                 State
             ),
             {error, {exception, ErrorClass, ErrorReason}}
+    end.
+
+%% @private
+%% @doc Request key bundle from server asynchronously (for replying to received X3DH messages)
+%%
+%% This function sends a key bundle request to the server without tracking it.
+%% It's used when we receive an X3DH message from someone and want to be able
+%% to reply via X3DH fallback if needed (when in receiver_init state).
+request_key_bundle_async(ToUsername, State) ->
+    % Check if we already have the key bundle
+    KeyBundles = State#cryptic_engine_state.key_bundles,
+    case maps:get(ToUsername, KeyBundles, undefined) of
+        undefined ->
+            % We don't have the key bundle, request it
+            {ok, KeyBundleRequest} = cryptic_messages:get_key_bundle(#{
+                user => ToUsername
+            }),
+
+            CallbackModule = State#cryptic_engine_state.callback_module,
+            Context = State#cryptic_engine_state.callback_context,
+            Username = State#cryptic_engine_state.username,
+
+            % Send request to server - fire and forget
+            % The key bundle will arrive via handle_cast(key_bundle_received)
+            case CallbackModule:send_message_to_server(Username, KeyBundleRequest, Context) of
+                {ok, _UpdatedContext} ->
+                    log_info(
+                        "Requested key bundle for ~s (for X3DH fallback replies)",
+                        [ToUsername],
+                        State
+                    ),
+                    ok;
+                {error, Reason} ->
+                    log_error(
+                        "Failed to request key bundle for ~s: ~p",
+                        [ToUsername, Reason],
+                        State
+                    ),
+                    {error, Reason}
+            end;
+        _KeyBundle ->
+            % We already have the key bundle, nothing to do
+            ok
     end.
 
 %% @private

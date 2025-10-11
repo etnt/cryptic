@@ -474,6 +474,7 @@ show_engine_status(State) ->
         EnginePid ->
             case cryptic_engine:get_engine_status(EnginePid) of
                 {ok, Status} ->
+                    ?dbg("Engine status: ~p~n", [Status]),
                     cryptic_shell:print_engine_status(Status);
                 {error, Reason} ->
                     cryptic_shell:print_error(

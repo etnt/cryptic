@@ -150,6 +150,7 @@
     init_as_receiver/3,
     encrypt_message/2,
     decrypt_message/2,
+    set_remote_dh_key/2,
     get_state_info/1,
     get_debug_info/1,
     set_callback_handler/2,
@@ -658,6 +659,19 @@ encrypt_message(EngineRef, Plaintext) ->
 decrypt_message(EngineRef, EncryptedMessage) ->
     gen_statem:call(EngineRef, {decrypt_request, EncryptedMessage}).
 
+%% @doc Set the remote peer's DH ratchet public key
+%%%
+%%% This is used when the sender includes their DH ratchet public key in the X3DH metadata.
+%%% It allows the receiver to activate the sending chain immediately without waiting for
+%%% a ratchet-encrypted message from the sender.
+%%%
+%%% @param EngineRef PID of the engine process
+%%% @param RemoteDHPub Sender's DH ratchet public key (32 bytes)
+%%% @returns `ok' or `{error, Reason}'
+-spec set_remote_dh_key(engine_ref(), binary()) -> ok | {error, term()}.
+set_remote_dh_key(EngineRef, RemoteDHPub) when byte_size(RemoteDHPub) =:= 32 ->
+    gen_statem:call(EngineRef, {set_remote_dh_key, RemoteDHPub}).
+
 %% @doc Get current engine state information
 %%%
 %%% Returns a map containing the current state of the engine, including
@@ -1043,6 +1057,55 @@ sender_init({call, From}, {encrypt_request, Plaintext}, StateData) ->
                 {reply, From, {error, {exception, Class, Error}}}
             ]}
     end;
+sender_init({call, From}, {decrypt_request, Message}, StateData) ->
+    % With X3DH ephemeral key as initial DH key, Bob can reply immediately
+    % Alice transitions sender_init → bidirectional when receiving Bob's first message
+    RatchetState = StateData#engine_state.ratchet_state,
+    try
+        case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
+            {ok, Plaintext, NewRatchetState} ->
+                NewStateData = StateData#engine_state{
+                    ratchet_state = NewRatchetState,
+                    message_count = StateData#engine_state.message_count + 1
+                },
+
+                TransitionData = record_transition(
+                    sender_init, bidirectional, {decrypt_request}, NewStateData
+                ),
+
+                % Notify callbacks - Alice can now both send and receive
+                notify_state_change(
+                    sender_init, bidirectional, TransitionData
+                ),
+                notify_message_event(
+                    decrypt_success,
+                    #{
+                        plaintext_size => byte_size(Plaintext),
+                        plaintext => Plaintext
+                    },
+                    TransitionData
+                ),
+
+                Actions = [{reply, From, {ok, Plaintext}}],
+                {next_state, bidirectional, TransitionData, Actions};
+            {error, Reason} ->
+                notify_message_event(
+                    decrypt_error,
+                    #{reason => Reason},
+                    StateData
+                ),
+                {keep_state, record_error(Reason, StateData), [
+                    {reply, From, {error, Reason}}
+                ]}
+        end
+    catch
+        Class:Error:Stacktrace ->
+            ErrorReason = {Class, Error, Stacktrace},
+            notify_error(crypto_error, ErrorReason, StateData),
+            {keep_state, record_error(ErrorReason, StateData), [
+                {reply, From, {error, {exception, Class, Error}}}
+            ]}
+    end;
 sender_init(EventType, Event, StateData) ->
     handle_common_event(EventType, Event, sender_init, StateData).
 
@@ -1397,6 +1460,35 @@ receiver_init({call, From}, {encrypt_request, _Plaintext}, StateData) ->
     % Receiver needs to activate sending chain first
     notify_error(state_error, must_receive_first, StateData),
     {keep_state, StateData, [{reply, From, {error, must_receive_first}}]};
+receiver_init({call, From}, {set_remote_dh_key, RemoteDHPub}, StateData) ->
+    % Set the remote DH key in the ratchet state to enable sending
+    RatchetState = StateData#engine_state.ratchet_state,
+    try
+        NewRatchetState = cryptic_double_ratchet:set_remote_dh_key(RatchetState, RemoteDHPub),
+        NewStateData = StateData#engine_state{
+            ratchet_state = NewRatchetState
+        },
+        
+        % Transition to bidirectional since we can now both send and receive
+        TransitionData = record_transition(
+            receiver_init,
+            bidirectional,
+            {set_remote_dh_key},
+            NewStateData
+        ),
+        
+        notify_state_change(receiver_init, bidirectional, TransitionData),
+        
+        Actions = [{reply, From, ok}],
+        {next_state, bidirectional, TransitionData, Actions}
+    catch
+        Class:Error:Stacktrace ->
+            ErrorReason = {Class, Error, Stacktrace},
+            notify_error(crypto_error, ErrorReason, StateData),
+            {keep_state, record_error(ErrorReason, StateData), [
+                {reply, From, {error, {exception, Class, Error}}}
+            ]}
+    end;
 receiver_init(EventType, Event, StateData) ->
     handle_common_event(EventType, Event, receiver_init, StateData).
 

@@ -1828,6 +1828,7 @@ x3dh_sender_init(SenderKeys, RecipientBundle, Message) ->
                 ?dbg("DEBUG: Generated MessageId: ~p~n", [MessageId]),
 
                 %% Create message metadata for X3DH
+                %% Note: ephemeral_public IS the sender's initial Double Ratchet DH public key (A₀)
                 Metadata = #{
                     version => 1,
                     type => <<"X3DH_INIT">>,
@@ -1885,13 +1886,17 @@ x3dh_sender_init(SenderKeys, RecipientBundle, Message) ->
 %%
 %% Same as x3dh_sender_init/3 but returns the session key for automatic ratchet initialization.
 %% This enables seamless upgrade from X3DH to Double Ratchet messaging.
+%% 
+%% Per X3DH/Double-Ratchet spec: The ephemeral keypair generated during X3DH becomes
+%% the sender's initial Double Ratchet DH keypair (A₀). This function returns it so
+%% the caller can initialize the ratchet engine properly.
 %%
 %% @param SenderKeys Map containing sender's client keys
 %% @param RecipientBundle Recipient's key bundle from server
 %% @param Message Binary message to encrypt
-%% @returns {ok, {MessageBlob, MessageId, SessionKey}} or {error, Reason}
+%% @returns {ok, {MessageBlob, MessageId, SessionKey, {EphemeralPub, EphemeralPriv}}} or {error, Reason}
 -spec x3dh_sender_init_with_session_key(map(), map(), binary()) ->
-    {ok, {map(), binary(), binary()}} | {error, term()}.
+    {ok, {map(), binary(), binary(), {binary(), binary()}}} | {error, term()}.
 x3dh_sender_init_with_session_key(SenderKeys, RecipientBundle, Message) ->
     try
         ?dbg(
@@ -1978,8 +1983,9 @@ x3dh_sender_init_with_session_key(SenderKeys, RecipientBundle, Message) ->
                     nonce => Nonce
                 },
 
-                %% Return message blob, ID, AND session key for ratchet initialization
-                {ok, {MessageBlob, MessageId, SessionKey}}
+                %% Return message blob, ID, session key, AND ephemeral keypair for ratchet initialization
+                %% The ephemeral keypair becomes the sender's initial Double Ratchet DH keypair (A₀)
+                {ok, {MessageBlob, MessageId, SessionKey, {EphemeralPub, EphemeralPriv}}}
         end
     catch
         error:Reason -> {error, Reason};
