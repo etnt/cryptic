@@ -1311,6 +1311,7 @@ create_state_info(StateName, StateData) ->
                 {error, _} ->
                     BaseInfo;
                 RatchetInfo when is_map(RatchetInfo) ->
+                    ?dbg("Ratchet Info: ~p~n", [RatchetInfo]),
                     maps:merge(BaseInfo, RatchetInfo);
                 _ ->
                     BaseInfo

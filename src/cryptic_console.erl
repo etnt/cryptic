@@ -429,21 +429,103 @@ show_status(State) ->
 show_engine_status(State) ->
     case State#console_state.engine_pid of
         undefined ->
-            io:format("No engine running~n");
+            cryptic_shell:print_warning("No engine running");
         EnginePid ->
             case cryptic_engine:get_engine_status(EnginePid) of
                 {ok, Status} ->
-                    io:format("Engine Status:~n"),
-                    maps:fold(
-                        fun(K, V, _) ->
-                            io:format("  ~p: ~p~n", [K, V])
-                        end,
-                        ok,
-                        Status
-                    );
+                    cryptic_shell:print_info("Engine Status:"),
+
+                    %% Format username
+                    Username = maps:get(username, Status, <<"unknown">>),
+                    cryptic_shell:print_info("  Username:         " ++ binary_to_list(Username)),
+
+                    %% Format active sessions
+                    ActiveSessions = maps:get(active_sessions, Status, 0),
+                    cryptic_shell:print_info("  Active Sessions:  " ++ integer_to_list(ActiveSessions)),
+
+                    %% Format message count
+                    MessageCount = maps:get(message_count, Status, 0),
+                    cryptic_shell:print_info("  Messages Sent:    " ++ integer_to_list(MessageCount)),
+
+                    %% Format error count
+                    ErrorCount = maps:get(error_count, Status, 0),
+                    cryptic_shell:print_info("  Errors:           " ++ integer_to_list(ErrorCount)),
+
+                    %% Format uptime (convert microseconds to human-readable)
+                    Uptime = maps:get(uptime, Status, 0),
+                    UptimeFormatted = format_uptime(Uptime),
+                    cryptic_shell:print_info("  Uptime:           " ++ UptimeFormatted),
+
+                    %% Display session details if any
+                    SessionDetails = maps:get(session_details, Status, []),
+                    case SessionDetails of
+                        [] ->
+                            ok;
+                        _ ->
+                            cryptic_shell:print_info(""),
+                            cryptic_shell:print_info("Active Ratchet Sessions:"),
+                            lists:foreach(
+                                fun(SessionInfo) ->
+                                    format_session_info(SessionInfo)
+                                end,
+                                SessionDetails
+                            )
+                    end;
                 {error, Reason} ->
-                    io:format("Failed to get engine status: ~p~n", [Reason])
+                    cryptic_shell:print_error(
+                        "Failed to get engine status: " ++ 
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
             end
+    end.
+
+%% @doc Format and display session information
+%% Based on cryptic_ws_ui.erl lines 5227-5230
+format_session_info(SessionInfo) ->
+    PeerUsername = maps:get(peer_username, SessionInfo, <<"unknown">>),
+    Peer = b2l(PeerUsername),
+    DHStep = maps:get(dh_ratchet_step, SessionInfo, 0),
+    CurrentSend = maps:get(send_msg_number, SessionInfo, 0),
+    CurrentRecv = maps:get(recv_msg_number, SessionInfo, 0),
+    PrevChain = maps:get(prev_recv_chain_length, SessionInfo, 0),
+    SkippedKeys = maps:get(skipped_keys_count, SessionInfo, 0),
+    
+    StatusLine = lists:flatten(io_lib:format(
+        "  ~s: Step ~B, Chain[~B init, ~B resp], Prev[~B msgs], Skipped[~B keys]",
+        [Peer, DHStep, CurrentSend, CurrentRecv, PrevChain, SkippedKeys]
+    )),
+    cryptic_shell:print_info(StatusLine).
+
+%% @doc Convert binary to list, or pass through if already a list
+%% Handles both binary and list representations gracefully
+-spec b2l(binary() | list()) -> list().
+b2l(B) when is_binary(B) -> binary_to_list(B);
+b2l(L) when is_list(L) -> L;
+b2l(_) -> "unknown".
+
+%% @doc Format uptime from microseconds to human-readable string
+format_uptime(Microseconds) ->
+    Seconds = Microseconds div 1000000,
+    Minutes = Seconds div 60,
+    Hours = Minutes div 60,
+    Days = Hours div 24,
+    
+    RemainderHours = Hours rem 24,
+    RemainderMinutes = Minutes rem 60,
+    RemainderSeconds = Seconds rem 60,
+    
+    if
+        Days > 0 ->
+            lists:flatten(io_lib:format("~Bd ~Bh ~Bm ~Bs", 
+                [Days, RemainderHours, RemainderMinutes, RemainderSeconds]));
+        Hours > 0 ->
+            lists:flatten(io_lib:format("~Bh ~Bm ~Bs", 
+                [Hours, RemainderMinutes, RemainderSeconds]));
+        Minutes > 0 ->
+            lists:flatten(io_lib:format("~Bm ~Bs", 
+                [Minutes, RemainderSeconds]));
+        true ->
+            lists:flatten(io_lib:format("~Bs", [Seconds]))
     end.
 
 %% @doc Send message to another user

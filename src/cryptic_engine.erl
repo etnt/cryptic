@@ -433,9 +433,26 @@ handle_call({terminate_session, _PeerUsername}, _From, State) ->
     % TODO: Implement session termination
     {reply, {error, not_implemented}, State};
 handle_call(get_engine_status, _From, State) ->
+    %% Gather ratchet info for each active session
+    Sessions = State#cryptic_engine_state.sessions,
+    SessionInfoList = maps:fold(
+        fun(PeerUsername, RatchetPid, Acc) ->
+            case cryptic_ratchet_engine:get_state_info(RatchetPid) of
+                StateInfo when is_map(StateInfo) ->
+                    SessionInfo = StateInfo#{peer_username => PeerUsername},
+                    [SessionInfo | Acc];
+                _ ->
+                    Acc
+            end
+        end,
+        [],
+        Sessions
+    ),
+    
     Status = #{
         username => State#cryptic_engine_state.username,
-        active_sessions => maps:size(State#cryptic_engine_state.sessions),
+        active_sessions => maps:size(Sessions),
+        session_details => SessionInfoList,
         message_count => State#cryptic_engine_state.message_count,
         error_count => State#cryptic_engine_state.error_count,
         uptime => timer:now_diff(
@@ -1461,12 +1478,16 @@ cleanup_pending_messages_for_user(Username, State) ->
 handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
     is_list(FromUsername)
 ->
+    % Normalize username to binary for consistent session key format
+    % (outgoing messages use binary keys, incoming must match)
+    FromUsernameBin = list_to_binary(FromUsername),
+    
     % Check message type to determine how to decrypt
     case maps:get(<<"message_type">>, MessagePayload, undefined) of
         <<"x3dh">> ->
             % X3DH message - may be initializing a new session
             case
-                handle_x3dh_message_async(FromUsername, MessagePayload, State)
+                handle_x3dh_message_async(FromUsernameBin, MessagePayload, State)
             of
                 {ok, UpdatedState} ->
                     {ok, UpdatedState};
@@ -1477,7 +1498,7 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
             % Double Ratchet message - existing session
             case
                 handle_ratchet_message_async(
-                    FromUsername, MessagePayload, State
+                    FromUsernameBin, MessagePayload, State
                 )
             of
                 {ok, UpdatedState} ->
@@ -1504,7 +1525,7 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
 %% @private
 %% @doc Handle Double Ratchet message - decrypt using existing session
 handle_x3dh_message_async(FromUsername, MessagePayload, State) when
-    is_list(FromUsername)
+    is_binary(FromUsername)
 ->
     % Check if we already have a session with this user
     Sessions = State#cryptic_engine_state.sessions,
@@ -1792,17 +1813,19 @@ decrypt_ratchet_message(RatchetEnginePid, MessagePayload) ->
 %% @private
 %% @doc Deliver message to UI (async version)
 deliver_message_to_ui_async(FromUsername, DecryptedMessage, State) when
-    is_list(FromUsername)
+    is_binary(FromUsername)
 ->
     CallbackModule = State#cryptic_engine_state.callback_module,
     Context = State#cryptic_engine_state.callback_context,
     Timestamp = erlang:timestamp(),
+    % Convert binary username to list for UI display
+    FromUsernameStr = binary_to_list(FromUsername),
     ?dbg("Delivering message from ~s to UI: ~p~n", [
-        FromUsername, DecryptedMessage
+        FromUsernameStr, DecryptedMessage
     ]),
     try
         CallbackModule:deliver_message(
-            FromUsername, DecryptedMessage, Timestamp, Context
+            FromUsernameStr, DecryptedMessage, Timestamp, Context
         )
     of
         {ok, UpdatedContext} ->

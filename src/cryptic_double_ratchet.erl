@@ -26,6 +26,44 @@
 %%% Each chain advances independently, with periodic DH ratchet steps
 %%% that inject fresh entropy and provide break-in recovery.
 %%%
+%%% == DH Ratchet Step Counter Behavior ==
+%%%
+%%% The `dh_ratchet_step' counter tracks the number of DH ratchet operations
+%%% performed, NOT the number of individual messages. Understanding this is
+%%% critical for debugging and monitoring:
+%%%
+%%% <strong>Key Insight:</strong> Direction changes trigger TWO DH ratchet operations:
+%%% <ol>
+%%%   <li><strong>On Receive (with new DH key):</strong> Increments step counter when
+%%%       receiving a message with a NEW DH public key from peer. This updates
+%%%       the receiving chain to decrypt incoming messages.</li>
+%%%   <li><strong>On First Send (after receiving):</strong> Increments step counter when
+%%%       sending the FIRST message after receiving. This generates a fresh
+%%%       ephemeral DH keypair and updates the sending chain.</li>
+%%% </ol>
+%%%
+%%% <strong>Example Scenario:</strong>
+%%% ```
+%%% Alice at Step 4:
+%%%   1. Receives message from Bob with new DH key → Step 4 → Step 5 (decrypt)
+%%%   2. Sends reply to Bob with her new DH key   → Step 5 → Step 6 (encrypt)
+%%% Result: Step 4 → Step 6 after one receive + one send
+%%% '''
+%%%
+%%% This double increment is CORRECT Double Ratchet protocol behavior:
+%%% <ul>
+%%%   <li>Ensures both sending AND receiving chains use fresh DH entropy</li>
+%%%   <li>Provides forward secrecy in BOTH directions</li>
+%%%   <li>Enables break-in recovery on bidirectional communication</li>
+%%% </ul>
+%%%
+%%% <strong>Implementation Details:</strong>
+%%% <ul>
+%%%   <li>`perform_dh_ratchet_step/2' - Called by decrypt_message when new DH key detected</li>
+%%%   <li>`perform_dh_ratchet_on_send/1' - Called by encrypt_message on direction change</li>
+%%%   <li>`should_perform_dh_ratchet_on_send/1' - Guards against multiple increments</li>
+%%% </ul>
+%%%
 %%% == Usage Pattern ==
 %%%
 %%% 1. After X3DH key agreement, initialize sender and receiver states
