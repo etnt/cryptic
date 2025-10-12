@@ -1060,52 +1060,7 @@ sender_init({call, From}, {encrypt_request, Plaintext}, StateData) ->
 sender_init({call, From}, {decrypt_request, Message}, StateData) ->
     % With X3DH ephemeral key as initial DH key, Bob can reply immediately
     % Alice transitions sender_init → bidirectional when receiving Bob's first message
-    RatchetState = StateData#engine_state.ratchet_state,
-    try
-        case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
-            {ok, Plaintext, NewRatchetState} ->
-                NewStateData = StateData#engine_state{
-                    ratchet_state = NewRatchetState,
-                    message_count = StateData#engine_state.message_count + 1
-                },
-
-                TransitionData = record_transition(
-                    sender_init, bidirectional, {decrypt_request}, NewStateData
-                ),
-
-                % Notify callbacks - Alice can now both send and receive
-                notify_state_change(
-                    sender_init, bidirectional, TransitionData
-                ),
-                notify_message_event(
-                    decrypt_success,
-                    #{
-                        plaintext_size => byte_size(Plaintext),
-                        plaintext => Plaintext
-                    },
-                    TransitionData
-                ),
-
-                Actions = [{reply, From, {ok, Plaintext}}],
-                {next_state, bidirectional, TransitionData, Actions};
-            {error, Reason} ->
-                notify_message_event(
-                    decrypt_error,
-                    #{reason => Reason},
-                    StateData
-                ),
-                {keep_state, record_error(Reason, StateData), [
-                    {reply, From, {error, Reason}}
-                ]}
-        end
-    catch
-        Class:Error:Stacktrace ->
-            ErrorReason = {Class, Error, Stacktrace},
-            notify_error(crypto_error, ErrorReason, StateData),
-            {keep_state, record_error(ErrorReason, StateData), [
-                {reply, From, {error, {exception, Class, Error}}}
-            ]}
-    end;
+    do_decrypt_message(From, Message, StateData, sender_init, bidirectional);
 sender_init(EventType, Event, StateData) ->
     handle_common_event(EventType, Event, sender_init, StateData).
 
@@ -1405,57 +1360,7 @@ create_debug_info(StateData) ->
 receiver_init(enter, _OldState, StateData) ->
     {keep_state, record_state_enter(receiver_init, StateData)};
 receiver_init({call, From}, {decrypt_request, Message}, StateData) ->
-    RatchetState = StateData#engine_state.ratchet_state,
-    try
-        case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
-            {ok, Plaintext, NewRatchetState} ->
-                NewStateData = StateData#engine_state{
-                    ratchet_state = NewRatchetState,
-                    message_count = StateData#engine_state.message_count + 1
-                },
-
-                TransitionData = record_transition(
-                    receiver_init,
-                    receiving_active,
-                    {decrypt_request},
-                    NewStateData
-                ),
-
-                % Notify callbacks
-                notify_state_change(
-                    receiver_init, receiving_active, TransitionData
-                ),
-                notify_message_event(
-                    decrypt_success,
-                    #{
-                        plaintext_size => byte_size(Plaintext),
-                        plaintext => Plaintext
-                    },
-                    TransitionData
-                ),
-
-                Actions = [{reply, From, {ok, Plaintext}}],
-                {next_state, receiving_active, TransitionData, Actions};
-            {error, Reason} ->
-                notify_message_event(
-                    decrypt_error,
-                    #{
-                        reason => Reason
-                    },
-                    StateData
-                ),
-                {keep_state, record_error(Reason, StateData), [
-                    {reply, From, {error, Reason}}
-                ]}
-        end
-    catch
-        Class:Error:Stacktrace ->
-            ErrorReason = {Class, Error, Stacktrace},
-            notify_error(crypto_error, ErrorReason, StateData),
-            {keep_state, record_error(ErrorReason, StateData), [
-                {reply, From, {error, {exception, Class, Error}}}
-            ]}
-    end;
+    do_decrypt_message(From, Message, StateData, receiver_init, receiving_active);
 receiver_init({call, From}, {encrypt_request, _Plaintext}, StateData) ->
     % Receiver needs to activate sending chain first
     notify_error(state_error, must_receive_first, StateData),
@@ -1540,57 +1445,7 @@ sending_active({call, From}, {encrypt_request, Plaintext}, StateData) ->
             ]}
     end;
 sending_active({call, From}, {decrypt_request, Message}, StateData) ->
-    RatchetState = StateData#engine_state.ratchet_state,
-    try
-        case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
-            {ok, Plaintext, NewRatchetState} ->
-                NewStateData = StateData#engine_state{
-                    ratchet_state = NewRatchetState,
-                    message_count = StateData#engine_state.message_count + 1
-                },
-
-                TransitionData = record_transition(
-                    sending_active,
-                    bidirectional,
-                    {decrypt_request},
-                    NewStateData
-                ),
-
-                % Notify callbacks - now bidirectional!
-                notify_state_change(
-                    sending_active, bidirectional, TransitionData
-                ),
-                notify_message_event(
-                    decrypt_success,
-                    #{
-                        plaintext_size => byte_size(Plaintext),
-                        plaintext => Plaintext
-                    },
-                    TransitionData
-                ),
-
-                Actions = [{reply, From, {ok, Plaintext}}],
-                {next_state, bidirectional, TransitionData, Actions};
-            {error, Reason} ->
-                notify_message_event(
-                    decrypt_error,
-                    #{
-                        reason => Reason
-                    },
-                    StateData
-                ),
-                {keep_state, record_error(Reason, StateData), [
-                    {reply, From, {error, Reason}}
-                ]}
-        end
-    catch
-        Class:Error:Stacktrace ->
-            ErrorReason = {Class, Error, Stacktrace},
-            notify_error(crypto_error, ErrorReason, StateData),
-            {keep_state, record_error(ErrorReason, StateData), [
-                {reply, From, {error, {exception, Class, Error}}}
-            ]}
-    end;
+    do_decrypt_message(From, Message, StateData, sending_active, bidirectional);
 sending_active(EventType, Event, StateData) ->
     handle_common_event(EventType, Event, sending_active, StateData).
 
@@ -1598,48 +1453,7 @@ sending_active(EventType, Event, StateData) ->
 receiving_active(enter, _OldState, StateData) ->
     {keep_state, record_state_enter(receiving_active, StateData)};
 receiving_active({call, From}, {decrypt_request, Message}, StateData) ->
-    RatchetState = StateData#engine_state.ratchet_state,
-    try
-        case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
-            {ok, Plaintext, NewRatchetState} ->
-                NewStateData = StateData#engine_state{
-                    ratchet_state = NewRatchetState,
-                    message_count = StateData#engine_state.message_count + 1
-                },
-
-                % Notify callbacks but stay in receiving_active state
-                notify_message_event(
-                    decrypt_success,
-                    #{
-                        plaintext_size => byte_size(Plaintext),
-                        plaintext => Plaintext
-                    },
-                    NewStateData
-                ),
-
-                Actions = [{reply, From, {ok, Plaintext}}],
-                {keep_state, record_event({decrypt_request}, ok, NewStateData),
-                    Actions};
-            {error, Reason} ->
-                notify_message_event(
-                    decrypt_error,
-                    #{
-                        reason => Reason
-                    },
-                    StateData
-                ),
-                {keep_state, record_error(Reason, StateData), [
-                    {reply, From, {error, Reason}}
-                ]}
-        end
-    catch
-        Class:Error:Stacktrace ->
-            ErrorReason = {Class, Error, Stacktrace},
-            notify_error(crypto_error, ErrorReason, StateData),
-            {keep_state, record_error(ErrorReason, StateData), [
-                {reply, From, {error, {exception, Class, Error}}}
-            ]}
-    end;
+    do_decrypt_message(From, Message, StateData);
 receiving_active({call, From}, {encrypt_request, Plaintext}, StateData) ->
     % Need to activate sending chain (triggers DH ratchet)
     RatchetState = StateData#engine_state.ratchet_state,
@@ -1792,6 +1606,28 @@ bidirectional({call, From}, {encrypt_request, Plaintext}, StateData) ->
             ]}
     end;
 bidirectional({call, From}, {decrypt_request, Message}, StateData) ->
+    do_decrypt_message(From, Message, StateData);
+bidirectional(EventType, Event, StateData) ->
+    handle_common_event(EventType, Event, bidirectional, StateData).
+
+%% @doc Error state - terminal state for unrecoverable errors
+error_state(enter, _OldState, StateData) ->
+    notify_error(state_error, entered_error_state, StateData),
+    {keep_state, record_state_enter(error_state, StateData)};
+error_state({call, From}, _Event, StateData) ->
+    notify_error(state_error, engine_in_error_state, StateData),
+    {keep_state, StateData, [{reply, From, {error, engine_in_error_state}}]};
+error_state(EventType, Event, StateData) ->
+    handle_common_event(EventType, Event, error_state, StateData).
+
+
+%%% ------------------------------------------------------------------
+%%% H E L P E R S
+%%% ------------------------------------------------------------------
+
+%%% @private
+%%% Decrypt message and keep the same State
+do_decrypt_message(From, Message, StateData) ->
     RatchetState = StateData#engine_state.ratchet_state,
     try
         case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
@@ -1832,16 +1668,54 @@ bidirectional({call, From}, {decrypt_request, Message}, StateData) ->
             {keep_state, record_error(ErrorReason, StateData), [
                 {reply, From, {error, {exception, Class, Error}}}
             ]}
-    end;
-bidirectional(EventType, Event, StateData) ->
-    handle_common_event(EventType, Event, bidirectional, StateData).
+    end.
 
-%% @doc Error state - terminal state for unrecoverable errors
-error_state(enter, _OldState, StateData) ->
-    notify_error(state_error, entered_error_state, StateData),
-    {keep_state, record_state_enter(error_state, StateData)};
-error_state({call, From}, _Event, StateData) ->
-    notify_error(state_error, engine_in_error_state, StateData),
-    {keep_state, StateData, [{reply, From, {error, engine_in_error_state}}]};
-error_state(EventType, Event, StateData) ->
-    handle_common_event(EventType, Event, error_state, StateData).
+%%% @private
+%%% Decrypt message and change the State.
+do_decrypt_message(From, Message, StateData, CurState, NextState) ->
+    RatchetState = StateData#engine_state.ratchet_state,
+    try
+        case cryptic_double_ratchet:decrypt_message(Message, RatchetState) of
+            {ok, Plaintext, NewRatchetState} ->
+                NewStateData = StateData#engine_state{
+                    ratchet_state = NewRatchetState,
+                    message_count = StateData#engine_state.message_count + 1
+                },
+
+                TransitionData = record_transition(
+                    CurState, NextState, {decrypt_request}, NewStateData
+                ),
+
+                % Notify callbacks
+                notify_state_change(
+                    CurState, NextState, TransitionData
+                ),
+                notify_message_event(
+                    decrypt_success,
+                    #{
+                        plaintext_size => byte_size(Plaintext),
+                        plaintext => Plaintext
+                    },
+                    TransitionData
+                ),
+
+                Actions = [{reply, From, {ok, Plaintext}}],
+                {next_state, NextState, TransitionData, Actions};
+            {error, Reason} ->
+                notify_message_event(
+                    decrypt_error,
+                    #{reason => Reason},
+                    StateData
+                ),
+                {keep_state, record_error(Reason, StateData), [
+                    {reply, From, {error, Reason}}
+                ]}
+        end
+    catch
+        Class:Error:Stacktrace ->
+            ErrorReason = {Class, Error, Stacktrace},
+            notify_error(crypto_error, ErrorReason, StateData),
+            {keep_state, record_error(ErrorReason, StateData), [
+                {reply, From, {error, {exception, Class, Error}}}
+            ]}
+    end.
