@@ -252,7 +252,13 @@ setup_event_management(Config) ->
 -spec get_cert_config(Cfg :: map()) -> map().
 get_cert_config(Cfg) ->
     Username = binary_to_list(maps:get(username, Cfg)),
-    CrypticDir = cryptic_lib:get_cryptic_dir(Username),
+    ServerHost = case maps:get(server_host, Cfg) of
+        S when is_binary(S) -> binary_to_list(S);
+        S when is_list(S) -> S;
+        _ -> "localhost"
+    end,
+    ServerPort = maps:get(server_port, Cfg, 8443),
+    CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
     %% Create certificate configuration using environment variables
     CertFile =
         case os:getenv("CRYPTIC_CLIENT_CERT") of
@@ -273,7 +279,9 @@ get_cert_config(Cfg) ->
     Cfg#{
         cert_file => CertFile,
         key_file => KeyFile,
-        ca_file => CAFile
+        ca_file => CAFile,
+        server_host => ServerHost,
+        server_port => ServerPort
     }.
 
 %% @doc Main command loop with async message handling

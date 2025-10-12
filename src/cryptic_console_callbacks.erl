@@ -32,8 +32,10 @@
 load_identity_keys(Username, Context) when is_binary(Username) andalso
                                            is_map(Context) ->
    Passphrase = maps:get(passphrase, Context),
+   ServerHost = maps:get(server_host, Context, "localhost"),
+   ServerPort = maps:get(server_port, Context, 8443),
    maybe
-       ConfigDir = cryptic_lib:get_cryptic_dir(Username),
+       ConfigDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
        {ok, RawKeys} ?= cryptic_lib:initialize_client_keys(ConfigDir, Passphrase),
 
        % Transform the format to what cryptic_engine expects

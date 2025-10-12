@@ -197,7 +197,7 @@
     check_otpk_usage/2,
     cleanup_old_otpk/2,
     get_cryptic_dir/0,
-    get_cryptic_dir/1
+    get_cryptic_dir/3
 ]).
 
 -include("cryptic.hrl").
@@ -2309,9 +2309,13 @@ get_cryptic_dir() ->
             Dir
     end.
 
-%% @doc Get user-specific directory path under CRYPTIC_DIR.
--spec get_cryptic_dir(string()) -> string().
-get_cryptic_dir(Username) when is_binary(Username) ->
-    get_cryptic_dir(binary_to_list(Username));
-get_cryptic_dir(Username) when is_list(Username) ->
-    filename:join([get_cryptic_dir(), Username]).
+%% @doc Get user-specific directory path under CRYPTIC_DIR for a specific server.
+%% Creates path: $HOME/.cryptic/<username>/<server>_<port>
+-spec get_cryptic_dir(string() | binary(), string() | binary(), non_neg_integer()) -> string().
+get_cryptic_dir(Username, Server, Port) when is_binary(Username) ->
+    get_cryptic_dir(binary_to_list(Username), Server, Port);
+get_cryptic_dir(Username, Server, Port) when is_binary(Server) ->
+    get_cryptic_dir(Username, binary_to_list(Server), Port);
+get_cryptic_dir(Username, Server, Port) when is_list(Username), is_list(Server), is_integer(Port) ->
+    ServerDir = Server ++ "_" ++ integer_to_list(Port),
+    filename:join([get_cryptic_dir(), Username, ServerDir]).
