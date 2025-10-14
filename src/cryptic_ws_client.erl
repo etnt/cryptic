@@ -260,7 +260,9 @@ init({UIPid, Username, ServerHost, Config}) ->
                 ui_pid = UIPid,
                 username = Username,
                 server_host = ServerHost,
-                server_port = maps:get(port, Config, 8443),
+                server_port = maps:get(
+                    server_port, Config, maps:get(port, Config, 8443)
+                ),
                 cert_file = Cert,
                 key_file = Key,
                 ca_file = CA

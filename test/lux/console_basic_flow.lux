@@ -5,6 +5,7 @@
 [config shell_wrapper=../../_build/default/lib/lux/priv/bin/runpty]
 #[config shell_prompt_regexp=^SH-PROMPT:]
 
+[global PORT=9997]
 [global alice_passphrase=qwe123]
 [global bob_passphrase=qwe123]
 
@@ -12,10 +13,25 @@
     [progress \n$message\n]
 [endmacro]
 
+[macro ok]
+    [my tmp=$LUX_FAIL_PATTERN]
+    ?SH-PROMPT
+    -==[1-9][0-9]*==
+    !echo ==$$?==
+    ?==0==
+    ?SH-PROMPT
+    -$tmp
+[endmacro]
+
+[shell prepare]
+    !rm -f $HOME/.cryptic/*/localhost_${PORT}/keys.encrypted
+    [invoke ok]
+    !rm -f $HOME/.cryptic/*/localhost_${PORT}/sessions/*
+    [invoke ok]
 
 [shell server]
     [invoke log "Start the Cryptic server..."]
-    !env CRYPTIC_DEBUG=true ../../scripts/start-server.sh
+    !env CRYPTIC_DEBUG=true ../../scripts/start-server.sh localhost ${PORT}
     ?\(server@localhost\)[0-9]+\>
 
 [shell server-log]
@@ -23,7 +39,7 @@
 
 [shell alice]
     [invoke log "Start Alice's console..."]
-    !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u alice
+    !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u alice -p ${PORT}
     ?Enter passphrase
 
 [shell alice-log]
@@ -46,7 +62,7 @@
 
 [shell bob]
     [invoke log "Start Bob's console..."]
-    !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u bob
+    !env CRYPTIC_DEBUG=true ../../scripts/cryptic_console -u bob -p ${PORT}
     ?Enter passphrase
 
 [shell bob-log]
@@ -93,18 +109,24 @@
 
 [shell alice]
     [invoke log "Quit Alice"]
-    !quit
-    ?SH-PROMPT:
+    ~$_CTRL_C
+    ~$_CTRL_C
+    [invoke ok]
 
 [shell server-log]
     ?.*User alice disconnected and removed from connection table
 
 [shell bob]
     [invoke log "Quit Bob"]
-    !quit
-    ?SH-PROMPT:
+    ~$_CTRL_C
+    ~$_CTRL_C
+    [invoke ok]
 
 [shell server-log]
     ?.*User bob disconnected and removed from connection table
+
+[shell server]
+    !init:stop().
+    [invoke ok]
 
 [cleanup]

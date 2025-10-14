@@ -140,7 +140,14 @@ start_websocket_mtls(Config) ->
     application:ensure_all_started(cowboy),
     application:ensure_all_started(ssl),
 
-    Port = maps:get(port, Config, 8443),
+    %% Get port from environment variable or config or default
+    Port =
+        case os:getenv("CRYPTIC_SERVER_PORT") of
+            false ->
+                maps:get(port, Config, 8443);
+            PortStr ->
+                list_to_integer(PortStr)
+        end,
 
     %% Get certificate paths from environment variables or defaults
     PrivDir = code:priv_dir(cryptic),
