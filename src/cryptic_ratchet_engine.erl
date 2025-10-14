@@ -153,6 +153,8 @@
     set_remote_dh_key/2,
     get_state_info/1,
     get_debug_info/1,
+    get_ratchet_state/1,
+    set_ratchet_state/2,
     set_callback_handler/2,
     subscribe_events/2,
     unsubscribe_events/2,
@@ -732,6 +734,59 @@ get_state_info(EngineRef) ->
 get_debug_info(EngineRef) ->
     gen_statem:call(EngineRef, get_debug_info).
 
+%% @doc Get the underlying ratchet state for persistence
+%%%
+%%% Extracts the internal Double Ratchet state from the engine for external
+%%% persistence. The returned state can be stored (encrypted) and later
+%%% restored using `set_ratchet_state/2'.
+%%%
+%%% This enables session persistence across restarts by allowing the
+%%% callback layer to handle saving/loading of session state.
+%%%
+%%% @param EngineRef PID of the engine process
+%%% @returns `{ok, RatchetState}' or `{error, Reason}'
+%%%
+%%% == Use Cases ==
+%%%
+%%% * Save session state to encrypted storage after each message
+%%% * Implement custom persistence strategies
+%%% * Backup and restore ratchet sessions
+%%%
+%%% == Example ==
+%%%
+%%% <pre>
+%%% {ok, RatchetState} = cryptic_ratchet_engine:get_ratchet_state(Engine),
+%%% ok = save_to_disk(PeerName, RatchetState, Passphrase).
+%%% </pre>
+-spec get_ratchet_state(engine_ref()) -> {ok, term()} | {error, term()}.
+get_ratchet_state(EngineRef) ->
+    gen_statem:call(EngineRef, get_ratchet_state).
+
+%% @doc Set the ratchet state from persistent storage
+%%%
+%%% Restores a previously saved Double Ratchet state into the engine.
+%%% This allows resuming an existing session after a restart.
+%%%
+%%% @param EngineRef PID of the engine process
+%%% @param RatchetState Previously saved ratchet state from `get_ratchet_state/1'
+%%% @returns `ok' or `{error, Reason}'
+%%%
+%%% == Important ==
+%%%
+%%% * Engine must be in `uninitialized' state when calling this function
+%%% * The ratchet state must be compatible with the engine's protocol version
+%%% * This bypasses normal initialization (init_as_sender/init_as_receiver)
+%%%
+%%% == Example ==
+%%%
+%%% <pre>
+%%% {ok, RatchetState} = load_from_disk(PeerName, Passphrase),
+%%% ok = cryptic_ratchet_engine:set_ratchet_state(Engine, RatchetState).
+%%% </pre>
+-spec set_ratchet_state(engine_ref(), term()) -> ok | {error, term()}.
+set_ratchet_state(EngineRef, RatchetState) ->
+    gen_statem:call(EngineRef, {set_ratchet_state, RatchetState}).
+
 %% @doc Set or change the callback handler module
 %%%
 %%% Changes the callback module used for event notifications. All future
@@ -1221,6 +1276,36 @@ handle_common_event({call, From}, get_debug_info, _StateName, StateData) ->
     DebugInfo = create_debug_info(StateData),
     notify_debug_event(state_info, DebugInfo, StateData),
     {keep_state, StateData, [{reply, From, DebugInfo}]};
+handle_common_event({call, From}, get_ratchet_state, _StateName, StateData) ->
+    case StateData#engine_state.ratchet_state of
+        undefined ->
+            {keep_state, StateData, [{reply, From, {error, not_initialized}}]};
+        RatchetState ->
+            {keep_state, StateData, [{reply, From, {ok, RatchetState}}]}
+    end;
+handle_common_event({call, From}, {set_ratchet_state, RatchetState}, StateName, StateData) ->
+    % Only allow setting ratchet state in uninitialized state
+    case StateName of
+        uninitialized ->
+            NewStateData = StateData#engine_state{
+                ratchet_state = RatchetState
+            },
+            % Determine the state to transition to based on ratchet state info
+            case cryptic_double_ratchet:get_state_info(RatchetState) of
+                StateInfo when is_map(StateInfo) ->
+                    % Transition to bidirectional state (most common for restored sessions)
+                    TransitionData = record_transition(
+                        uninitialized, bidirectional, {set_ratchet_state}, NewStateData
+                    ),
+                    notify_state_change(uninitialized, bidirectional, TransitionData),
+                    {next_state, bidirectional, TransitionData, [{reply, From, ok}]};
+                _ ->
+                    % If we can't get state info, stay in uninitialized
+                    {keep_state, StateData, [{reply, From, {error, invalid_ratchet_state}}]}
+            end;
+        _ ->
+            {keep_state, StateData, [{reply, From, {error, must_be_uninitialized}}]}
+    end;
 handle_common_event(
     {call, From}, {set_callback_handler, CallbackModule}, _StateName, StateData
 ) ->

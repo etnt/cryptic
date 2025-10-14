@@ -76,27 +76,71 @@ save_identity_keys(Username, _IdentityKeys, Context) when
 load_session_state(Username, PeerUsername, Context) when
     is_binary(Username), is_binary(PeerUsername), is_map(Context)
 ->
-    {ok, UpdatedContext} = log_message(
-        debug,
-        {"Loading session state ~s <-> ~s (not found)", [
-            Username, PeerUsername
-        ]},
-        Context
-    ),
-    {error, not_found, UpdatedContext}.
+    Passphrase = maps:get(passphrase, Context),
+    ServerHost = maps:get(server_host, Context, "localhost"),
+    ServerPort = maps:get(server_port, Context, 8443),
+    
+    % Build sessions directory path
+    ConfigDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
+    SessionsDir = filename:join(ConfigDir, "sessions"),
+    
+    % Try to load session for this peer
+    PeerUsernameStr = binary_to_list(PeerUsername),
+    case cryptic_lib:load_ratchet_session(PeerUsernameStr, Passphrase, SessionsDir) of
+        {ok, SessionState} ->
+            {ok, UpdatedContext} = log_message(
+                info,
+                {"Loaded session state for ~s <-> ~s", [
+                    Username, PeerUsername
+                ]},
+                Context
+            ),
+            {ok, SessionState, UpdatedContext};
+        {error, _Reason} ->
+            {ok, UpdatedContext} = log_message(
+                debug,
+                {"No existing session state for ~s <-> ~s", [
+                    Username, PeerUsername
+                ]},
+                Context
+            ),
+            {error, not_found, UpdatedContext}
+    end.
 
 %% @doc Save session state for a peer
-save_session_state(Username, PeerUsername, _SessionState, Context) when
+save_session_state(Username, PeerUsername, SessionState, Context) when
     is_binary(Username), is_binary(PeerUsername), is_map(Context)
 ->
-    {ok, UpdatedContext} = log_message(
-        debug,
-        {"Saving session state ~s <-> ~s (no-op)", [
-            Username, PeerUsername
-        ]},
-        Context
-    ),
-    {ok, UpdatedContext}.
+    Passphrase = maps:get(passphrase, Context),
+    ServerHost = maps:get(server_host, Context, "localhost"),
+    ServerPort = maps:get(server_port, Context, 8443),
+
+    % Build sessions directory path
+    ConfigDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
+    SessionsDir = filename:join(ConfigDir, "sessions"),
+
+    % Save session for this peer
+    PeerUsernameStr = binary_to_list(PeerUsername),
+    case cryptic_lib:save_ratchet_session(PeerUsernameStr, SessionState, Passphrase, SessionsDir) of
+        ok ->
+            {ok, UpdatedContext} = log_message(
+                debug,
+                {"Saved session state for ~s <-> ~s", [
+                    Username, PeerUsername
+                ]},
+                Context
+            ),
+            {ok, UpdatedContext};
+        {error, Reason} ->
+            {ok, UpdatedContext} = log_message(
+                error,
+                {"Failed to save session state for ~s <-> ~s: ~p", [
+                    Username, PeerUsername, Reason
+                ]},
+                Context
+            ),
+            {error, Reason, UpdatedContext}
+    end.
 
 %%%===================================================================
 %%% Network Operations

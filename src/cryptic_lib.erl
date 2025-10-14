@@ -158,8 +158,6 @@
     derive_key_from_passphrase/2,
     encrypt_keys/2,
     decrypt_keys/2,
-    save_encrypted_keys/3,
-    load_encrypted_keys/2,
     initialize_client_keys/2,
     %% Ratchet session persistence functions
     save_ratchet_session/4,
@@ -604,7 +602,7 @@ initialize_client_keys(ConfigDir, Passphrase) ->
         false ->
             %% Generate new keys
             Keys = generate_client_keys(),
-            case save_encrypted_keys(Keys, Passphrase, ConfigDir) of
+            case save_encrypted_keys(Keys, Passphrase, KeysFile) of
                 ok -> {ok, Keys};
                 {error, Reason} -> {error, Reason}
             end
@@ -1016,14 +1014,15 @@ decrypt_keys(EncryptedData, Passphrase) when is_binary(Passphrase) ->
             {error, invalid_encrypted_data}
     end.
 
-%% @doc Save encrypted keys to file.
+%% @private Save encrypted keys to file.
 -spec save_encrypted_keys(#{}, string() | binary(), string()) ->
     ok | {error, term()}.
-save_encrypted_keys(Keys, Passphrase, ConfigDir) ->
-    KeysFile = filename:join(ConfigDir, identity_keys_filename()),
+save_encrypted_keys(Keys, Passphrase, KeysFile) ->
     %% Encrypt keys
     {EncryptedData, _Salt} = encrypt_keys(Keys, Passphrase),
+    ?dbg("save_encrypted_keys: KeysFile ~p~n", [KeysFile]),
 
+    %% Ensure directory exists using ensure_dir with the file path
     %% Write to file
     case file:write_file(KeysFile, EncryptedData) of
         ok ->
@@ -1034,7 +1033,7 @@ save_encrypted_keys(Keys, Passphrase, ConfigDir) ->
             {error, {file_write_error, Reason}}
     end.
 
-%% @doc Load and decrypt keys from file.
+%% @private Load and decrypt keys from file.
 -spec load_encrypted_keys(string(), string() | binary()) ->
     {ok, #{}} | {error, term()}.
 load_encrypted_keys(KeysFile, Passphrase) ->
@@ -1063,12 +1062,13 @@ identity_keys_filename() ->
 -spec save_ratchet_session(string(), #{}, string() | binary(), string()) ->
     ok | {error, term()}.
 save_ratchet_session(Username, SessionData, Passphrase, BaseDir) ->
-    %% Ensure base directory exists
-    case filelib:ensure_dir(BaseDir ++ "/") of
-        ok ->
-            %% Create session filename
-            SessionFile = filename:join(BaseDir, Username ++ ".session"),
+    %% Create session filename first
+    SessionFile = filename:join(BaseDir, Username ++ ".session"),
 
+    %% Ensure directory exists using ensure_dir with the file path
+    %% (ensure_dir creates the parent directory of the given path)
+    case filelib:ensure_dir(SessionFile) of
+        ok ->
             %% Use existing encryption infrastructure
             save_encrypted_keys(SessionData, Passphrase, SessionFile);
         {error, Reason} ->
@@ -2310,7 +2310,7 @@ get_cryptic_dir() ->
     end.
 
 %% @doc Get user-specific directory path under CRYPTIC_DIR for a specific server.
-%% Creates path: $HOME/.cryptic/<username>/<server>_<port>
+%% Creates path: `$HOME/.cryptic/<username>/<server>_<port>'
 -spec get_cryptic_dir(string() | binary(), string() | binary(), non_neg_integer()) -> string().
 get_cryptic_dir(Username, Server, Port) when is_binary(Username) ->
     get_cryptic_dir(binary_to_list(Username), Server, Port);
