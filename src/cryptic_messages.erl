@@ -261,6 +261,7 @@
     % Client to Server - User & Message Management
     list_users/0,
     get_messages/0,
+    request_pending_messages/0,
 
     % Server to Client - Responses
     welcome/1,
@@ -293,6 +294,7 @@
     | ratchet
     | list_users
     | get_messages
+    | request_pending_messages
     | welcome
     | success
     | error
@@ -519,6 +521,18 @@ list_users() ->
 -spec get_messages() -> validation_result().
 get_messages() ->
     {ok, #{<<"type">> => <<"get_messages">>}}.
+
+%% @doc Construct the `request_pending_messages' message
+%%
+%% Client request to receive pending messages when cryptic_engine is ready.
+%% Unlike get_messages which returns messages as a response, this triggers
+%% the server to deliver pending messages as individual message events,
+%% avoiding race conditions during client initialization.
+%%
+%% @returns `{ok, Message}'
+-spec request_pending_messages() -> validation_result().
+request_pending_messages() ->
+    {ok, #{<<"type">> => <<"request_pending_messages">>}}.
 
 %%% ============================================================================
 %%% Server to Client Messages - Responses

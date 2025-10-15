@@ -154,8 +154,6 @@ main(InitCfg) ->
     },
     {ok, EnginePid} = cryptic_engine:start_link(EngineCfg),
 
-    ok = cryptic_ws_client:set_engine_pid(WsClientPid, EnginePid),
-
     %% Create named ETS table for input buffer preservation
     %% Use named table so cryptic_shell can access it directly
     InputBufferTable = ets:new(cryptic_console_input_buffer, [

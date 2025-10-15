@@ -679,6 +679,56 @@ handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
         messages => Messages
     },
     {reply, Response};
+%% @doc Handle request for pending messages
+%%
+%% This command is sent by the client when the cryptic_engine is fully
+%% initialized and ready to receive messages. It fetches all pending
+%% messages and delivers them via the WebSocket connection.
+%%
+%% Unlike get_messages which returns a JSON response, this handler
+%% directly sends message events to ensure they are processed the same
+%% way as real-time messages.
+handle_command(
+    #{<<"type">> := <<"request_pending_messages">>}, Username, _State
+) ->
+    %% Fetch pending messages
+    PendingMessages = cryptic_lib:get_messages(Username),
+    case PendingMessages of
+        [] ->
+            %% No pending messages - just acknowledge
+            ?msg_out("No pending messages for ~s", [Username]),
+            Response = #{
+                type => <<"pending_messages_delivered">>,
+                count => 0
+            },
+            {reply, Response};
+        Messages ->
+            ?dbg("Delivering pending messages: ~p~n", [Messages]),
+            %% Deliver each pending message as a message event
+            %% This ensures they go through the same processing as real-time messages
+            lists:foreach(
+                fun(MessageBlob) ->
+                    %% Extract sender from message blob
+                    From = maps:get(<<"from">>, MessageBlob),
+
+                    %% Send to self - this will be processed by handle_info
+                    self() ! {message, From, MessageBlob}
+                end,
+                Messages
+            ),
+
+            %% Log delivery
+            ?msg_out("Queued ~p pending messages for delivery to ~s", [
+                length(Messages), Username
+            ]),
+
+            %% Acknowledge that messages are being delivered
+            Response = #{
+                type => <<"pending_messages_delivered">>,
+                count => length(Messages)
+            },
+            {reply, Response}
+    end;
 handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
     Users = cryptic_lib:list_users(),
     Response = #{
@@ -858,15 +908,15 @@ extract_cn_from_rdn([
 extract_cn_from_rdn([_ | Rest]) ->
     extract_cn_from_rdn(Rest).
 
-%% @doc Register user connection and deliver pending messages
+%% @doc Register user connection
 %%
-%% This function:
-%% 1. Registers the user's WebSocket connection in the ETS table
-%% 2. Automatically fetches and delivers any pending messages stored for the user
-%% 3. Cleans up delivered messages from storage
+%% Called when a user successfully establishes a WebSocket connection
+%% to register their connection PID in the user_connections ETS table.
 %%
-%% This ensures users receive messages that arrived while they were offline
-%% as soon as they connect, without requiring explicit action.
+%% Pending messages are NOT sent here - the client must explicitly
+%% request them when ready via request_pending_messages command.
+%% This avoids race conditions where messages are sent before the
+%% client's cryptic_engine is fully initialized.
 %%
 %% @param Username The authenticated username
 %% @param Pid The WebSocket handler process PID
@@ -874,31 +924,10 @@ extract_cn_from_rdn([_ | Rest]) ->
 register_user_connection(Username, Pid) ->
     %% Register the connection
     ets:insert(user_connections, {Username, Pid}),
-
-    %% Fetch and deliver any pending messages
-    PendingMessages = cryptic_lib:get_messages(Username),
-    case PendingMessages of
-        [] ->
-            %% No pending messages
-            ok;
-        Messages ->
-            %% Deliver each pending message
-            lists:foreach(
-                fun(MessageBlob) ->
-                    %% Extract sender from message blob
-                    From = maps:get(from, MessageBlob, "system"),
-
-                    %% Send the stored message to the user
-                    Pid ! {message, From, MessageBlob}
-                end,
-                Messages
-            ),
-
-            %% Log delivery
-            ?msg_out("Delivered ~p pending messages to ~s", [
-                length(Messages), Username
-            ])
-    end,
+    ?msg_out(
+        "Registered connection for ~s (pending messages available on request)",
+        [Username]
+    ),
     ok.
 
 %% @doc Find user connection by username

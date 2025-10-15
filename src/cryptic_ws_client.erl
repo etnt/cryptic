@@ -541,7 +541,7 @@ connect_websocket(State) ->
 dispatch_to_engine(ValidatedMessage, State) ->
     case State#state.engine_pid of
         undefined ->
-            ?warning("No Engine PID set, cannot dispatch message: ~p", [
+            ?warning("No Engine PID set, cannot dispatch message: ~p~n", [
                 ValidatedMessage
             ]);
         EnginePid ->

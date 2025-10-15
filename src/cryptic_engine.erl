@@ -197,6 +197,7 @@
     handle_call/3,
     handle_cast/2,
     handle_info/2,
+    handle_continue/2,
     terminate/2,
     code_change/3
 ]).
@@ -214,6 +215,8 @@
 
 %% Records
 -record(cryptic_engine_state, {
+    % WebSocket client PID
+    ws_client_pid :: pid() | undefined,
     % Our username
     username :: binary(),
     % Long-term identity signing keypair (Ed25519)
@@ -353,6 +356,7 @@ init(Config) ->
     Username = maps:get(username, Config),
 
     InitialState = #cryptic_engine_state{
+        ws_client_pid = maps:get(ws_client_pid, Config),
         username = Username,
         sessions = #{},
         session_states = #{},
@@ -386,8 +390,8 @@ init(Config) ->
             %% Upload key bundles to server
             maybe
                 {ok, IdentityKeysState} ?= upload_identity_keys(StateWithKeys),
-                {ok, FinalState} ?= upload_prekey_bundle(IdentityKeysState),
-                {ok, FinalState}
+                {ok, PreKeyState} ?= upload_prekey_bundle(IdentityKeysState),
+                {ok, PreKeyState, {continue, start_engine}}
             else
                 {error, Reason} ->
                     log_error(
@@ -405,6 +409,16 @@ init(Config) ->
             ),
             {stop, {load_keys_failed, Reason}}
     end.
+
+handle_continue(start_engine, State) ->
+    %% Set engine PID in WebSocket client for to receive messages
+    ok = cryptic_ws_client:set_engine_pid(
+        State#cryptic_engine_state.ws_client_pid,
+        self()),
+    %% Request pending messages now that engine is fully initialized
+    {ok, UpdatedState} = request_pending_messages(State),
+    {noreply, UpdatedState}.
+
 
 %% @private
 handle_call({send_message, ToUsername, Message}, From, State) ->
@@ -448,7 +462,7 @@ handle_call(get_engine_status, _From, State) ->
         [],
         Sessions
     ),
-    
+
     Status = #{
         username => State#cryptic_engine_state.username,
         active_sessions => maps:size(Sessions),
@@ -585,15 +599,17 @@ handle_key_bundle_response(Message, State) ->
     %% Find pending request for this user (if any)
     PendingRequests = State#cryptic_engine_state.pending_key_requests,
     MaybePendingRequest = maps:get(Username, PendingRequests, []),
-    
+
     %% Cancel timeout if there was a pending request
     case MaybePendingRequest of
         [PendingRequest | _] ->
             erlang:cancel_timer(PendingRequest#pending_request.timeout_ref);
         [] ->
             %% No pending request - this might be from async request for X3DH fallback
-            ?dbg("Received key bundle for ~s (no pending request - likely X3DH fallback)~n", 
-                 [Username])
+            ?dbg(
+                "Received key bundle for ~s (no pending request - likely X3DH fallback)~n",
+                [Username]
+            )
     end,
 
     %% Extract key bundle and store it regardless of pending request status
@@ -807,6 +823,43 @@ upload_prekey_bundle(State) ->
     end.
 
 %% @private
+%% @doc Request pending messages from server after engine initialization
+%%
+%% Sends a request_pending_messages command to the server now that the
+%% cryptic_engine is fully initialized and ready to process messages.
+%% This avoids race conditions where the server sends messages before
+%% the engine is ready.
+%%
+%% @param State The current engine state
+%% @returns {ok, UpdatedState} with updated callback context
+request_pending_messages(State) ->
+    CallbackModule = State#cryptic_engine_state.callback_module,
+    Context = State#cryptic_engine_state.callback_context,
+    Username = State#cryptic_engine_state.username,
+
+    %% Create request_pending_messages command using cryptic_messages
+    {ok, RequestMsg} = cryptic_messages:request_pending_messages(),
+
+    %% Send to server via callback
+    case CallbackModule:send_message_to_server(Username, RequestMsg, Context) of
+        {ok, UpdatedContext} ->
+            log_info("Requested pending messages from server", [], State),
+            {ok, State#cryptic_engine_state{callback_context = UpdatedContext}};
+        {error, Reason, UpdatedContext} ->
+            log_error(
+                "Failed to request pending messages: ~p", [Reason], State
+            ),
+            %% Don't fail initialization if this fails, but still update context
+            {ok, State#cryptic_engine_state{callback_context = UpdatedContext}};
+        {error, Reason} ->
+            log_error(
+                "Failed to request pending messages: ~p", [Reason], State
+            ),
+            %% Don't fail initialization if this fails, return unchanged state
+            {ok, State}
+    end.
+
+%% @private
 %% @doc Convert list to binary, pass through if already binary
 -spec l2b(list() | binary()) -> binary().
 l2b(L) when is_list(L) -> list_to_binary(L);
@@ -838,16 +891,29 @@ get_or_create_session(ToUsername, State) ->
     case maps:get(ToUsername, Sessions, undefined) of
         undefined ->
             % No in-memory session, try to load from disk
-            log_info("No in-memory session for ~s, trying to load from disk", [ToUsername], State),
+            log_info(
+                "No in-memory session for ~s, trying to load from disk",
+                [ToUsername],
+                State
+            ),
             case try_load_session_from_disk(ToUsername, State) of
                 {ok, RatchetEnginePid, UpdatedState} ->
                     % Successfully loaded session from disk
-                    log_info("Successfully loaded session for ~s from disk", [ToUsername], UpdatedState),
+                    log_info(
+                        "Successfully loaded session for ~s from disk",
+                        [ToUsername],
+                        UpdatedState
+                    ),
                     {ok, RatchetEnginePid, UpdatedState};
                 {error, not_found} ->
                     % No saved session on disk either, check if session creation already in progress
-                    log_info("No saved session found on disk for ~s, initiating new session", [ToUsername], State),
-                    PendingRequests = State#cryptic_engine_state.pending_key_requests,
+                    log_info(
+                        "No saved session found on disk for ~s, initiating new session",
+                        [ToUsername],
+                        State
+                    ),
+                    PendingRequests =
+                        State#cryptic_engine_state.pending_key_requests,
                     case maps:get(ToUsername, PendingRequests, []) of
                         [] ->
                             % No existing session or pending request, initiate key bundle request
@@ -858,8 +924,13 @@ get_or_create_session(ToUsername, State) ->
                     end;
                 {error, Reason} ->
                     % Failed to load session, treat as if not found
-                    log_error("Failed to load session for ~s: ~p, initiating new session", [ToUsername, Reason], State),
-                    PendingRequests = State#cryptic_engine_state.pending_key_requests,
+                    log_error(
+                        "Failed to load session for ~s: ~p, initiating new session",
+                        [ToUsername, Reason],
+                        State
+                    ),
+                    PendingRequests =
+                        State#cryptic_engine_state.pending_key_requests,
                     case maps:get(ToUsername, PendingRequests, []) of
                         [] ->
                             initiate_key_bundle_request(ToUsername, State);
@@ -877,20 +948,30 @@ try_load_session_from_disk(ToUsername, State) ->
     CallbackModule = State#cryptic_engine_state.callback_module,
     Context = State#cryptic_engine_state.callback_context,
     Username = State#cryptic_engine_state.username,
-    
-    case CallbackModule:load_session_state(Username, l2b(ToUsername), Context) of
+
+    case
+        CallbackModule:load_session_state(Username, l2b(ToUsername), Context)
+    of
         {ok, SavedRatchetState, UpdatedContext} ->
             % Session found on disk - restore it
-            log_info("Restoring saved session for ~s from disk", [ToUsername], State),
-            
+            log_info(
+                "Restoring saved session for ~s from disk", [ToUsername], State
+            ),
+
             RatchetContext = UpdatedContext#{
                 peer_username => ToUsername,
                 callback_mod => CallbackModule
             },
-            
-            case cryptic_ratchet_engine:start_link(?MODULE, #{}, RatchetContext) of
+
+            case
+                cryptic_ratchet_engine:start_link(?MODULE, #{}, RatchetContext)
+            of
                 {ok, Pid} ->
-                    case cryptic_ratchet_engine:set_ratchet_state(Pid, SavedRatchetState) of
+                    case
+                        cryptic_ratchet_engine:set_ratchet_state(
+                            Pid, SavedRatchetState
+                        )
+                    of
                         ok ->
                             % Successfully restored session
                             % Create session info
@@ -902,32 +983,52 @@ try_load_session_from_disk(ToUsername, State) ->
                                 message_count = 0,
                                 x3dh_completed = true
                             },
-                            
+
                             % Update state with restored session
-                            NewSessions = maps:put(ToUsername, Pid, State#cryptic_engine_state.sessions),
-                            NewSessionStates = maps:put(ToUsername, SessionInfo, State#cryptic_engine_state.session_states),
-                            
+                            NewSessions = maps:put(
+                                ToUsername,
+                                Pid,
+                                State#cryptic_engine_state.sessions
+                            ),
+                            NewSessionStates = maps:put(
+                                ToUsername,
+                                SessionInfo,
+                                State#cryptic_engine_state.session_states
+                            ),
+
                             UpdatedState = State#cryptic_engine_state{
                                 sessions = NewSessions,
                                 session_states = NewSessionStates,
                                 callback_context = UpdatedContext
                             },
-                            
+
                             {ok, Pid, UpdatedState};
                         {error, SetError} ->
-                            log_error("Failed to restore session state for ~s: ~p", [ToUsername, SetError], State),
+                            log_error(
+                                "Failed to restore session state for ~s: ~p",
+                                [ToUsername, SetError],
+                                State
+                            ),
                             cryptic_ratchet_engine:stop(Pid),
                             {error, SetError}
                     end;
                 {error, StartError} ->
-                    log_error("Failed to start ratchet engine for ~s: ~p", [ToUsername, StartError], State),
+                    log_error(
+                        "Failed to start ratchet engine for ~s: ~p",
+                        [ToUsername, StartError],
+                        State
+                    ),
                     {error, StartError}
             end;
         {error, not_found, _UpdatedContext} ->
             % No saved session on disk
             {error, not_found};
         {error, LoadError, _UpdatedContext} ->
-            log_error("Failed to load session for ~s: ~p", [ToUsername, LoadError], State),
+            log_error(
+                "Failed to load session for ~s: ~p",
+                [ToUsername, LoadError],
+                State
+            ),
             {error, LoadError}
     end.
 
@@ -1220,7 +1321,8 @@ send_first_message_with_x3dh(ToUsername, PendingMessage, State) ->
             % X3DH will generate an ephemeral keypair which becomes our initial ratchet DH keypair (A₀)
             Message = PendingMessage#pending_message.plaintext,
             case perform_x3dh_with_message(KeyBundle, Message, State) of
-                {ok, MessageBlob, MessageId, SessionKey, {EphemeralPub, EphemeralPriv}} ->
+                {ok, MessageBlob, MessageId, SessionKey,
+                    {EphemeralPub, EphemeralPriv}} ->
                     % Send the X3DH-encrypted message to server
                     case
                         send_x3dh_message_to_server(
@@ -1232,7 +1334,10 @@ send_first_message_with_x3dh(ToUsername, PendingMessage, State) ->
                             % Per protocol: X3DH ephemeral key IS the initial Double Ratchet DH key (A₀)
                             case
                                 initialize_ratchet_session_with_keypair(
-                                    ToUsername, SessionKey, {EphemeralPub, EphemeralPriv}, UpdatedState
+                                    ToUsername,
+                                    SessionKey,
+                                    {EphemeralPub, EphemeralPriv},
+                                    UpdatedState
                                 )
                             of
                                 {ok, FinalState} ->
@@ -1395,7 +1500,9 @@ send_x3dh_message_to_server(ToUsername, MessageBlob, MessageId, State) ->
 %% Per X3DH/Double-Ratchet protocol: The ephemeral keypair generated during X3DH
 %% IS the sender's initial Double Ratchet DH keypair (A₀). This function uses that
 %% keypair to initialize the ratchet engine as sender.
-initialize_ratchet_session_with_keypair(ToUsername, SessionKey, {RatchetDHPub, RatchetDHPriv}, State) ->
+initialize_ratchet_session_with_keypair(
+    ToUsername, SessionKey, {RatchetDHPub, RatchetDHPriv}, State
+) ->
     try
         log_info(
             "Initializing ratchet with session key (~p bytes) and provided keypair for ~s",
@@ -1407,41 +1514,56 @@ initialize_ratchet_session_with_keypair(ToUsername, SessionKey, {RatchetDHPub, R
         CallbackModule = State#cryptic_engine_state.callback_module,
         Context = State#cryptic_engine_state.callback_context,
         Username = State#cryptic_engine_state.username,
-        
-        {RatchetEnginePid, _SessionLoaded} = case CallbackModule:load_session_state(
-            Username, l2b(ToUsername), Context
-        ) of
-            {ok, SavedRatchetState, _UpdatedContext} ->
-                % Session found - restore it
-                log_info("Restoring saved session for ~s", [ToUsername], State),
-                {ok, Pid} = cryptic_ratchet_engine:start_link(
-                    ?MODULE, #{}, #{peer_username => ToUsername}
-                ),
-                case cryptic_ratchet_engine:set_ratchet_state(Pid, SavedRatchetState) of
-                    ok ->
-                        {Pid, true};
-                    {error, _SetError} ->
-                        % Fall back to creating new session
-                        cryptic_ratchet_engine:stop(Pid),
-                        {ok, NewPid} = cryptic_ratchet_engine:start_link(
-                            ?MODULE, #{}, #{peer_username => ToUsername}
-                        ),
-                        ok = cryptic_ratchet_engine:init_as_sender(
-                            NewPid, SessionKey, {RatchetDHPub, RatchetDHPriv}
-                        ),
-                        {NewPid, false}
-                end;
-            {error, not_found, _UpdatedContext} ->
-                % No saved session - create new one
-                log_info("No saved session for ~s, creating new", [ToUsername], State),
-                {ok, Pid} = cryptic_ratchet_engine:start_link(
-                    ?MODULE, #{}, #{peer_username => ToUsername}
-                ),
-                ok = cryptic_ratchet_engine:init_as_sender(
-                    Pid, SessionKey, {RatchetDHPub, RatchetDHPriv}
-                ),
-                {Pid, false}
-        end,
+
+        {RatchetEnginePid, _SessionLoaded} =
+            case
+                CallbackModule:load_session_state(
+                    Username, l2b(ToUsername), Context
+                )
+            of
+                {ok, SavedRatchetState, _UpdatedContext} ->
+                    % Session found - restore it
+                    log_info(
+                        "Restoring saved session for ~s", [ToUsername], State
+                    ),
+                    {ok, Pid} = cryptic_ratchet_engine:start_link(
+                        ?MODULE, #{}, #{peer_username => ToUsername}
+                    ),
+                    case
+                        cryptic_ratchet_engine:set_ratchet_state(
+                            Pid, SavedRatchetState
+                        )
+                    of
+                        ok ->
+                            {Pid, true};
+                        {error, _SetError} ->
+                            % Fall back to creating new session
+                            cryptic_ratchet_engine:stop(Pid),
+                            {ok, NewPid} = cryptic_ratchet_engine:start_link(
+                                ?MODULE, #{}, #{peer_username => ToUsername}
+                            ),
+                            ok = cryptic_ratchet_engine:init_as_sender(
+                                NewPid,
+                                SessionKey,
+                                {RatchetDHPub, RatchetDHPriv}
+                            ),
+                            {NewPid, false}
+                    end;
+                {error, not_found, _UpdatedContext} ->
+                    % No saved session - create new one
+                    log_info(
+                        "No saved session for ~s, creating new",
+                        [ToUsername],
+                        State
+                    ),
+                    {ok, Pid} = cryptic_ratchet_engine:start_link(
+                        ?MODULE, #{}, #{peer_username => ToUsername}
+                    ),
+                    ok = cryptic_ratchet_engine:init_as_sender(
+                        Pid, SessionKey, {RatchetDHPub, RatchetDHPriv}
+                    ),
+                    {Pid, false}
+            end,
 
         %% Update state with active ratchet session
         NewSessions = maps:put(
@@ -1609,9 +1731,13 @@ cleanup_pending_messages_for_user(Username, State) ->
 
 %% @private
 %% @doc Handle incoming encrypted message (called from async websocket handler)
-handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
-    is_list(FromUsername)
-->
+handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
+ when is_binary(FromUsername) ->
+    handle_incoming_encrypted_message(
+binary_to_list(FromUsername), MessagePayload, State);
+%%
+handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
+ when is_list(FromUsername) ->
     % Normalize username to binary for consistent session key format
     % (outgoing messages use binary keys, incoming must match)
     FromUsernameBin = list_to_binary(FromUsername),
@@ -1621,7 +1747,9 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
         <<"x3dh">> ->
             % X3DH message - may be initializing a new session
             case
-                handle_x3dh_message_async(FromUsernameBin, MessagePayload, State)
+                handle_x3dh_message_async(
+                    FromUsernameBin, MessagePayload, State
+                )
             of
                 {ok, UpdatedState} ->
                     {ok, UpdatedState};
@@ -1689,7 +1817,7 @@ handle_x3dh_message_async(FromUsername, MessagePayload, State) when
             % This can happen when:
             % 1. Both parties initiate simultaneously (race condition)
             % 2. Receiver sends X3DH fallback reply (receiver_init -> sender_init upgrade)
-            
+
             % Get the current ratchet state
             case cryptic_ratchet_engine:get_state_info(RatchetEnginePid) of
                 StateInfo when is_map(StateInfo) ->
@@ -1698,11 +1826,18 @@ handle_x3dh_message_async(FromUsername, MessagePayload, State) when
                         sender_init ->
                             % We're in sender_init - peer is replying with X3DH fallback
                             % Process this X3DH message to extract session key and upgrade
-                            ?dbg("Received X3DH reply from ~s while in sender_init, processing for upgrade~n", 
-                                 [FromUsername]),
-                            case process_x3dh_reply_in_sender_init(
-                                FromUsername, MessagePayload, RatchetEnginePid, State
-                            ) of
+                            ?dbg(
+                                "Received X3DH reply from ~s while in sender_init, processing for upgrade~n",
+                                [FromUsername]
+                            ),
+                            case
+                                process_x3dh_reply_in_sender_init(
+                                    FromUsername,
+                                    MessagePayload,
+                                    RatchetEnginePid,
+                                    State
+                                )
+                            of
                                 {ok, Plaintext, UpdatedState} ->
                                     deliver_message_to_ui_async(
                                         FromUsername, Plaintext, UpdatedState
@@ -1744,13 +1879,28 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
             case try_load_session_from_disk(FromUsername, State) of
                 {ok, RatchetEnginePid, UpdatedState} ->
                     % Successfully loaded session, now decrypt the message
-                    log_info("Loaded session from disk for ~s, decrypting message", [FromUsername], UpdatedState),
-                    case decrypt_ratchet_message(RatchetEnginePid, MessagePayload, FromUsername, UpdatedState) of
+                    log_info(
+                        "Loaded session from disk for ~s, decrypting message",
+                        [FromUsername],
+                        UpdatedState
+                    ),
+                    case
+                        decrypt_ratchet_message(
+                            RatchetEnginePid,
+                            MessagePayload,
+                            FromUsername,
+                            UpdatedState
+                        )
+                    of
                         {ok, Plaintext} ->
                             % Update session activity timestamp
-                            FinalState = update_session_activity(FromUsername, UpdatedState),
+                            FinalState = update_session_activity(
+                                FromUsername, UpdatedState
+                            ),
                             % Deliver decrypted message to UI
-                            deliver_message_to_ui_async(FromUsername, Plaintext, FinalState);
+                            deliver_message_to_ui_async(
+                                FromUsername, Plaintext, FinalState
+                            );
                         {error, Reason} ->
                             log_error(
                                 "Failed to decrypt ratchet message from ~s after loading session: ~p",
@@ -1776,7 +1926,11 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
             end;
         RatchetEnginePid ->
             %% Decrypt using the ratchet engine
-            case decrypt_ratchet_message(RatchetEnginePid, MessagePayload, FromUsername, State) of
+            case
+                decrypt_ratchet_message(
+                    RatchetEnginePid, MessagePayload, FromUsername, State
+                )
+            of
                 {ok, Plaintext} ->
                     % Update session activity timestamp
                     UpdatedState = update_session_activity(FromUsername, State),
@@ -1809,27 +1963,35 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
 %% NOTE: This is currently a partial implementation for X3DH fallback scenario.
 %% With our current fix (including sender's DH key in X3DH metadata), this fallback
 %% should rarely be needed.
-process_x3dh_reply_in_sender_init(FromUsername, MessagePayload, _RatchetEnginePid, State) ->
+process_x3dh_reply_in_sender_init(
+    FromUsername, MessagePayload, _RatchetEnginePid, State
+) ->
     try
         % Extract X3DH components from Alice's message
         Ciphertext = base64:decode(maps:get(<<"ciphertext">>, MessagePayload)),
         Nonce = base64:decode(maps:get(<<"nonce">>, MessagePayload)),
         Signature = base64:decode(maps:get(<<"signature">>, MessagePayload)),
-        EncodedMetadata = base64:decode(maps:get(<<"metadata">>, MessagePayload)),
-        
+        EncodedMetadata = base64:decode(
+            maps:get(<<"metadata">>, MessagePayload)
+        ),
+
         % Decode metadata
         Metadata = erlang:binary_to_term(EncodedMetadata),
         SenderIdPub = maps:get(sender_identity_sign_public, Metadata),
-        
+
         % Extract our receiver keys
-        {_IdentityDhPub, IdentityDhPriv} = State#cryptic_engine_state.identity_dh_key,
-        {_SignedPrekeyId, _SignedPrekeyPub, SignedPrekeyPriv} = State#cryptic_engine_state.signed_prekey,
+        {_IdentityDhPub, IdentityDhPriv} =
+            State#cryptic_engine_state.identity_dh_key,
+        {_SignedPrekeyId, _SignedPrekeyPub, SignedPrekeyPriv} =
+            State#cryptic_engine_state.signed_prekey,
         OneTimePrekeys = State#cryptic_engine_state.one_time_prekeys,
-        
+
         % Find the one-time prekey that was used
         OtpkId = base64:decode(maps:get(<<"otpk_id">>, MessagePayload)),
-        ?dbg("Processing X3DH reply from ~s using OTPK ID: ~p~n", [FromUsername, OtpkId]),
-        
+        ?dbg("Processing X3DH reply from ~s using OTPK ID: ~p~n", [
+            FromUsername, OtpkId
+        ]),
+
         MatchingKey = lists:filter(
             fun(KeyMap) ->
                 case KeyMap of
@@ -1839,38 +2001,43 @@ process_x3dh_reply_in_sender_init(FromUsername, MessagePayload, _RatchetEnginePi
             end,
             OneTimePrekeys
         ),
-        
+
         case MatchingKey of
             [#{private := OtpkPriv} | _] ->
                 ?dbg("Found matching one-time prekey for X3DH reply~n", []),
-                
+
                 ReceiverKeys = #{
                     identity_dh_private => IdentityDhPriv,
                     signed_prekey_private => SignedPrekeyPriv
                 },
-                
+
                 MessageBlob = #{
                     metadata => Metadata,
                     signature => Signature,
                     ciphertext => Ciphertext,
                     nonce => Nonce
                 },
-                
+
                 % Decrypt the X3DH message to get plaintext and session key
-                case cryptic_lib:x3dh_receiver_decrypt_with_session_key(
-                    ReceiverKeys, MessageBlob, SenderIdPub, OtpkPriv
-                ) of
+                case
+                    cryptic_lib:x3dh_receiver_decrypt_with_session_key(
+                        ReceiverKeys, MessageBlob, SenderIdPub, OtpkPriv
+                    )
+                of
                     {ok, {Plaintext, _MessageId, _SessionKey}} ->
                         % We have the session key Alice generated
                         % Now we need to activate our receiving chain
-                        ?dbg("Decrypted X3DH reply, activating receiving chain~n", []),
-                        
+                        ?dbg(
+                            "Decrypted X3DH reply, activating receiving chain~n",
+                            []
+                        ),
+
                         % The ratchet engine needs to process this as the first receiving message
                         % to activate the receiving chain and transition to bidirectional
                         % For now, just return the plaintext - the session is already initialized
                         % TODO: May need to update ratchet state with peer's DH key from metadata
                         % TODO: Use _SessionKey to activate receiving chain if needed
-                        
+
                         log_info(
                             "Processed X3DH reply from ~s in sender_init state",
                             [FromUsername],
@@ -1884,7 +2051,9 @@ process_x3dh_reply_in_sender_init(FromUsername, MessagePayload, _RatchetEnginePi
                 ?dbg("No matching one-time prekey found for ID: ~p~n", [OtpkId]),
                 {error, one_time_prekey_not_found};
             [KeyWithoutPrivate | _] ->
-                ?dbg("Found matching key but it has no private field: ~p~n", [KeyWithoutPrivate]),
+                ?dbg("Found matching key but it has no private field: ~p~n", [
+                    KeyWithoutPrivate
+                ]),
                 {error, one_time_prekey_missing_private}
         end
     catch
@@ -1972,12 +2141,17 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
                         % Extract sender's ephemeral public key from X3DH metadata
                         % This IS the sender's initial Double Ratchet DH public key (A₀)
                         % Per X3DH/Double-Ratchet spec: Alice's X3DH ephemeral key becomes her initial ratchet DH key
-                        SenderEphemeralPub = maps:get(ephemeral_public, Metadata, undefined),
+                        SenderEphemeralPub = maps:get(
+                            ephemeral_public, Metadata, undefined
+                        ),
 
                         % Initialize ratchet engine as receiver with sender's ephemeral key as remote DH key
                         case
                             initialize_receiver_ratchet_session(
-                                FromUsername, SessionKey, SenderEphemeralPub, State
+                                FromUsername,
+                                SessionKey,
+                                SenderEphemeralPub,
+                                State
                             )
                         of
                             {ok, UpdatedState} ->
@@ -1988,15 +2162,24 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
                                 ),
 
                                 % Auto-save the newly initialized receiver session
-                                ?dbg("X3DH receiver session initialized, attempting auto-save~n", []),
-                                RatchetEnginePid = maps:get(FromUsername,
+                                ?dbg(
+                                    "X3DH receiver session initialized, attempting auto-save~n",
+                                    []
+                                ),
+                                RatchetEnginePid = maps:get(
+                                    FromUsername,
                                     UpdatedState#cryptic_engine_state.sessions,
-                                    undefined),
-                                auto_save_session(FromUsername, RatchetEnginePid, UpdatedState),
+                                    undefined
+                                ),
+                                auto_save_session(
+                                    FromUsername, RatchetEnginePid, UpdatedState
+                                ),
 
                                 % Request sender's key bundle so we can reply via X3DH if needed
                                 % This is asynchronous - we don't wait for the response
-                                request_key_bundle_async(FromUsername, UpdatedState),
+                                request_key_bundle_async(
+                                    FromUsername, UpdatedState
+                                ),
                                 {ok, Plaintext, UpdatedState};
                             {error, Reason} ->
                                 {error, {ratchet_init_failed, Reason}}
@@ -2023,7 +2206,9 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
 %% @private
 %% @doc Initialize ratchet session as receiver after X3DH
 %% If SenderRatchetDHPub is provided, the receiver can immediately send (bidirectional)
-initialize_receiver_ratchet_session(PeerUsername, SessionKey, SenderRatchetDHPub, State) ->
+initialize_receiver_ratchet_session(
+    PeerUsername, SessionKey, SenderRatchetDHPub, State
+) ->
     try
         % Start ratchet engine with our callback
         CallbackModule = State#cryptic_engine_state.callback_module,
@@ -2036,42 +2221,55 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, SenderRatchetDHPub
         },
 
         %% Try to load existing session first
-        {RatchetEnginePid, SessionLoaded} = case CallbackModule:load_session_state(
-            Username, l2b(PeerUsername), CallbackContext
-        ) of
-            {ok, SavedRatchetState, _UpdatedContext} ->
-                % Session found - restore it
-                log_info("Restoring saved session for ~s", [PeerUsername], State),
-                {ok, Pid} = cryptic_ratchet_engine:start_link(
-                    ?MODULE, #{}, RatchetContext
-                ),
-                case cryptic_ratchet_engine:set_ratchet_state(Pid, SavedRatchetState) of
-                    ok ->
-                        {Pid, true};
-                    {error, _SetError} ->
-                        % Fall back to creating new session
-                        cryptic_ratchet_engine:stop(Pid),
-                        {ok, NewPid} = cryptic_ratchet_engine:start_link(
-                            ?MODULE, #{}, RatchetContext
-                        ),
-                        DHKeyPair = cryptic_nif:gen_keypair(),
-                        ok = cryptic_ratchet_engine:init_as_receiver(
-                            NewPid, SessionKey, DHKeyPair
-                        ),
-                        {NewPid, false}
-                end;
-            {error, not_found, _UpdatedContext} ->
-                % No saved session - create new one
-                log_info("No saved session for ~s, creating new", [PeerUsername], State),
-                {ok, Pid} = cryptic_ratchet_engine:start_link(
-                    ?MODULE, #{}, RatchetContext
-                ),
-                DHKeyPair = cryptic_nif:gen_keypair(),
-                ok = cryptic_ratchet_engine:init_as_receiver(
-                    Pid, SessionKey, DHKeyPair
-                ),
-                {Pid, false}
-        end,
+        {RatchetEnginePid, SessionLoaded} =
+            case
+                CallbackModule:load_session_state(
+                    Username, l2b(PeerUsername), CallbackContext
+                )
+            of
+                {ok, SavedRatchetState, _UpdatedContext} ->
+                    % Session found - restore it
+                    log_info(
+                        "Restoring saved session for ~s", [PeerUsername], State
+                    ),
+                    {ok, Pid} = cryptic_ratchet_engine:start_link(
+                        ?MODULE, #{}, RatchetContext
+                    ),
+                    case
+                        cryptic_ratchet_engine:set_ratchet_state(
+                            Pid, SavedRatchetState
+                        )
+                    of
+                        ok ->
+                            {Pid, true};
+                        {error, _SetError} ->
+                            % Fall back to creating new session
+                            cryptic_ratchet_engine:stop(Pid),
+                            {ok, NewPid} = cryptic_ratchet_engine:start_link(
+                                ?MODULE, #{}, RatchetContext
+                            ),
+                            DHKeyPair = cryptic_nif:gen_keypair(),
+                            ok = cryptic_ratchet_engine:init_as_receiver(
+                                NewPid, SessionKey, DHKeyPair
+                            ),
+                            {NewPid, false}
+                    end;
+                {error, not_found, _UpdatedContext} ->
+                    % No saved session - create new one
+                    log_info(
+                        "No saved session for ~s, creating new",
+                        [PeerUsername],
+                        State
+                    ),
+                    {ok, Pid} = cryptic_ratchet_engine:start_link(
+                        ?MODULE, #{}, RatchetContext
+                    ),
+                    DHKeyPair = cryptic_nif:gen_keypair(),
+                    ok = cryptic_ratchet_engine:init_as_receiver(
+                        Pid, SessionKey, DHKeyPair
+                    ),
+                    {Pid, false}
+            end,
 
         % If sender included their ratchet DH public key, activate sending chain
         % (Only needed if we created a new session - loaded sessions are already bidirectional)
@@ -2080,16 +2278,27 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, SenderRatchetDHPub
                 % Session was loaded, already in correct state
                 ?dbg("Session loaded from disk, skipping DH key setup~n", []);
             {false, undefined} ->
-                ?dbg("No sender ratchet DH key provided, staying in receiver_init~n", []);
+                ?dbg(
+                    "No sender ratchet DH key provided, staying in receiver_init~n",
+                    []
+                );
             {false, _} ->
-                ?dbg("Sender ratchet DH key provided, setting remote DH key~n", []),
+                ?dbg(
+                    "Sender ratchet DH key provided, setting remote DH key~n",
+                    []
+                ),
                 % Set the remote DH key to enable sending immediately
                 % This transitions from receiver_init to bidirectional
-                case cryptic_ratchet_engine:set_remote_dh_key(
-                    RatchetEnginePid, SenderRatchetDHPub
-                ) of
+                case
+                    cryptic_ratchet_engine:set_remote_dh_key(
+                        RatchetEnginePid, SenderRatchetDHPub
+                    )
+                of
                     ok ->
-                        ?dbg("Successfully set remote DH key, now bidirectional~n", []);
+                        ?dbg(
+                            "Successfully set remote DH key, now bidirectional~n",
+                            []
+                        );
                     {error, SetKeyError} ->
                         log_error(
                             "Failed to set remote DH key for ~s: ~p",
@@ -2106,7 +2315,11 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, SenderRatchetDHPub
             state = active,
             last_activity = erlang:timestamp(),
             % Received first message (or restored from disk)
-            message_count = if SessionLoaded -> 0; true -> 1 end,
+            message_count =
+                if
+                    SessionLoaded -> 0;
+                    true -> 1
+                end,
             x3dh_completed = true
         },
 
@@ -2138,38 +2351,46 @@ initialize_receiver_ratchet_session(PeerUsername, SessionKey, SenderRatchetDHPub
             {error, {exception, ErrorClass, ErrorReason}}
     end.
 
-
 %% @private
 %% @doc Attempt to save the current ratchet session state to disk
-auto_save_session(PeerUsername, RatchetEnginePid, State)
-  when is_pid(RatchetEnginePid) ->
+auto_save_session(PeerUsername, RatchetEnginePid, State) when
+    is_pid(RatchetEnginePid)
+->
     case cryptic_ratchet_engine:get_ratchet_state(RatchetEnginePid) of
         {ok, RatchetState} ->
             CallbackModule = State#cryptic_engine_state.callback_module,
             Context = State#cryptic_engine_state.callback_context,
             Username = State#cryptic_engine_state.username,
             ?dbg("Got ratchet state, saving session for ~s~n", [PeerUsername]),
-            case CallbackModule:save_session_state(
-                   Username, l2b(PeerUsername), RatchetState, Context
-                  ) of
+            case
+                CallbackModule:save_session_state(
+                    Username, l2b(PeerUsername), RatchetState, Context
+                )
+            of
                 {ok, _} ->
-                    ?dbg("Session state saved successfully for ~s~n",
-                         [PeerUsername]);
+                    ?dbg(
+                        "Session state saved successfully for ~s~n",
+                        [PeerUsername]
+                    );
                 {error, SaveError, _} ->
-                    ?dbg("Failed to save session state for ~s: ~p~n",
-                         [PeerUsername, SaveError])
+                    ?dbg(
+                        "Failed to save session state for ~s: ~p~n",
+                        [PeerUsername, SaveError]
+                    )
             end;
         {error, GetStateError} ->
-            ?dbg("Failed to get ratchet state for auto-save: ~p~n",
-                 [GetStateError])
+            ?dbg(
+                "Failed to get ratchet state for auto-save: ~p~n",
+                [GetStateError]
+            )
     end;
-auto_save_session(_PeerUsername, RatchetEnginePid, _State)
-  when not(is_pid(RatchetEnginePid)) ->
-    ?dbg("auto_save_session called with no RatchetEnginePid: ~p~n",
-         [RatchetEnginePid]).
-
-
-
+auto_save_session(_PeerUsername, RatchetEnginePid, _State) when
+    not (is_pid(RatchetEnginePid))
+->
+    ?dbg(
+        "auto_save_session called with no RatchetEnginePid: ~p~n",
+        [RatchetEnginePid]
+    ).
 
 %% @private
 %% @doc Request key bundle from server asynchronously (for replying to received X3DH messages)
@@ -2193,7 +2414,11 @@ request_key_bundle_async(ToUsername, State) ->
 
             % Send request to server - fire and forget
             % The key bundle will arrive via handle_cast(key_bundle_received)
-            case CallbackModule:send_message_to_server(Username, KeyBundleRequest, Context) of
+            case
+                CallbackModule:send_message_to_server(
+                    Username, KeyBundleRequest, Context
+                )
+            of
                 {ok, _UpdatedContext} ->
                     log_info(
                         "Requested key bundle for ~s (for X3DH fallback replies)",
@@ -2243,7 +2468,9 @@ decrypt_ratchet_message(RatchetEnginePid, MessagePayload, PeerUsername, State) -
             )
         of
             {ok, Plaintext} ->
-                ?dbg("Message decrypted successfully, attempting auto-save~n", []),
+                ?dbg(
+                    "Message decrypted successfully, attempting auto-save~n", []
+                ),
                 auto_save_session(PeerUsername, RatchetEnginePid, State),
                 {ok, Plaintext};
             {error, Reason} ->
