@@ -506,7 +506,14 @@ connect_websocket(State) ->
     ?info("  Client cert: ~s", [State#state.cert_file]),
     ?info("  Client key: ~s", [State#state.key_file]),
 
-    case gun:open(State#state.server_host, State#state.server_port, ConnOpts) of
+    %% Ensure server_host is a string (charlist) for gun:open
+    ServerHost =
+        case is_list(State#state.server_host) of
+            true -> State#state.server_host;
+            false -> binary_to_list(State#state.server_host)
+        end,
+
+    case gun:open(ServerHost, State#state.server_port, ConnOpts) of
         {ok, ConnPid} ->
             case gun:await_up(ConnPid, 5000) of
                 {ok, _Protocol} ->
