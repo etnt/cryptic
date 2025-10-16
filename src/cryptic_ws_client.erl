@@ -481,11 +481,20 @@ connect_websocket(State) ->
     %%
     %% The certificates are generated using OpenSSL with specific configurations
     %% that ensure compatibility with Erlang/OTP 28's stricter certificate validation.
+
+    %% Ensure server_host is a string (charlist) for gun:open and TLS options
+    ServerHost =
+        case is_list(State#state.server_host) of
+            true -> State#state.server_host;
+            false -> binary_to_list(State#state.server_host)
+        end,
+
     TLSOptions = [
         {verify, verify_peer},
         {log_level, info},
         {versions, ['tlsv1.2']},
-        {server_name_indication, disable},
+        %% Enable SNI with the server hostname for proper certificate validation
+        {server_name_indication, ServerHost},
         {cacertfile, State#state.ca_file},
         {certfile, State#state.cert_file},
         {keyfile, State#state.key_file}
@@ -495,7 +504,14 @@ connect_websocket(State) ->
         transport => tls,
         % Use http instead of http2 for simplicity
         protocols => [http],
-        tls_opts => TLSOptions
+        tls_opts => TLSOptions,
+        % Increase connect timeout for slower networks/DNS resolution
+        connect_timeout => 30000,
+        % Increase TLS handshake timeout
+        tls_handshake_timeout => 30000,
+        % Retry configuration
+        retry => 0,
+        retry_timeout => 1000
     },
 
     ?info("Connecting to ~s:~p with TLS", [
@@ -506,17 +522,19 @@ connect_websocket(State) ->
     ?info("  Client cert: ~s", [State#state.cert_file]),
     ?info("  Client key: ~s", [State#state.key_file]),
 
-    %% Ensure server_host is a string (charlist) for gun:open
-    ServerHost =
-        case is_list(State#state.server_host) of
-            true -> State#state.server_host;
-            false -> binary_to_list(State#state.server_host)
-        end,
+    ?info("Attempting to open gun connection to ~s:~p", [
+        ServerHost, State#state.server_port
+    ]),
 
     case gun:open(ServerHost, State#state.server_port, ConnOpts) of
         {ok, ConnPid} ->
-            case gun:await_up(ConnPid, 5000) of
+            ?info(
+                "Gun connection opened, awaiting TLS handshake (30s timeout)...",
+                []
+            ),
+            case gun:await_up(ConnPid, 30000) of
                 {ok, _Protocol} ->
+                    ?info("TLS connection established successfully", []),
                     ?dbg(
                         "TLS connection established, upgrading to WebSocket~n",
                         []
@@ -528,10 +546,12 @@ connect_websocket(State) ->
                     },
                     {ok, NewState};
                 {error, Reason} ->
+                    ?error("TLS handshake failed: ~p", [Reason]),
                     gun:close(ConnPid),
                     {error, Reason}
             end;
         {error, Reason} ->
+            ?error("Failed to open gun connection: ~p", [Reason]),
             {error, Reason}
     end.
 
