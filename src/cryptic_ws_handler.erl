@@ -50,7 +50,7 @@
 -module(cryptic_ws_handler).
 -behaviour(cowboy_websocket).
 
--include("cryptic.hrl").
+-include("cryptic_server.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 -export([
@@ -125,7 +125,7 @@ websocket_init(State = #{username := Username}) ->
 %% @returns {Replies, State} or {Replies, NewState} with optional response frames
 websocket_handle({text, Msg}, State = #{username := Username}) ->
     try
-        ?dbg("Received message from ~s: ~s", [Username, Msg]),
+        ?debug("Received message from ~s: ~s", [Username, Msg]),
         ?msg_in("Received WebSocket message from ~s: ~s", [Username, Msg]),
 
         %% 1. Decode JSON
@@ -138,7 +138,7 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                         MessageType = maps:get(
                             <<"type">>, ValidatedMessage, <<"unknown">>
                         ),
-                        ?dbg(
+                        ?debug(
                             "Processing validated message from: ~s , type: ~s",
                             [
                                 Username, MessageType
@@ -173,7 +173,7 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                                     message => list_to_binary(ErrorMsg)
                                 },
                                 ErrorJson = jsx:encode(ErrorResp),
-                                ?dbg("Sending WebSocket error to ~s: ~s", [
+                                ?debug("Sending WebSocket error to ~s: ~s", [
                                     Username, ErrorJson
                                 ]),
                                 ?msg_out("Sending WebSocket error to ~s: ~s", [
@@ -267,9 +267,9 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
     {[{text, ResponseJson}], State};
 websocket_info({send_message, RoomMessage}, State) ->
     %% Handle room message forwarding from broadcast_to_room_members
-    ?dbg("DEBUG WS: Received send_message: ~p", [RoomMessage]),
+    ?debug("DEBUG WS: Received send_message: ~p", [RoomMessage]),
     JsonResponse = jsx:encode(RoomMessage),
-    ?dbg("DEBUG WS: Forwarding room message: ~p", [JsonResponse]),
+    ?debug("DEBUG WS: Forwarding room message: ~p", [JsonResponse]),
     ?msg_out("Forwarding room message: ~s", [JsonResponse]),
     {[{text, JsonResponse}], State};
 websocket_info(_Info, State) ->
@@ -467,13 +467,13 @@ handle_command(
     _State
 ) ->
     User = binary_to_list(UserB),
-    ?dbg("get_key_bundle request for user: ~p", [User]),
+    ?debug("get_key_bundle request for user: ~p", [User]),
     case cryptic_lib:get_key_bundle(User) of
         {error, not_found} ->
-            ?dbg("Key bundle not found for user: ~p", [User]),
+            ?debug("Key bundle not found for user: ~p", [User]),
             {error, "key-bundle-not-found"};
         {ok, BundleData} ->
-            ?dbg(
+            ?debug(
                 "Found key bundle for user: ~p, bundle keys: ~p", [
                     User, maps:keys(BundleData)
                 ]
@@ -502,7 +502,7 @@ handle_command(
                 end,
 
             %% Prepare response with both identity keys
-            ?dbg(
+            ?debug(
                 "Sending both identity keys - Sign: ~p, DH: ~p", [
                     IdentitySignPub, IdentityDHPub
                 ]
@@ -703,7 +703,7 @@ handle_command(
             },
             {reply, Response};
         Messages ->
-            ?dbg("Delivering pending messages: ~p~n", [Messages]),
+            ?debug("Delivering pending messages: ~p~n", [Messages]),
             %% Deliver each pending message as a message event
             %% This ensures they go through the same processing as real-time messages
             lists:foreach(
@@ -758,7 +758,7 @@ handle_command(#{<<"type">> := <<"key_status">>}, Username, _State) ->
             {reply, Response}
     end;
 handle_command(Command, Username, _State) ->
-    ?dbg("Unknown command from ~s: ~p", [Username, Command]),
+    ?debug("Unknown command from ~s: ~p", [Username, Command]),
     {error, "Unknown command"}.
 
 %% @doc Extract client identity from SSL/TLS certificate

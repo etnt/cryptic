@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc cryptic top level supervisor.
+%% @doc Cryptic top level supervisor.
 %% @end
 %%%-------------------------------------------------------------------
 
@@ -30,7 +30,6 @@ init([]) ->
           intensity => 10,
           period => 10},
 
-    % Event handlers should be started first as the RAFT application uses it
     EventManager = #{id => cryptic_event_manager,
                      start => {gen_event, start_link, [{local, cryptic_event_manager}]},
                      modules => dynamic},
