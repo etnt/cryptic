@@ -167,13 +167,6 @@
     %% Message signing functions
     sign_message/2,
     verify_signature/3,
-    %% Secure message functions with metadata
-    encrypt_message_secure/3,
-    decrypt_message_secure/3,
-    %% Sequence number management
-    get_next_sequence/2,
-    validate_sequence/3,
-    update_sequence/3,
     %% Key bundle management
     store_key_bundle/2,
     get_key_bundle/1,
@@ -513,11 +506,9 @@ derive_aead_key_simple(SharedSecret) ->
 %%   - {Username, otpk, KeyId} -> One-time prekey data
 %%   - Username -> User registration data
 %%   - MessageId -> Message data
-%%   - {SenderID, RecipientID} -> Sequence numbers
 -define(PREKEY_TABLE, cryptic_prekeys).
 -define(MESSAGE_TABLE, cryptic_messages).
 -define(USER_TABLE, cryptic_users).
--define(SEQUENCE_TABLE, cryptic_sequences).
 
 %% @doc Store a user's prekey.
 -spec store_prekey(string(), binary()) -> ok | {error, term()}.
@@ -1176,130 +1167,7 @@ verify_signature(Message, Signature, PublicKey) ->
     ?dbg("verify_signature result: ~p", [Result]),
     Result.
 
-%% @doc Encrypt message with metadata using sign-then-encrypt approach.
-%%
-%% Implements Step 1 of the Architecture Sketch: proper message integrity
-%% with metadata inclusion and sign-then-encrypt ordering.
-%%
-%% The function:
-%% <ol>
-%%   <li>Creates a message envelope with metadata (sender, recipient, timestamp, sequence)</li>
-%%   <li>Signs the envelope with the sender's Ed25519 identity key</li>
-%%   <li>Encrypts the signed envelope using X25519 ECDH with recipient's key</li>
-%% </ol>
-%%
-%% @param Message The plaintext message to send
-%% @param Metadata Map containing:
-%%   - sender_id: Sender user ID (binary)
-%%   - recipient_id: Recipient user ID (binary)
-%%   - sender_key_id: Sender's key identifier (binary)
-%%   - timestamp: Unix timestamp (integer)
-%%   - sequence: Message sequence number (integer)
-%%   - sender_sign_key: Sender's Ed25519 private key (binary)
-%% @param RecipientPubKey Recipient's X25519 public key (32 bytes)
-%% @returns {ok, {EphemeralPubKey, Nonce, Ciphertext}} or {error, Reason}
--spec encrypt_message_secure(binary(), map(), binary()) ->
-    {ok, {binary(), binary(), binary()}} | {error, term()}.
-encrypt_message_secure(Message, Metadata, RecipientPubKey) ->
-    try
-        #{
-            sender_id := SenderID,
-            recipient_id := RecipientID,
-            sender_key_id := SenderKeyID,
-            timestamp := Timestamp,
-            sequence := Sequence,
-            sender_sign_key := SenderSignKey
-        } = Metadata,
 
-        %% Create message envelope with metadata
-        Envelope = #{
-            message => Message,
-            sender_id => SenderID,
-            recipient_id => RecipientID,
-            sender_key_id => SenderKeyID,
-            timestamp => Timestamp,
-            sequence => Sequence
-        },
-
-        %% Serialize envelope for signing
-        EnvelopeBin = erlang:term_to_binary(Envelope),
-
-        %% Sign the envelope (sign-then-encrypt)
-        Signature = sign_message(EnvelopeBin, SenderSignKey),
-
-        %% Create signed message package
-        SignedPackage = #{
-            envelope => Envelope,
-            signature => Signature
-        },
-        SignedPackageBin = erlang:term_to_binary(SignedPackage),
-
-        %% Generate ephemeral keypair for encryption
-        {EphPub, EphPriv} = gen_keypair(),
-
-        %% Compute shared secret and encrypt
-        Shared = scalarmult(EphPriv, RecipientPubKey),
-        AeadKey = derive_aead_key_ephemeral(Shared, EphPub),
-        {Cipher, Nonce} = aead_encrypt(SignedPackageBin, AeadKey, <<>>),
-
-        {ok, {EphPub, Nonce, Cipher}}
-    catch
-        error:Reason -> {error, Reason}
-    end.
-
-%% @doc Decrypt message and verify metadata using encrypt-then-verify approach.
-%%
-%% Implements Step 1 of the Architecture Sketch: proper message integrity
-%% verification with metadata validation.
-%%
-%% The function:
-%% <ol>
-%%   <li>Decrypts the message using X25519 ECDH with recipient's private key</li>
-%%   <li>Extracts the signed envelope and signature</li>
-%%   <li>Verifies the signature using sender's Ed25519 public key</li>
-%%   <li>Validates metadata (timestamp freshness, sequence numbers, etc.)</li>
-%% </ol>
-%%
-%% @param EncryptedBlob Tuple {EphemeralPubKey, Nonce, Ciphertext}
-%% @param RecipientPrivKey Recipient's X25519 private key (32 bytes)
-%% @param SenderPubKey Sender's Ed25519 public key for signature verification (32 bytes)
-%% @returns {ok, {Message, Metadata}} or {error, Reason}
--spec decrypt_message_secure(
-    {binary(), binary(), binary()}, binary(), binary()
-) ->
-    {ok, {binary(), map()}} | {error, term()}.
-decrypt_message_secure(
-    {Ephemeral, Nonce, Cipher}, RecipientPrivKey, SenderPubKey
-) ->
-    try
-        %% Decrypt the message
-        Shared = scalarmult(RecipientPrivKey, Ephemeral),
-        AeadKey = derive_aead_key_ephemeral(Shared, Ephemeral),
-
-        case aead_decrypt(Cipher, AeadKey, Nonce, <<>>) of
-            error ->
-                {error, decryption_failed};
-            SignedPackageBin ->
-                %% Deserialize signed package
-                SignedPackage = erlang:binary_to_term(SignedPackageBin),
-                #{envelope := Envelope, signature := Signature} = SignedPackage,
-
-                %% Serialize envelope for signature verification
-                EnvelopeBin = erlang:term_to_binary(Envelope),
-
-                %% Verify signature
-                case verify_signature(EnvelopeBin, Signature, SenderPubKey) of
-                    false ->
-                        {error, signature_verification_failed};
-                    true ->
-                        %% Extract message and metadata
-                        #{message := Message} = Envelope,
-                        {ok, {Message, Envelope}}
-                end
-        end
-    catch
-        error:Reason -> {error, Reason}
-    end.
 
 %% @doc Store complete key bundle for a user with signatures and metadata.
 %%
@@ -1653,75 +1521,6 @@ get_key_status(Username) ->
             end
     end.
 
-%% @doc Get next sequence number for a communication pair.
-%%
-%% Retrieves and increments the sequence number for messages from SenderID to RecipientID.
-%% Sequence numbers are used to prevent replay attacks and ensure message ordering.
-%%
-%% @param SenderID Sender's user ID
-%% @param RecipientID Recipient's user ID
-%% @returns Next sequence number (integer >= 1)
--spec get_next_sequence(binary(), binary()) -> non_neg_integer().
-get_next_sequence(SenderID, RecipientID) ->
-    Key = {SenderID, RecipientID},
-    case ets:lookup(?SEQUENCE_TABLE, Key) of
-        [] ->
-            %% First message between these users
-            ets:insert(?SEQUENCE_TABLE, {Key, 1}),
-            1;
-        [{Key, CurrentSeq}] ->
-            NextSeq = CurrentSeq + 1,
-            ets:insert(?SEQUENCE_TABLE, {Key, NextSeq}),
-            NextSeq
-    end.
-
-%% @doc Validate sequence number for replay protection.
-%%
-%% Checks if the received sequence number is valid (not a replay) for the
-%% communication pair. Allows out-of-order delivery within a reasonable window.
-%%
-%% @param SenderID Sender's user ID
-%% @param RecipientID Recipient's user ID (should be local user)
-%% @param ReceivedSeq Sequence number from received message
-%% @returns true if sequence is valid, false if it's a replay
--spec validate_sequence(binary(), binary(), non_neg_integer()) -> boolean().
-validate_sequence(SenderID, RecipientID, ReceivedSeq) ->
-    Key = {SenderID, RecipientID},
-    case ets:lookup(?SEQUENCE_TABLE, Key) of
-        [] ->
-            %% First message from this sender - any positive sequence is valid
-            ReceivedSeq > 0;
-        [{Key, LastSeq}] ->
-            %% For simplicity: reject sequences that are too old
-            %% Allow small window for out-of-order delivery
-
-            % Allow sequences up to 3 behind the latest
-            Window = 3,
-            ReceivedSeq > LastSeq - Window
-    end.
-
-%% @doc Update sequence number after successful message processing.
-%%
-%% Updates the stored sequence number for received messages to prevent replay.
-%% Only updates if the received sequence is higher than current.
-%%
-%% @param SenderID Sender's user ID
-%% @param RecipientID Recipient's user ID (should be local user)
-%% @param ReceivedSeq Sequence number from successfully processed message
-%% @returns ok
--spec update_sequence(binary(), binary(), non_neg_integer()) -> ok.
-update_sequence(SenderID, RecipientID, ReceivedSeq) ->
-    Key = {SenderID, RecipientID},
-    case ets:lookup(?SEQUENCE_TABLE, Key) of
-        [] ->
-            ets:insert(?SEQUENCE_TABLE, {Key, ReceivedSeq});
-        [{Key, LastSeq}] when ReceivedSeq > LastSeq ->
-            ets:insert(?SEQUENCE_TABLE, {Key, ReceivedSeq});
-        _ ->
-            %% Don't update if sequence is older or equal
-            ok
-    end,
-    ok.
 
 %%%===================================================================
 %%% X3DH Protocol Implementation (SESSION-MESSAGE-FLOW.md)
@@ -2231,7 +2030,6 @@ ensure_tables() ->
     ensure_table(?PREKEY_TABLE),
     ensure_table(?MESSAGE_TABLE),
     ensure_table(?USER_TABLE),
-    ensure_table(?SEQUENCE_TABLE),
     ok.
 
 ensure_table(TableName) ->

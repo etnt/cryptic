@@ -295,27 +295,11 @@ sleep(T) ->
 %% @returns {noreply, State} after completing initialization
 
 continue(CfgMap) ->
-    %% Clean up any existing tables first
-    catch ets:delete(user_connections),
-    catch ets:delete(blobs),
-    catch ets:delete(rooms),
-    catch ets:delete(room_messages),
-    catch ets:delete(user_rooms),
 
     %% Create user connections ETS table
-    ets:new(user_connections, [named_table, set, public]),
+    [ets:new(Table, [named_table, set, public]) || Table <- ets_tables()],
 
-    %% Create ETS stores for blobs
-    ets:new(blobs, [named_table, public, bag]),
-
-    %% Create chat room ETS tables
-    ets:new(rooms, [named_table, set, public, {keypos, 2}]),
-    ets:new(room_messages, [named_table, bag, public, {keypos, 3}]),
-    ets:new(user_rooms, [named_table, bag, public]),
-
-    %% Initialize cryptic_lib (creates its ETS tables)
-    ok = cryptic_lib:initialize(),
-
+    %% FIXME ugly !
     %% Give time for application environment to be fully available
     sleep(100),
 
@@ -353,6 +337,9 @@ continue(CfgMap) ->
     end,
 
     {noreply, CfgMap}.
+
+ets_tables() ->
+    [user_connections, cryptic_users, cryptic_messages, cryptic_prekeys].
 
 %% @doc Handling call messages
 %%
