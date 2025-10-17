@@ -254,7 +254,6 @@
     key_status/0,
 
     % Client to Server - Messaging
-    send_encrypted/1,
     send_message_x3dh/1,
     send_message_ratchet/1,
 
@@ -407,28 +406,6 @@ key_status() ->
 %%% ============================================================================
 %%% Client to Server Messages - Messaging
 %%% ============================================================================
-
-%% @doc Construct the `send_encrypted' message
-%%
-%% Sends a unified encrypted message (either X3DH or Double Ratchet).
-%% The server relays the encrypted payload without interpretation.
-%%
-%% @param MsgMap Map containing:
-%%   - `to' (binary): Recipient username
-%%   - `message' (map): Encrypted message payload
-%% @returns `{ok, Message}' or `{error, Reason}'
--spec send_encrypted(map()) -> validation_result().
-send_encrypted(MsgMap) ->
-    case mk_payload(send_encrypted, MsgMap) of
-        {ok, Payload} ->
-            {ok, #{
-                <<"type">> => <<"send_encrypted">>,
-                <<"to">> => maps:get(to, Payload),
-                <<"message">> => maps:get(message, Payload)
-            }};
-        Error ->
-            Error
-    end.
 
 %% @doc Construct the `x3dh' message
 %%

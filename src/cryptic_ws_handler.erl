@@ -43,6 +43,89 @@
 %%%   <li>Connection cleanup on disconnect</li>
 %%% </ul>
 %%%
+%%% == Process Lifecycle ==
+%%%
+%%% This module implements the `cowboy_websocket' behavior. Each WebSocket
+%%% connection runs in its own Erlang process, created and supervised by
+%%% Cowboy/Ranch infrastructure.
+%%%
+%%% <h4>Connection Flow</h4>
+%%%
+%%% <ol>
+%%%   <li>**HTTP Request** - Client connects and requests WebSocket upgrade
+%%%       <ul>
+%%%         <li>`init/2' is called in a new process created by Ranch</li>
+%%%         <li>Extracts and validates client certificate (mTLS)</li>
+%%%         <li>Returns `{cowboy_websocket, Req, State}' to approve upgrade</li>
+%%%       </ul>
+%%%   </li>
+%%%
+%%%   <li>**WebSocket Initialization** - Same process continues
+%%%       <ul>
+%%%         <li>`websocket_init/1' is called after upgrade completes</li>
+%%%         <li>Registers this process Pid in `user_connections' ETS table</li>
+%%%         <li>Sends welcome message to client</li>
+%%%       </ul>
+%%%   </li>
+%%%
+%%%   <li>**Active Connection** - Process enters message loop
+%%%       <ul>
+%%%         <li>`websocket_handle/2' - Handles incoming WebSocket frames (text, binary, ping/pong)</li>
+%%%         <li>`websocket_info/2' - Handles Erlang messages from other processes</li>
+%%%         <li>Process stays alive until connection closes</li>
+%%%       </ul>
+%%%   </li>
+%%%
+%%%   <li>**Termination** - Connection closes
+%%%       <ul>
+%%%         <li>`terminate/3' is called</li>
+%%%         <li>Removes entry from `user_connections' ETS table</li>
+%%%         <li>Process exits</li>
+%%%       </ul>
+%%%   </li>
+%%% </ol>
+%%%
+%%% <h4>Inter-Process Communication</h4>
+%%%
+%%% This handler process receives messages from two sources:
+%%%
+%%% <ul>
+%%%   <li>**WebSocket client** - Handled by `websocket_handle/2'
+%%%       <ul>
+%%%         <li>Text frames containing JSON commands</li>
+%%%         <li>Binary frames (currently not used)</li>
+%%%         <li>Ping/pong control frames</li>
+%%%       </ul>
+%%%   </li>
+%%%
+%%%   <li>**Other Erlang processes** - Handled by `websocket_info/2'
+%%%       <ul>
+%%%         <li>`{message, FromUser, MessageData}' - Message from another user</li>
+%%%         <li>`{send_message, RoomMessage}' - Room broadcast message</li>
+%%%       </ul>
+%%%   </li>
+%%% </ul>
+%%%
+%%% Message routing example:
+%%% <pre>
+%%% % Alice sends message to Bob:
+%%% 1. Alice's browser sends JSON via WebSocket
+%%% 2. Alice's handler process receives in websocket_handle/2
+%%% 3. Handler looks up Bob in user_connections ETS: {ok, BobPid}
+%%% 4. Handler sends: BobPid ! {message, "Alice", MessageData}
+%%% 5. Bob's handler receives in websocket_info/2
+%%% 6. Bob's handler sends WebSocket frame to Bob's browser
+%%% </pre>
+%%%
+%%% <h4>State Management</h4>
+%%%
+%%% The handler maintains minimal state:
+%%% <ul>
+%%%   <li>`#{username => "alice"}' - Authenticated username from certificate</li>
+%%%   <li>All other data stored in ETS tables (cryptic_users, cryptic_messages, etc.)</li>
+%%%   <li>No gen_server needed - Cowboy manages the process lifecycle</li>
+%%% </ul>
+%%%
 %%% @author Cryptic Team
 %%% @version 1.0.0
 %%% @since 2025-09-14
@@ -58,12 +141,7 @@
     websocket_init/1,
     websocket_handle/2,
     websocket_info/2,
-    terminate/3,
-    % Double Ratchet integration functions
-    create_conversation_id/2,
-    store_ratchet_state/2,
-    get_ratchet_state/1,
-    update_ratchet_state/2
+    terminate/3
 ]).
 
 %% @doc HTTP to WebSocket upgrade handler
@@ -85,11 +163,10 @@ init(Req, State) ->
             {cowboy_websocket, Req, #{username => Username}};
         {error, Reason} ->
             ?error("Client certificate authentication failed: ~p", [Reason]),
-            {ok,
-                cowboy_req:reply(
-                    401, #{}, <<"Client certificate required">>, Req
-                ),
-                State}
+            Reply = cowboy_req:reply(
+                401, #{}, <<"Authentication failed">>, Req
+            ),
+            {ok, Reply, State}
     end.
 
 %% @doc WebSocket connection initialization
@@ -101,17 +178,17 @@ init(Req, State) ->
 %% @param State The WebSocket state containing the authenticated username
 %% @returns {Replies, State} where Replies contains the welcome message
 websocket_init(State = #{username := Username}) ->
-    %% Register this connection for the user
     register_user_connection(Username, self()),
 
-    %% Send welcome message
     WelcomeMsg = #{
         type => <<"welcome">>,
         message => <<"Connected to Cryptic server">>,
         username => list_to_binary(Username)
     },
     WelcomeJson = jsx:encode(WelcomeMsg),
+
     ?msg_out("Sending welcome message to ~s: ~s", [Username, WelcomeJson]),
+
     {[{text, WelcomeJson}], State}.
 
 %% @doc Handle incoming WebSocket frames
@@ -135,14 +212,13 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                 case cryptic_messages:validate_message(DecodedMessage) of
                     {ok, ValidatedMessage} ->
                         %% Log message type for debugging
-                        MessageType = maps:get(
-                            <<"type">>, ValidatedMessage, <<"unknown">>
-                        ),
+                        MessageType =
+                            maps:get(
+                                <<"type">>, ValidatedMessage, <<"unknown">>
+                            ),
                         ?debug(
                             "Processing validated message from: ~s , type: ~s",
-                            [
-                                Username, MessageType
-                            ]
+                            [Username, MessageType]
                         ),
 
                         %% 3. Process valid message with command handler
@@ -152,17 +228,15 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                             {reply, Response} ->
                                 ResponseJson = jsx:encode(Response),
                                 ?msg_out(
-                                    "Sending WebSocket response to ~s: ~s", [
-                                        Username, ResponseJson
-                                    ]
+                                    "Sending WebSocket response to ~s: ~s",
+                                    [Username, ResponseJson]
                                 ),
                                 {[{text, ResponseJson}], State};
                             {reply, Response, NewState} ->
                                 ResponseJson = jsx:encode(Response),
                                 ?msg_out(
-                                    "Sending WebSocket response to ~s: ~s", [
-                                        Username, ResponseJson
-                                    ]
+                                    "Sending WebSocket response to ~s: ~s",
+                                    [Username, ResponseJson]
                                 ),
                                 {[{text, ResponseJson}], NewState};
                             {noreply, NewState} ->
@@ -173,18 +247,21 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                                     message => list_to_binary(ErrorMsg)
                                 },
                                 ErrorJson = jsx:encode(ErrorResp),
-                                ?debug("Sending WebSocket error to ~s: ~s", [
-                                    Username, ErrorJson
-                                ]),
-                                ?msg_out("Sending WebSocket error to ~s: ~s", [
-                                    Username, ErrorJson
-                                ]),
+                                ?debug(
+                                    "Sending WebSocket error to ~s: ~s",
+                                    [Username, ErrorJson]
+                                ),
+                                ?msg_out(
+                                    "Sending WebSocket error to ~s: ~s",
+                                    [Username, ErrorJson]
+                                ),
                                 {[{text, ErrorJson}], State}
                         end;
                     {error, ValidationError} ->
                         %% 4. Drop invalid message and log the fact
                         ?warning(
-                            "Message validation failed from ~s: ~p, Original: ~s",
+                            "Message validation failed from ~s: ~p, "
+                            "Original: ~s",
                             [Username, ValidationError, Msg]
                         ),
                         ValidationErrorResp = #{
@@ -192,9 +269,10 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
                             message => <<"Invalid message format">>
                         },
                         ValidationErrorJson = jsx:encode(ValidationErrorResp),
-                        ?msg_out("Sending validation error to ~s: ~s", [
-                            Username, ValidationErrorJson
-                        ]),
+                        ?msg_out(
+                            "Sending validation error to ~s: ~s",
+                            [Username, ValidationErrorJson]
+                        ),
                         {[{text, ValidationErrorJson}], State}
                 end;
             _ ->
@@ -213,9 +291,9 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
     catch
         _Error:Reason ->
             ?error(
-                "Failed to handle incoming text frame from ~s; Reason: ~p~n", [
-                    Username, Reason
-                ]
+                "Failed to handle incoming text frame from ~s; "
+                "Reason: ~p~n",
+                [Username, Reason]
             ),
             CatchErrorResponse = #{
                 type => <<"error">>,
@@ -225,14 +303,13 @@ websocket_handle({text, Msg}, State = #{username := Username}) ->
             ?msg_out("Sending error response: ~s", [CatchErrorJson]),
             {[{text, CatchErrorJson}], State}
     end;
+%% Handle binary data - not used!
 websocket_handle({binary, _Data}, State) ->
-    %% Handle binary data if needed
     ?warning("Incoming binary frame, NYI!", []),
     {[], State};
 %% Handle WebSocket ping frames
 websocket_handle(ping, State) ->
     ?msg_in("Received WebSocket ping", []),
-    %% Respond with pong
     ?msg_out("Sending WebSocket pong", []),
     {[pong], State};
 %% Handle WebSocket pong frames
@@ -240,6 +317,7 @@ websocket_handle(pong, State) ->
     ?msg_in("Received WebSocket pong", []),
     %% Just acknowledge, no response needed
     {[], State};
+%% Ignore anything else
 websocket_handle(_Data, State) ->
     {[], State}.
 
@@ -830,57 +908,6 @@ extract_cn_from_sequence([RDN | Rest]) ->
         error -> extract_cn_from_sequence(Rest)
     end.
 
-%% @doc Create a unique conversation identifier for two users
-%%
-%% Creates a deterministic conversation ID that is the same regardless
-%% of which user creates it (Alice-Bob = Bob-Alice).
-%%
-%% @param User1 First user in the conversation
-%% @param User2 Second user in the conversation
-%% @returns Unique conversation ID string
-create_conversation_id(User1, User2) ->
-    %% Sort users to ensure consistent ID regardless of order
-    SortedUsers = lists:sort([User1, User2]),
-    string:join(SortedUsers, "-").
-
-%% @doc Store Double Ratchet state for a conversation
-%%
-%% Persists the ratchet state to storage for later retrieval.
-%%
-%% @param ConversationId Unique conversation identifier
-%% @param RatchetState Double Ratchet state record
-%% @returns ok | {error, Reason}
-store_ratchet_state(ConversationId, RatchetState) ->
-    %% Serialize the ratchet state
-    SerializedState = cryptic_double_ratchet:serialize_state(RatchetState),
-
-    %% Store in chat storage (extending existing storage system)
-    cryptic_chat_storage:store_ratchet_state(ConversationId, SerializedState).
-
-%% @doc Retrieve Double Ratchet state for a conversation
-%%
-%% Loads the ratchet state from storage.
-%%
-%% @param ConversationId Unique conversation identifier
-%% @returns {ok, RatchetState} | {error, not_found}
-get_ratchet_state(ConversationId) ->
-    case cryptic_chat_storage:get_ratchet_state(ConversationId) of
-        {ok, SerializedState} ->
-            cryptic_double_ratchet:deserialize_state(SerializedState);
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-%% @doc Update Double Ratchet state for a conversation
-%%
-%% Updates the stored ratchet state after message processing.
-%%
-%% @param ConversationId Unique conversation identifier
-%% @param NewRatchetState Updated ratchet state
-%% @returns ok | {error, Reason}
-update_ratchet_state(ConversationId, NewRatchetState) ->
-    store_ratchet_state(ConversationId, NewRatchetState).
-
 %% @doc Extract Common Name from single RDN entry
 %%
 %% Searches within a single Relative Distinguished Name entry for
@@ -922,12 +949,7 @@ extract_cn_from_rdn([_ | Rest]) ->
 %% @param Pid The WebSocket handler process PID
 %% @returns ok (ETS insert always succeeds)
 register_user_connection(Username, Pid) ->
-    %% Register the connection
     ets:insert(user_connections, {Username, Pid}),
-    ?msg_out(
-        "Registered connection for ~s (pending messages available on request)",
-        [Username]
-    ),
     ok.
 
 %% @doc Find user connection by username
@@ -957,7 +979,7 @@ find_user_connection(Username) ->
 %% @returns ok
 terminate(_Reason, _Req, #{username := Username}) ->
     ets:delete(user_connections, Username),
-    ?info("User ~s disconnected and removed from connection table", [Username]),
+    ?debug("User ~s disconnected~n", [Username]),
     ok;
 terminate(_Reason, _Req, _State) ->
     ok.

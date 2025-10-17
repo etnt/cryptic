@@ -118,6 +118,143 @@
 %%%   <li>`cowboy' - HTTP/WebSocket server framework</li>
 %%% </ul>
 %%%
+%%% == Process Architecture ==
+%%%
+%%% Understanding the processes created when a client connects:
+%%%
+%%% <h4>Server Startup (One-time)</h4>
+%%% <ol>
+%%%   <li>`cryptic_server' - Gen_server process (registered name), manages server lifecycle</li>
+%%%   <li>`cowboy' listener processes - Created by `cowboy:start_tls/3':
+%%%       <ul>
+%%%         <li>`ranch_listener_sup' - Supervisor for the listener</li>
+%%%         <li>`ranch_acceptors_sup' - Supervisor for acceptor processes</li>
+%%%         <li>Multiple acceptor processes - Wait for incoming connections</li>
+%%%         <li>`ranch_conns_sup' - Supervisor for connection processes</li>
+%%%       </ul>
+%%%   </li>
+%%% </ol>
+%%%
+%%% <h4>Per-Client Connection</h4>
+%%%
+%%% When a client connects to the server, the following happens:
+%%%
+%%% <ol>
+%%%   <li>TCP/TLS Handshake - An acceptor process accepts the connection and
+%%%       performs the TLS handshake with mTLS client certificate validation</li>
+%%%   
+%%%   <li>HTTP Process - Ranch/Cowboy creates a new process to handle the HTTP request:
+%%%       <ul>
+%%%         <li>This process is supervised by `ranch_conns_sup'</li>
+%%%         <li>Initially handles HTTP protocol</li>
+%%%       </ul>
+%%%   </li>
+%%%   
+%%%   <li>WebSocket Upgrade - When client requests WebSocket upgrade to `/ws':
+%%%       <ul>
+%%%         <li>`cryptic_ws_handler:init/2' is called in the HTTP process</li>
+%%%         <li>Extracts client certificate and authenticates user (CN field)</li>
+%%%         <li>Returns `{cowboy_websocket, Req, State}' to approve upgrade</li>
+%%%       </ul>
+%%%   </li>
+%%%   
+%%%   <li>WebSocket Handler Process - The HTTP process transforms into a WebSocket handler:
+%%%       <ul>
+%%%         <li>SAME process continues (not a new process)</li>
+%%%         <li>`cryptic_ws_handler:websocket_init/1' is called</li>
+%%%         <li>Registers user in `user_connections' ETS table: `{Username, Pid}'</li>
+%%%         <li>This Pid is the WebSocket handler process itself</li>
+%%%       </ul>
+%%%   </li>
+%%% </ol>
+%%%
+%%% <h4>Process Communication</h4>
+%%%
+%%% <ul>
+%%%   <li>Incoming messages - WebSocket frames trigger `websocket_handle/2' callbacks</li>
+%%%   <li>Outgoing messages - Return tuples like `{[{text, Json}], State}' send frames</li>
+%%%   <li>Inter-user messages - Uses Erlang messaging:
+%%%       <pre>
+%%%       %% User A wants to send to User B:
+%%%       1. A's handler sends command via WebSocket
+%%%       2. Handler looks up B's Pid in user_connections ETS
+%%%       3. Sends Erlang message: B_Pid ! {message, FromUser, MessageData}
+%%%       4. B's handler receives in websocket_info/2
+%%%       5. B's handler sends WebSocket frame to B's client
+%%%       </pre>
+%%%   </li>
+%%%   <li>Process cleanup - When WebSocket closes:
+%%%       <ul>
+%%%         <li>`terminate/3' is called</li>
+%%%         <li>User entry removed from `user_connections' ETS</li>
+%%%         <li>Handler process terminates</li>
+%%%       </ul>
+%%%   </li>
+%%% </ul>
+%%%
+%%% Connection flow:
+%%%
+%%% <pre>
+%%%   Client Connect
+%%%       ↓
+%%%   [Ranch Acceptor] accepts TCP connection
+%%%       ↓
+%%%   [TLS Handshake] validates client certificate (mTLS)
+%%%       ↓
+%%%   [HTTP Process] created by Ranch
+%%%       ↓
+%%%   init/2 called → authenticates user from certificate
+%%%       ↓
+%%%   [WebSocket Upgrade] same process continues
+%%%       ↓
+%%%   websocket_init/1 → registers in user_connections ETS
+%%%       ↓
+%%%   [Active WebSocket Handler Process]
+%%%       ├─ websocket_handle/2 ← WebSocket frames from client
+%%%       └─ websocket_info/2   ← Erlang messages from other users
+%%%       ↓
+%%%   [Connection Close]
+%%%       ↓
+%%%   terminate/3 → cleanup from ETS
+%%%       ↓
+%%%   Process exits
+%%% </pre>
+%%%
+%%% <h4>Process Supervision Tree</h4>
+%%%
+%%% <pre>
+%%% cryptic_sup
+%%%   |
+%%%   +-- cryptic_server (gen_server, this module)
+%%%   |
+%%%   +-- cryptic_event_manager (gen_event)
+%%%   |
+%%%   +-- ranch_listener_sup (created by cowboy:start_tls)
+%%%         |
+%%%         +-- ranch_acceptors_sup
+%%%         |     |
+%%%         |     +-- acceptor_1
+%%%         |     +-- acceptor_2
+%%%         |     +-- ... (multiple acceptors)
+%%%         |
+%%%         +-- ranch_conns_sup
+%%%               |
+%%%               +-- conn_process_1 (WebSocket handler for user Alice)
+%%%               +-- conn_process_2 (WebSocket handler for user Bob)
+%%%               +-- ... (one per connected client)
+%%% </pre>
+%%%
+%%% <h4>Key Points</h4>
+%%%
+%%% <ul>
+%%%   <li>ONE `cryptic_server' gen_server for the entire application</li>
+%%%   <li>ONE WebSocket handler process PER connected client</li>
+%%%   <li>ETS table `user_connections' maps usernames to handler Pids</li>
+%%%   <li>Message routing uses direct Erlang messaging (Pid ! Message)</li>
+%%%   <li>Each handler is supervised by Ranch/Cowboy infrastructure</li>
+%%%   <li>No gen_server for individual connections - just callback module behavior</li>
+%%% </ul>
+%%%
 %%% @author Cryptic Team
 %%% @version 1.0.0
 %%% @since 2025-09-14
@@ -143,7 +280,6 @@
 -include("cryptic_server.hrl").
 
 -define(SERVER, ?MODULE).
-
 
 %%%===================================================================
 %%% API
@@ -178,7 +314,8 @@ init([]) ->
 %% @doc Handle continuation after initialization
 %%
 %% Called after init/1 to complete server startup. Sets up event
-%% handlers and proceeds with the main server configuration.
+%% handlers and completes the server startup process by creating ETS tables,
+%% checking configuration, and start the WebSocket mTLS server.
 %%
 %% @param start_server Continuation atom indicating startup phase
 %% @param CfgMap Current configuration map
@@ -189,7 +326,7 @@ handle_continue(start_server, CfgMap) ->
         log_type => server,
         log_dir => "logs"
     }),
-    % Allow time for event manager setup
+    %% Allow time for event manager setup
     sleep(10),
 
     continue(CfgMap).
@@ -208,26 +345,6 @@ sleep(T) ->
     end.
 
 %% @doc Continue server initialization
-%%
-%% Completes the server startup process by creating ETS tables,
-%% checking configuration, and optionally starting the WebSocket
-%% mTLS server based on application environment settings.
-%%
-%% This function:
-%% <ul>
-%%   <li>Creates all required ETS tables via `ets_tables/0'</li>
-%%   <li>Checks the `websocket_mtls_enabled' application environment setting</li>
-%%   <li>Starts the WebSocket server if enabled (default port: 8443)</li>
-%%   <li>Configures Cowboy HTTP server with TLS and WebSocket routes</li>
-%% </ul>
-%%
-%% The WebSocket server is configured with:
-%% <ul>
-%%   <li>Server host from `server_host' env (default: "localhost")</li>
-%%   <li>Server port from `websocket_mtls_port' env (default: 8443)</li>
-%%   <li>Certificate paths from environment variables or defaults</li>
-%%   <li>Routes: `/ws' for WebSocket, `/static/[...]' for static files</li>
-%%% </ul>
 %%
 %% @param CfgMap Configuration map
 %% @returns {noreply, State} after completing initialization
@@ -342,8 +459,7 @@ handle_info(_Info, State) ->
 %%
 %% <ul>
 %%%   <li>Stop Cowboy WebSocket listener</li>
-%%%   <li>Delete user_connections ETS table</li>
-%%%   <li>Delete blobs ETS table</li>
+%%%   <li>Delete the ETS tables</li>
 %% </ul>
 %%
 %% @param Reason Termination reason (ignored)
@@ -354,8 +470,7 @@ terminate(_Reason, _State) ->
     catch cowboy:stop_listener(cryptic_ws_listener),
 
     %% Clean up ETS tables
-    catch ets:delete(user_connections),
-    catch ets:delete(blobs),
+    [ets:delete(Table) || Table <- ets_tables()],
 
     ok.
 
