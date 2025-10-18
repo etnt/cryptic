@@ -141,15 +141,6 @@
 %%%
 %%% Key Management Responses:
 %%%
-%%% Key status response:
-%%% <pre>
-%%% {
-%%%   "type": "key_status",
-%%%   "status": {},
-%%%   "error": "error-message"
-%%% }
-%%% </pre>
-%%%
 %%% Key bundle response:
 %%% <pre>
 %%% {
@@ -251,7 +242,6 @@
     upload_identity_keys/1,
     upload_prekey_bundle/1,
     get_key_bundle/1,
-    key_status/0,
 
     % Client to Server - Messaging
     send_message_x3dh/1,
@@ -394,14 +384,6 @@ get_key_bundle(MsgMap) ->
             Error
     end.
 
-%% @doc Construct the `key_status' message
-%%
-%% Requests the current user's key status and statistics.
-%%
-%% @returns `{ok, Message}'
--spec key_status() -> validation_result().
-key_status() ->
-    {ok, #{<<"type">> => <<"key_status">>}}.
 
 %%% ============================================================================
 %%% Client to Server Messages - Messaging

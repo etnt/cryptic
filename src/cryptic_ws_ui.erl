@@ -2053,6 +2053,7 @@ handle_user_status_response(Data, UIState) ->
 %% - Signed prekey information
 %% - One-time prekeys count
 %% - Key bundle creation timestamp
+%% FIXME message removed !!
 handle_key_status_response(Data, UIState) ->
     case maps:get(<<"status">>, Data, undefined) of
         undefined ->

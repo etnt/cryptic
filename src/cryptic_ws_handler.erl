@@ -445,33 +445,29 @@ handle_command(
             {error, io_lib:format("Invalid prekey bundle format: ~p", [Error])}
     end;
 %% Get key bundle for X3DH (Step 1 implementation)
-handle_command(
-    #{<<"type">> := <<"get_key_bundle">>, <<"user">> := UserB},
-    _Username,
-    _State
-) ->
+handle_command(#{<<"type">> := <<"get_key_bundle">>,
+                 <<"user">> := UserB},
+               _Username,
+               _State) ->
     User = binary_to_list(UserB),
     ?debug("get_key_bundle request for user: ~p", [User]),
-    case cryptic_lib:get_key_bundle(User) of
+
+    case get_key_bundle(User) of
         {error, not_found} ->
             ?debug("Key bundle not found for user: ~p", [User]),
             {error, "key-bundle-not-found"};
         {ok, BundleData} ->
-            ?debug(
-                "Found key bundle for user: ~p, bundle keys: ~p", [
-                    User, maps:keys(BundleData)
-                ]
-            ),
-            #{
-                identity_sign_public := IdentitySignPub,
-                identity_dh_public := IdentityDHPub,
-                signed_prekey := #{
-                    public := SignedPrekeyPub,
-                    signature := Signature
-                },
-                one_time_prekeys := OtpkList,
-                key_id := KeyId
-            } = BundleData,
+            ?debug("Found key bundle for user: ~p, bundle keys: ~p",
+                   [User, maps:keys(BundleData)]),
+            #{identity_sign_public := IdentitySignPub,
+              identity_dh_public := IdentityDHPub,
+              signed_prekey := #{
+                                 public := SignedPrekeyPub,
+                                 signature := Signature
+                                },
+              one_time_prekeys := OtpkList,
+              key_id := KeyId
+             } = BundleData,
 
             %% Select and mark one OTPK as consumed (if available)
             {SelectedOtpk, RemainingOtpks} =
@@ -481,7 +477,7 @@ handle_command(
                     [FirstOtpk | RestOtpks] ->
                         %% Mark this OTPK as consumed
                         #{id := FirstOtpkId} = FirstOtpk,
-                        cryptic_lib:mark_otpk_consumed(User, FirstOtpkId),
+                        mark_otpk_consumed(User, FirstOtpkId),
                         {FirstOtpk, RestOtpks}
                 end,
 
@@ -720,27 +716,6 @@ handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
         users => [list_to_binary(U) || U <- Users]
     },
     {reply, Response};
-handle_command(#{<<"type">> := <<"key_status">>}, Username, _State) ->
-    case cryptic_lib:get_key_status(Username) of
-        {ok, KeyStatus} ->
-            Response = #{
-                type => <<"key_status">>,
-                status => KeyStatus
-            },
-            {reply, Response};
-        {error, not_found} ->
-            Response = #{
-                type => <<"key_status">>,
-                error => <<"No keys found for user">>,
-                status => #{
-                    username => list_to_binary(Username),
-                    has_identity_keys => false,
-                    has_signed_prekey => false,
-                    otpk_count => 0
-                }
-            },
-            {reply, Response}
-    end;
 handle_command(Command, Username, _State) ->
     ?debug("Unknown command from ~s: ~p", [Username, Command]),
     {error, "Unknown command"}.
@@ -979,3 +954,117 @@ store_prekey_bundle(Username, PrekeyList) ->
         _:Error ->
             {error, Error}
     end.
+
+%% @doc Get complete key bundle for a user with fresh OTPK list.
+%%
+%% Retrieves the user's complete key bundle from PREKEY_TABLE structured format.
+%% Reconstructs the bundle from identity data and available OTPKs.
+%%
+%% @param Username User ID
+%% @returns {ok, KeyBundle} or {error, not_found}
+-spec get_key_bundle(string()) -> {ok, map()} | {error, not_found}.
+get_key_bundle(Username) ->
+    ?debug("Looking up key bundle for username: ~p", [Username]),
+
+    %% Look for identity entry in PREKEY_TABLE
+    case ets:lookup(?PREKEY_TABLE, {Username, identity}) of
+        [{{Username, identity}, IdentityData}] ->
+            ?debug("Found identity data for ~p", [Username]),
+            %% Extract identity data
+            #{
+                identity_sign_public := IdentitySignPub,
+                identity_dh_public := IdentityDHPub,
+                signed_prekey := #{
+                    public := SignedPrekeyPub,
+                    signature := SignedPrekeySignature,
+                    timestamp := Timestamp
+                }
+            } = IdentityData,
+
+            ?debug("get_key_bundle: Retrieved IdentitySignPub: ~p",
+                   [IdentitySignPub]),
+            ?debug("get_key_bundle: Retrieved IdentityDHPub: ~p",
+                   [IdentityDHPub]),
+            ?debug("get_key_bundle: Retrieved SignedPrekeyPub: ~p",
+                   [SignedPrekeyPub]),
+            ?debug("get_key_bundle: Retrieved SignedPrekeySignature: ~p",
+                   [SignedPrekeySignature]),
+
+            %% key_id might not exist for upload_identity_keys flow
+            KeyId = maps:get(
+                key_id, IdentityData, crypto:strong_rand_bytes(16)
+            ),
+
+            %% Get OTPKs for this user
+            AvailableOtpks = get_available_otpks(Username),
+            ?debug("Available OTPKs for ~p: ~p",
+                   [Username, length(AvailableOtpks)]),
+
+            %% Reconstruct bundle in expected format
+            ReconstructedBundle = #{
+                username => Username,
+                key_id => KeyId,
+                identity_sign_public => IdentitySignPub,
+                identity_dh_public => IdentityDHPub,
+                signed_prekey => #{
+                    public => SignedPrekeyPub,
+                    signature => SignedPrekeySignature,
+                    timestamp => Timestamp
+                },
+                one_time_prekeys => AvailableOtpks,
+                created_at => maps:get(
+                    created_at, IdentityData, erlang:system_time(second)
+                )
+            },
+
+            ?debug("Successfully retrieved bundle for ~p", [Username]),
+            {ok, ReconstructedBundle};
+        [] ->
+            ?debug("No key bundle found for username: ~p", [Username]),
+            {error, not_found}
+    end.
+
+
+%% @doc Get available one-time prekeys for a user.
+%%
+%% Retrieves all unconsumed OTPKs for the specified user using
+%% structured tuple key matching.
+%%
+%% @param Username User ID
+%% @returns List of available OTPK data maps
+-spec get_available_otpks(string()) -> [map()].
+get_available_otpks(Username) ->
+    %% Use ets:match to find all OTPKs for this user
+    Pattern = {{Username, otpk, '_'}, '$1'},
+    Matches = ets:match(?PREKEY_TABLE, Pattern),
+    [
+        #{
+            id => maps:get(key_id, PrekeyData),
+            public => maps:get(public_key, PrekeyData)
+            %% Note: private key not stored on server for security
+        }
+     || [PrekeyData] <- Matches, not maps:get(consumed, PrekeyData, false)
+    ].
+
+
+%% @doc Mark one-time prekey as consumed to ensure one-time use.
+%%
+%% Removes the specified OTPK from the user's prekey storage to prevent reuse.
+%% Uses the new structured tuple key format for efficient lookup.
+%%
+%% @param Username User ID
+%% @param OtpkId One-time prekey ID to mark as consumed
+%% @returns ok | {error, not_found}
+-spec mark_otpk_consumed(string(), binary()) -> ok | {error, not_found}.
+mark_otpk_consumed(Username, OtpkId) ->
+    %% Use structured tuple key for direct lookup
+    KeyTuple = {Username, otpk, OtpkId},
+    case ets:lookup(?PREKEY_TABLE, KeyTuple) of
+        [] ->
+            {error, not_found};
+        [{KeyTuple, _PrekeyData}] ->
+            %% Delete the consumed OTPK
+            ets:delete(?PREKEY_TABLE, KeyTuple),
+            ok
+    end.
+
