@@ -27,7 +27,7 @@
 %%%
 %%% The handler processes JSON commands over WebSocket:
 %%% <ul>
-%%%   <li>`upload_prekey' - Upload user's public key for encryption</li>
+%%%   <li>`upload_key_bundle' - Upload user's public key for encryption</li>
 %%%   <li>`get_prekey' - Request another user's public key</li>
 %%%   <li>`send_message' - Send encrypted message to another user</li>
 %%%   <li>`get_messages' - Retrieve stored messages</li>
@@ -343,13 +343,6 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
         FromUser, Username, ResponseJson
     ]),
     {[{text, ResponseJson}], State};
-websocket_info({send_message, RoomMessage}, State) ->
-    %% Handle room message forwarding from broadcast_to_room_members
-    ?debug("DEBUG WS: Received send_message: ~p", [RoomMessage]),
-    JsonResponse = jsx:encode(RoomMessage),
-    ?debug("DEBUG WS: Forwarding room message: ~p", [JsonResponse]),
-    ?msg_out("Forwarding room message: ~s", [JsonResponse]),
-    {[{text, JsonResponse}], State};
 websocket_info(_Info, State) ->
     {[], State}.
 
@@ -366,93 +359,6 @@ websocket_info(_Info, State) ->
 %%          {reply, Response, NewState} for response with state change,
 %%          {noreply, NewState} for state change without response,
 %%          {error, ErrorMsg} for error responses
-handle_command(
-    #{<<"type">> := <<"upload_prekey">>, <<"prekey">> := PrekeyB64},
-    Username,
-    _State
-) ->
-    try
-        Prekey = base64:decode(PrekeyB64),
-        case cryptic_lib:store_prekey(Username, Prekey) of
-            ok ->
-                {reply, #{
-                    type => <<"success">>, message => <<"Prekey uploaded">>
-                }};
-            {error, Reason} ->
-                {error, io_lib:format("Failed to store prekey: ~p", [Reason])}
-        end
-    catch
-        _:_ ->
-            {error, "Invalid prekey format"}
-    end;
-%% Handle key bundle upload (Step 1 implementation)
-handle_command(
-    #{
-        <<"type">> := <<"upload_key_bundle">>,
-        <<"identity_public">> := IdentityPubB64,
-        <<"signed_prekey_public">> := SignedPrekeyPubB64,
-        <<"signed_prekey_signature">> := SignatureB64,
-        <<"one_time_prekeys">> := OtpkListB64,
-        <<"key_id">> := KeyIdB64
-    },
-    Username,
-    _State
-) ->
-    try
-        %% Decode all the key components
-        IdentityPub = base64:decode(IdentityPubB64),
-        SignedPrekeyPub = base64:decode(SignedPrekeyPubB64),
-        Signature = base64:decode(SignatureB64),
-        KeyId = base64:decode(KeyIdB64),
-
-        %% Decode one-time prekeys
-        OtpkList = lists:map(
-            fun(#{<<"id">> := IdB64, <<"public">> := PubB64}) ->
-                #{
-                    id => base64:decode(IdB64),
-                    public => base64:decode(PubB64)
-                }
-            end,
-            OtpkListB64
-        ),
-
-        %% Verify the signed prekey signature
-        case
-            cryptic_lib:verify_signature(
-                SignedPrekeyPub, Signature, IdentityPub
-            )
-        of
-            false ->
-                {error, "Invalid signed prekey signature"};
-            true ->
-                %% Create the key bundle
-                KeyBundle = #{
-                    identity_sign_public => IdentityPub,
-                    signed_prekey_public => SignedPrekeyPub,
-                    signed_prekey_signature => Signature,
-                    one_time_prekeys => OtpkList,
-                    key_id => KeyId
-                },
-
-                %% Store the key bundle
-                case cryptic_lib:store_key_bundle(Username, KeyBundle) of
-                    ok ->
-                        {reply, #{
-                            type => <<"success">>,
-                            message => <<"Key bundle uploaded successfully">>
-                        }};
-                    {error, Reason} ->
-                        {error,
-                            io_lib:format("Failed to store key bundle: ~p", [
-                                Reason
-                            ])}
-                end
-        end
-    catch
-        _:Error ->
-            {error, io_lib:format("Invalid key bundle format: ~p", [Error])}
-    end;
-%% Handle identity keys upload (new 5-step authentication flow)
 handle_command(
     #{
         <<"type">> := <<"upload_identity_keys">>,
@@ -482,7 +388,7 @@ handle_command(
         },
 
         %% Store the identity keys
-        case cryptic_lib:store_identity_keys(Username, IdentityKeys) of
+        case store_identity_keys(Username, IdentityKeys) of
             ok ->
                 {reply, #{
                     type => <<"success">>,
@@ -518,7 +424,7 @@ handle_command(
         ),
 
         %% Store the prekey bundle
-        case cryptic_lib:store_prekey_bundle(Username, OtpkList) of
+        case store_prekey_bundle(Username, OtpkList) of
             ok ->
                 {reply, #{
                     type => <<"success">>,
@@ -949,7 +855,7 @@ extract_cn_from_rdn([_ | Rest]) ->
 %% @param Pid The WebSocket handler process PID
 %% @returns ok (ETS insert always succeeds)
 register_user_connection(Username, Pid) ->
-    ets:insert(user_connections, {Username, Pid}),
+    ets:insert(?CONNECTION_TABLE, {Username, Pid}),
     ok.
 
 %% @doc Find user connection by username
@@ -962,7 +868,7 @@ register_user_connection(Username, Pid) ->
 %% @returns {ok, Pid} if user is connected, not_found if offline
 
 find_user_connection(Username) ->
-    case ets:lookup(user_connections, Username) of
+    case ets:lookup(?CONNECTION_TABLE, Username) of
         [{Username, Pid}] -> {ok, Pid};
         [] -> not_found
     end.
@@ -978,8 +884,98 @@ find_user_connection(Username) ->
 %% @param State The WebSocket state containing username information
 %% @returns ok
 terminate(_Reason, _Req, #{username := Username}) ->
-    ets:delete(user_connections, Username),
+    ets:delete(?CONNECTION_TABLE, Username),
     ?debug("User ~s disconnected~n", [Username]),
     ok;
 terminate(_Reason, _Req, _State) ->
     ok.
+
+
+%% -------------------------------------------------------------------
+%% H E L P E R S
+%% -------------------------------------------------------------------
+
+
+%% @doc Store identity keys for a user (5-step authentication flow).
+%%
+%% Stores the user's identity keys including the public identity key,
+%% signed prekey, and prekey signature. This is used in the new
+%% 5-step authentication flow where identity keys are uploaded separately
+%% from one-time prekey bundles.
+%%
+%% @param Username User ID
+%% @param IdentityKeys Map containing identity key components
+%% @returns ok or {error, Reason}
+-spec store_identity_keys(string(), map()) -> ok | {error, term()}.
+store_identity_keys(Username, IdentityKeys) ->
+    try
+        #{
+            identity_sign_public := IdentitySignPub,
+            identity_dh_public := IdentityDHPub,
+            signed_prekey_public := SignedPrekeyPub,
+            signed_prekey_signature := Signature,
+            timestamp := Timestamp
+        } = IdentityKeys,
+
+        %% Store identity keys with structured tuple key
+        IdentityData = #{
+            username => Username,
+            identity_sign_public => IdentitySignPub,
+            identity_dh_public => IdentityDHPub,
+            signed_prekey => #{
+                public => SignedPrekeyPub,
+                signature => Signature,
+                timestamp => Timestamp
+            },
+            created_at => erlang:system_time(second)
+        },
+
+        %% Use structured tuple key: {username, identity}
+        ets:insert(?PREKEY_TABLE, {{Username, identity}, IdentityData}),
+        ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
+        ok
+    catch
+        error:{badkey, Key} ->
+            {error, {missing_key, Key}};
+        _:Error ->
+            {error, Error}
+    end.
+
+
+
+%% @doc Store prekey bundle (one-time prekeys) for a user.
+%%
+%% Stores a list of one-time prekeys for forward secrecy. This is used
+%% in step 5 of the new authentication flow where prekey bundles are
+%% uploaded separately from identity keys.
+%%
+%% @param Username User ID
+%% @param PrekeyList List of prekey maps with id and public key
+%% @returns ok or {error, Reason}
+-spec store_prekey_bundle(string(), [map()]) -> ok | {error, term()}.
+store_prekey_bundle(Username, PrekeyList) ->
+    try
+        %% Store each one-time prekey individually with structured tuple keys
+        lists:foreach(
+            fun(#{id := KeyId, public := PubKey}) ->
+                %% Use structured tuple key: {username, otpk, key_id}
+                KeyTuple = {Username, otpk, KeyId},
+                PrekeyData = #{
+                    username => Username,
+                    key_id => KeyId,
+                    public_key => PubKey,
+                    consumed => false,
+                    created_at => erlang:system_time(second)
+                },
+                ets:insert(?PREKEY_TABLE, {KeyTuple, PrekeyData})
+            end,
+            PrekeyList
+        ),
+
+        %% Update user record
+        ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
+        ok
+    catch
+        _:Error ->
+            {error, Error}
+    end.

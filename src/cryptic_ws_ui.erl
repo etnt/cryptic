@@ -1789,7 +1789,9 @@ extract_and_cache_identity_key(Data, From) ->
 
     %% Build the complete key bundle in the format expected by store_key_bundle
     User = maps:get(<<"user">>, Data, list_to_binary(From)),
-    KeyBundle = #{
+
+    %% FIXME
+    _KeyBundle = #{
         identity_sign_public => SenderIdSignPub,
         identity_dh_public => SenderIdDHPub,
         signed_prekey_public => SignedPrekey,
@@ -1799,7 +1801,9 @@ extract_and_cache_identity_key(Data, From) ->
     },
 
     %% Cache the key bundle
-    cryptic_lib:store_key_bundle(binary_to_list(User), KeyBundle),
+
+    %% FIXME removed from cryptic lib - not needed anymore!
+    %%cryptic_lib:store_key_bundle(binary_to_list(User), KeyBundle),
     ?dbg("Cached key bundle for ~s", [binary_to_list(User)]),
     {SenderIdSignPub, KeyId}.
 

@@ -168,15 +168,11 @@
     sign_message/2,
     verify_signature/3,
     %% Key bundle management
-    store_key_bundle/2,
     get_key_bundle/1,
     get_signed_prekey_with_signature/1,
     mark_otpk_consumed/2,
     get_available_otpks/1,
     get_key_status/1,
-    %% Identity keys management
-    store_identity_keys/2,
-    store_prekey_bundle/2,
     %% X3DH Protocol Implementation
     x3dh_sender_init/3,
     x3dh_sender_init_with_session_key/3,
@@ -1168,153 +1164,6 @@ verify_signature(Message, Signature, PublicKey) ->
     Result.
 
 
-
-%% @doc Store complete key bundle for a user with signatures and metadata.
-%%
-%% Stores the complete key bundle using PREKEY_TABLE structured format:
-%% - {Username, identity} -> Identity keys and signed prekey with signature
-%% - {Username, otpk, KeyId} -> Individual one-time prekeys
-%%
-%% @param Username User ID
-%% @param KeyBundle Complete key bundle map from generate_client_keys/0
-%% @returns ok
--spec store_key_bundle(string(), map()) -> ok.
-store_key_bundle(Username, KeyBundle) ->
-    ?dbg("Storing key bundle for username: ~p", [Username]),
-    #{
-        identity_sign_public := IdentitySignPub,
-        signed_prekey_public := SignedPrekeyPub,
-        signed_prekey_signature := SignedPrekeySignature,
-        one_time_prekeys := OneTimePrekeys,
-        key_id := KeyId
-    } = KeyBundle,
-
-    ?dbg("store_key_bundle: IdentitySignPub: ~p", [IdentitySignPub]),
-    ?dbg("store_key_bundle: SignedPrekeyPub: ~p", [SignedPrekeyPub]),
-    ?dbg("store_key_bundle: SignedPrekeySignature: ~p", [
-        SignedPrekeySignature
-    ]),
-
-    %% Store identity data in PREKEY_TABLE format
-    IdentityData = #{
-        username => Username,
-        key_id => KeyId,
-        identity_public => IdentitySignPub,
-        signed_prekey => #{
-            public => SignedPrekeyPub,
-            signature => SignedPrekeySignature,
-            timestamp => erlang:system_time(second)
-        },
-        created_at => erlang:system_time(second)
-    },
-
-    ?dbg("Storing identity and ~p OTPKs for ~p", [
-        length(OneTimePrekeys), Username
-    ]),
-    ets:insert(?PREKEY_TABLE, {{Username, identity}, IdentityData}),
-
-    %% Store each one-time prekey individually
-    lists:foreach(
-        fun(#{id := OtpkId, public := OtpkPub}) ->
-            KeyTuple = {Username, otpk, OtpkId},
-            PrekeyData = #{
-                username => Username,
-                key_id => OtpkId,
-                public_key => OtpkPub,
-                consumed => false,
-                created_at => erlang:system_time(second)
-            },
-            ets:insert(?PREKEY_TABLE, {KeyTuple, PrekeyData})
-        end,
-        OneTimePrekeys
-    ),
-
-    %% Update user record
-    ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
-    ?dbg("Successfully stored key bundle for ~p", [Username]),
-    ok.
-
-%% @doc Store identity keys for a user (5-step authentication flow).
-%%
-%% Stores the user's identity keys including the public identity key,
-%% signed prekey, and prekey signature. This is used in the new
-%% 5-step authentication flow where identity keys are uploaded separately
-%% from one-time prekey bundles.
-%%
-%% @param Username User ID
-%% @param IdentityKeys Map containing identity key components
-%% @returns ok or {error, Reason}
--spec store_identity_keys(string(), map()) -> ok | {error, term()}.
-store_identity_keys(Username, IdentityKeys) ->
-    try
-        #{
-            identity_sign_public := IdentitySignPub,
-            identity_dh_public := IdentityDHPub,
-            signed_prekey_public := SignedPrekeyPub,
-            signed_prekey_signature := Signature,
-            timestamp := Timestamp
-        } = IdentityKeys,
-
-        %% Store identity keys with structured tuple key
-        IdentityData = #{
-            username => Username,
-            identity_sign_public => IdentitySignPub,
-            identity_dh_public => IdentityDHPub,
-            signed_prekey => #{
-                public => SignedPrekeyPub,
-                signature => Signature,
-                timestamp => Timestamp
-            },
-            created_at => erlang:system_time(second)
-        },
-
-        %% Use structured tuple key: {username, identity}
-        ets:insert(?PREKEY_TABLE, {{Username, identity}, IdentityData}),
-        ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
-        ok
-    catch
-        error:{badkey, Key} ->
-            {error, {missing_key, Key}};
-        _:Error ->
-            {error, Error}
-    end.
-
-%% @doc Store prekey bundle (one-time prekeys) for a user.
-%%
-%% Stores a list of one-time prekeys for forward secrecy. This is used
-%% in step 5 of the new authentication flow where prekey bundles are
-%% uploaded separately from identity keys.
-%%
-%% @param Username User ID
-%% @param PrekeyList List of prekey maps with id and public key
-%% @returns ok or {error, Reason}
--spec store_prekey_bundle(string(), [map()]) -> ok | {error, term()}.
-store_prekey_bundle(Username, PrekeyList) ->
-    try
-        %% Store each one-time prekey individually with structured tuple keys
-        lists:foreach(
-            fun(#{id := KeyId, public := PubKey}) ->
-                %% Use structured tuple key: {username, otpk, key_id}
-                KeyTuple = {Username, otpk, KeyId},
-                PrekeyData = #{
-                    username => Username,
-                    key_id => KeyId,
-                    public_key => PubKey,
-                    consumed => false,
-                    created_at => erlang:system_time(second)
-                },
-                ets:insert(?PREKEY_TABLE, {KeyTuple, PrekeyData})
-            end,
-            PrekeyList
-        ),
-
-        %% Update user record
-        ets:insert(?USER_TABLE, {Username, erlang:system_time(second)}),
-        ok
-    catch
-        _:Error ->
-            {error, Error}
-    end.
 
 %% @doc Get complete key bundle for a user with fresh OTPK list.
 %%

@@ -412,7 +412,7 @@ continue(CfgMap) ->
 %%
 %% @returns List of table names (atoms)
 ets_tables() ->
-    [user_connections, cryptic_users, cryptic_messages, cryptic_prekeys].
+    [?CONNECTION_TABLE, ?USER_TABLE, ?MESSAGE_TABLE, ?PREKEY_TABLE].
 
 %% @doc Handling call messages
 %%
