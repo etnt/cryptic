@@ -77,8 +77,24 @@ This generates:
 ```bash
 # Certificate files
 CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.crt
-CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.key  
+CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.key
 CA/client_keys/dave@example.com_Mon-Sep-13-14:23:45-CEST-2025.pem
+```
+
+### Verifying Username Extraction
+
+To see what username will be extracted from a certificate:
+
+```bash
+# Check certificate details
+openssl x509 -in CA/client_keys/alice.crt -text -noout | grep -A5 "Subject:"
+openssl x509 -in CA/client_keys/alice.crt -text -noout | grep -A10 "Subject Alternative Name"
+
+# Example output:
+#   Subject: CN=EMP-5432, emailAddress=alice@company.com, O=Company, C=US
+#   X509v3 Subject Alternative Name:
+#       email:alice@company.com, DNS:alice.internal.company.com
+# Extracted username: alice (from email local part)
 ```
 
 ## Certificate Verification and Management
@@ -310,3 +326,4 @@ done
 ```
 
 This certificate infrastructure provides enterprise-grade security for the Cryptic messaging system, ensuring strong authentication and secure transport for all WebSocket mTLS communications.
+

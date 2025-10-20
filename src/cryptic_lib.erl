@@ -148,7 +148,6 @@
     store_prekey/2,
     get_prekey/1,
     list_users/0,
-    store_message/2,
     get_messages/1,
     %% Key management functions
     generate_client_keys/0,
@@ -519,13 +518,6 @@ get_prekey(Username) ->
 -spec list_users() -> [string()].
 list_users() ->
     [Username || {Username, _Timestamp} <- ets:tab2list(?USER_TABLE)].
-
-%% @doc Store a message for a user.
--spec store_message(string(), map()) -> ok.
-store_message(ToUser, MessageBlob) ->
-    MessageId = erlang:unique_integer([positive]),
-    ets:insert(?MESSAGE_TABLE, {MessageId, ToUser, MessageBlob}),
-    ok.
 
 %% @doc Get all messages for a user, then remove them from the store.
 -spec get_messages(string()) -> [map()].

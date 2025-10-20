@@ -1,6 +1,37 @@
 # Cryptic - End-to-End Encrypted Chat System
 
-A professional implementation of an end-to-end encrypted chat system built in Erlang/OTP, featuring WebSocket mTLS communication, real-time messaging, and demonstrating modern cryptographic protocols for secure message exchange.
+> **⚠️ DISCLAIMER**
+>
+> This is an **educational implementation** of cryptographic protocols, created
+> for learning purposes. It has **not been audited** and may contain security
+> vulnerabilities.
+>
+> Cryptographic software is extremely difficult to implement correctly.
+> Even small mistakes can completely undermine security.
+>
+> **NO WARRANTIES** of any kind. Use at your own risk. For production needs,
+> use professionally audited solutions like Signal or Matrix.
+
+**Cryptic** is an implementation of an end-to-end encrypted chat system built
+in Erlang/OTP, featuring WebSocket mTLS communication, real-time messaging, and
+demonstrating modern cryptographic protocols for secure message exchange.
+
+**Cryptic** implements a secure messaging system:
+
+* Uses Client Certificate to authenticate Users.
+* Uses WebSocket TLS communication.
+* Implements the [X3DH](https://signal.org/docs/specifications/x3dh/) and
+  the [Double-Ratchet](https://signal.org/docs/specifications/doubleratchet/)
+  cryptographic protocols.
+
+**Cryptic** consists of:
+
+* A server that route messages between users, and holds on to encrypted messages
+  until they can be delivered to the receiver.
+* A terminal client.
+* A NCurses terminal UI.
+* Modular structure to make the core engines (X3DH & Double-Ratchet) available
+  to be used in other contexts/applications.
 
 ## Documentation
 
@@ -23,43 +54,69 @@ Cryptic implements a secure messaging system using:
 - **Blake2b KDF** (39x faster than Erlang) for high-performance key derivation
 - **Out-of-order message handling** with skipped message key store
 - **Automatic ratchet session management** with seamless X3DH-to-ratchet transitions
-- **Professional Terminal UI** with real-time chat capabilities and ratchet status display
-- **Color-coded interface** with interactive chat mode and network health monitoring
+- **Terminal UI** with real-time chat capabilities and ratchet status display
 
 ## Quick Start
 
 ### WebSocket mTLS Mode (Current Implementation)
 ```bash
 # Start the server with WebSocket support
-$ ./scripts/start-server.sh
+> ./scripts/start-server.sh
 
 # In another terminal, start the UI client
-$ ./scripts/start-client.sh bob
-
-# Follow the on-screen instructions:
-# 1. Connect to server: connect
-# 2. Send messages: send <user> <message>
-# 3. Enter chat mode: chat <user>
-# 4. Check inbox: inbox
-# 5. List users: list_users
-# 6. Use help command for more options
+> ./scripts/cryptic_console -u alice
 ```
 
-### UI Commands
-- **`help`** - Show available commands
-- **`connect`** - Connect to WebSocket server with certificate authentication
-- **`send <user> <message>`** - Send encrypted message to user
-- **`chat <user>`** - Enter real-time chat mode with automatic message polling
-- **`inbox`** - View message counts by sender (inbox summary)
-- **`inbox <user>`** - View all messages from specific user with timestamps
-- **`auto_display on`** - Enable automatic message display (default)
-- **`auto_display off`** - Disable automatic display; messages stored in inbox
-- **`auto_display`** - Show current auto-display status
-- **`list_users`** - Show all users registered on the server
-- **`quit`** - Exit the application
+So when you start the Client Console, you are immediately prompted for a
+passphrase; this passphrase is used for encrypting your keys stored on your
+local disk in your `$HOME/.cryptic` direcotry. The layout of this directory
+looks like this:
+```bash
+❯ tree ~/.cryptic
+/Users/tobbe/.cryptic
+├── alice
+│   ├── localhost_8443
+│   │   ├── certificates
+│   │   │   ├── alice.crt
+│   │   │   ├── alice.key
+│   │   │   ├── alice.pem
+│   │   │   └── ca.crt
+│   │   ├── keys.encrypted
+│   │   └── sessions
+│   │       ├── bob.session
+│   │       └── gunnar.session
+│   └── cryptic.example.org_9997
+│       ├── certificates
+│       │   ├── alice.crt
+│       │   ├── alice.key
+│       │   ├── alice.pem
+│       │   └── ca.crt
+│       ├── keys.encrypted
+│       └── sessions
+│           └── bob.session
+...
+```
 
-The **key_status** command shows the status of uploaded keys and active Double Ratchet sessions:
+So in the example above, the user `alice` are using two different cryptic
+servers, one running on _localhost_ with the port: 8443 and one running
+at _cryptic.example.org_ with the port: 9997. Under the
+`certificates` directory we find the certificate and key used for the client
+authentication over TLS. The file: `keys.encrypted` is an encrypted file
+(using your passphrase) containing the Identity keys used for the X3DH protocol.
+Under the `sessions` directory we find encrypted files ending in `.session`
+which contains the Double-Ratchet keys used for the communication with
+another User. It is important to have the `.cryptic` directory protected
+since (currently) the private key used for client authentication
+(e.g `alice.key`) is unprotected.
 
+### UI Commands (short form)
+- **`help`** - Show available commands (:h)
+- **`send <user> <message>`** - Send encrypted message to user (:s)
+- **`status`** - Display some general Cryptic status (:st)
+- **`engine_status`** - Display Cryptic engine status (:es)
+- **`quit`** - Exit the application (:q)
+
+The **engine_status** command will show details of the Double-Ratchet engine:
 ```
 === Double Ratchet Sessions ===
 Active sessions: 2
@@ -78,16 +135,10 @@ Active sessions: 2
 - **Skipped[X keys]**: Out-of-order messages cached (network health indicator)
 
 
-### Chat Mode Commands
-Once in chat mode with `chat <username>`:
-- **Type any message** - Sends encrypted message directly to chat target
-- **`:exit`** - Leave chat mode and return to command mode
-- **`:help`** - Show chat-specific help
-
 ## Certificate Handling
 
 Read [here](docs/CERTIFICATE_HANDLING.md) to learn how to create certificates
-for new Clients.
+for new Clients and how to securely deliver them to the new Client.
 
 ## Features
 

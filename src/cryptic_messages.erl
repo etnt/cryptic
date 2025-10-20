@@ -54,15 +54,6 @@
 %%%
 %%% Encrypted Messaging:
 %%%
-%%% Send generic encrypted message:
-%%% <pre>
-%%% {
-%%%   "type": "send_encrypted",
-%%%   "to": "username",
-%%%   "message": {}
-%%% }
-%%% </pre>
-%%%
 %%% Send X3DH encrypted message (session initiation):
 %%% <pre>
 %%% {
@@ -277,8 +268,6 @@
     upload_identity_keys
     | upload_prekey_bundle
     | get_key_bundle
-    | key_status
-    | send_encrypted
     | x3dh
     | ratchet
     | list_users
@@ -813,9 +802,6 @@ mk_payload(get_key_bundle, MsgMap) ->
         User when is_binary(User) -> {ok, MsgMap};
         _ -> {error, invalid_user_field}
     end;
-mk_payload(send_encrypted, MsgMap) ->
-    RequiredFields = [to, message],
-    validate_required_fields(RequiredFields, MsgMap);
 mk_payload(send_message_x3dh, MsgMap) ->
     RequiredFields = [
         from,

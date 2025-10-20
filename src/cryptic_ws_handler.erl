@@ -445,10 +445,14 @@ handle_command(
             {error, io_lib:format("Invalid prekey bundle format: ~p", [Error])}
     end;
 %% Get key bundle for X3DH (Step 1 implementation)
-handle_command(#{<<"type">> := <<"get_key_bundle">>,
-                 <<"user">> := UserB},
-               _Username,
-               _State) ->
+handle_command(
+    #{
+        <<"type">> := <<"get_key_bundle">>,
+        <<"user">> := UserB
+    },
+    _Username,
+    _State
+) ->
     User = binary_to_list(UserB),
     ?debug("get_key_bundle request for user: ~p", [User]),
 
@@ -457,17 +461,20 @@ handle_command(#{<<"type">> := <<"get_key_bundle">>,
             ?debug("Key bundle not found for user: ~p", [User]),
             {error, "key-bundle-not-found"};
         {ok, BundleData} ->
-            ?debug("Found key bundle for user: ~p, bundle keys: ~p",
-                   [User, maps:keys(BundleData)]),
-            #{identity_sign_public := IdentitySignPub,
-              identity_dh_public := IdentityDHPub,
-              signed_prekey := #{
-                                 public := SignedPrekeyPub,
-                                 signature := Signature
-                                },
-              one_time_prekeys := OtpkList,
-              key_id := KeyId
-             } = BundleData,
+            ?debug(
+                "Found key bundle for user: ~p, bundle keys: ~p",
+                [User, maps:keys(BundleData)]
+            ),
+            #{
+                identity_sign_public := IdentitySignPub,
+                identity_dh_public := IdentityDHPub,
+                signed_prekey := #{
+                    public := SignedPrekeyPub,
+                    signature := Signature
+                },
+                one_time_prekeys := OtpkList,
+                key_id := KeyId
+            } = BundleData,
 
             %% Select and mark one OTPK as consumed (if available)
             {SelectedOtpk, RemainingOtpks} =
@@ -509,44 +516,7 @@ handle_command(#{<<"type">> := <<"get_key_bundle">>,
             },
             {reply, Response}
     end;
-%% Handle unified encrypted messages (both X3DH and Double Ratchet)
-handle_command(
-    #{
-        <<"type">> := <<"send_encrypted">>,
-        <<"to">> := ToUserB,
-        <<"message">> := MessagePayload
-    },
-    Username,
-    _State
-) ->
-    ToUser = binary_to_list(ToUserB),
-
-    %% Forward the encrypted message payload to recipient
-    %% Server acts as pure relay without understanding the content
-    MessageForward = #{
-        type => <<"encrypted_message_received">>,
-        from => list_to_binary(Username),
-        message => MessagePayload,
-        server_timestamp => erlang:system_time(second)
-    },
-
-    %% Try to deliver immediately if user is online
-    case find_user_connection(ToUser) of
-        {ok, Pid} ->
-            %% User is online - deliver immediately without storing
-            Pid ! {message, Username, MessageForward};
-        not_found ->
-            %% User is offline - store message for later retrieval
-            cryptic_lib:store_message(ToUser, MessageForward)
-    end,
-
-    {reply, #{
-        type => <<"message_sent">>,
-        success => true,
-        to => ToUserB,
-        timestamp => erlang:system_time(second)
-    }};
-%% Handle X3DH protocol messages (SESSION-MESSAGE-FLOW.md implementation)
+%% Handle X3DH protocol messages
 handle_command(
     #{
         <<"type">> := <<"x3dh">>,
@@ -590,7 +560,7 @@ handle_command(
                     Pid ! {message, Username, MessageBlob};
                 not_found ->
                     %% User is offline - store message for later retrieval
-                    cryptic_lib:store_message(ToUser, MessageBlob)
+                    store_message(ToUser, MessageBlob)
             end,
 
             {reply, #{
@@ -607,7 +577,7 @@ handle_command(
                     <<"Authentication error: 'from' field doesn't match authenticated user">>
             }}
     end;
-%% Handle Double Ratchet protocol messages (efficient ongoing messaging after X3DH)
+%% Handle Double Ratchet protocol messages
 handle_command(
     #{
         <<"type">> := <<"ratchet">>,
@@ -635,7 +605,7 @@ handle_command(
                     Pid ! {message, Username, MessageBlob};
                 not_found ->
                     %% User is offline - store message for later retrieval
-                    cryptic_lib:store_message(ToUser, MessageBlob)
+                    store_message(ToUser, MessageBlob)
             end,
 
             {reply, #{
@@ -740,28 +710,177 @@ get_client_identity(Req) ->
             end
     end.
 
-%% @doc Extract username from X.509 certificate Common Name
+%% @doc Extract username from X.509 certificate
 %%
-%% Decodes an X.509 certificate and extracts the Common Name (CN) field
-%% from the subject distinguished name, which serves as the username
-%% for authentication purposes.
+%% Decodes an X.509 certificate and extracts the username for authentication.
+%% Username extraction follows this priority order:
+%%
+%% 1. **Subject Alternative Name (SAN)** - Looks for `otherName` with OID 1.3.6.1.4.1.99999.1
+%%    (Cryptic username extension). This is the recommended approach for production.
+%%
+%% 2. **Common Name (CN)** - Falls back to CN field from subject DN. This provides
+%%    backward compatibility with simple lab certificates.
+%%
+%% == Production Certificate Generation ==
+%%
+%% To generate certificates with Cryptic username in SAN:
+%%
+%% ```bash
+%% # In openssl.cnf, add:
+%% [cryptic_client]
+%% subjectAltName = otherName:1.3.6.1.4.1.99999.1;UTF8:alice
+%%
+%% # Or using command line:
+%% openssl req -new -key client.key -out client.csr -subj "/CN=user123" \
+%%   -addext "subjectAltName=otherName:1.3.6.1.4.1.99999.1;UTF8:alice"
+%% ```
+%%
+%% This allows CN to be an employee ID, certificate serial, or any identifier,
+%% while the actual Cryptic username is in the SAN extension.
 %%
 %% @param CertDER The DER-encoded X.509 certificate binary
-%% @returns {ok, Username} if Common Name is found,
-%%          {error, Reason} if certificate is invalid or CN is missing
+%% @returns {ok, Username} if username is found (SAN or CN),
+%%          {error, Reason} if certificate is invalid or no username found
 extract_username_from_cert(CertDER) ->
     try
         Cert = public_key:pkix_decode_cert(CertDER, otp),
         TBSCert = Cert#'OTPCertificate'.tbsCertificate,
-        Subject = TBSCert#'OTPTBSCertificate'.subject,
-        case extract_common_name(Subject) of
-            {ok, CN} -> {ok, CN};
-            error -> {error, no_common_name}
+
+        %% Try to extract from SAN extension first (production)
+        case extract_username_from_san(TBSCert) of
+            {ok, Username} ->
+                ?debug("Username from SAN extension: ~s", [Username]),
+                {ok, Username};
+            not_found ->
+                %% Fall back to Common Name (lab/legacy)
+                Subject = TBSCert#'OTPTBSCertificate'.subject,
+                case extract_common_name(Subject) of
+                    {ok, CN} ->
+                        ?debug("Username from CN field: ~s", [CN]),
+                        {ok, CN};
+                    error ->
+                        {error, no_username_in_cert}
+                end
         end
     catch
         _:Error ->
             {error, {cert_decode_error, Error}}
     end.
+
+%% @doc Extract Cryptic username from Subject Alternative Name extension
+%%
+%% Searches the certificate extensions for a Subject Alternative Name (SAN)
+%% with a Cryptic-specific OID containing the username. This is the preferred
+%% method for production environments where the CN might be used for other
+%% purposes (employee ID, etc.).
+%%
+%% The Cryptic username OID is: 1.3.6.1.4.1.99999.1
+%% (Private Enterprise Number space - replace 99999 with your organization's PEN)
+%%
+%% @param TBSCert The TBS (To Be Signed) certificate structure
+%% @returns {ok, Username} if Cryptic username found in SAN,
+%%          not_found if no SAN extension or no Cryptic username present
+extract_username_from_san(TBSCert) ->
+    case TBSCert#'OTPTBSCertificate'.extensions of
+        asn1_NOVALUE ->
+            not_found;
+        Extensions ->
+            %% Look for Subject Alternative Name extension
+            case
+                lists:keyfind(
+                    ?'id-ce-subjectAltName', #'Extension'.extnID, Extensions
+                )
+            of
+                false ->
+                    not_found;
+                #'Extension'{extnValue = SANValue} ->
+                    %% When decoded with otp option, SANValue is already a list of GeneralNames
+                    %% not DER-encoded binary
+                    case SANValue of
+                        GeneralNames when is_list(GeneralNames) ->
+                            ?debug("SAN GeneralNames: ~p", [GeneralNames]),
+                            extract_cryptic_username_from_san(GeneralNames);
+                        _ ->
+                            not_found
+                    end
+            end
+    end.
+
+%% @doc Extract Cryptic username from GeneralNames list
+%%
+%% Searches through the SAN GeneralNames for:
+%% - otherName with Cryptic-specific OID (1.3.6.1.4.1.99999.1)
+%% - rfc822Name (email address) - extracts the local part before @
+%% - dNSName - if it looks like a username (no dots)
+%%
+%% @param GeneralNames List of GeneralName entries from SAN
+%% @returns {ok, Username} if found, not_found otherwise
+extract_cryptic_username_from_san([]) ->
+    not_found;
+extract_cryptic_username_from_san([{otherName, {OID, Value}} | Rest]) ->
+    %% Check for Cryptic username OID: 1.3.6.1.4.1.99999.1
+    %% You should replace 99999 with your organization's Private Enterprise Number
+    case OID of
+        {1, 3, 6, 1, 4, 1, 99999, 1} ->
+            %% Found Cryptic username extension
+            try
+                %% Value should be UTF8String
+                case Value of
+                    {utf8String, Username} when is_binary(Username) ->
+                        {ok, binary_to_list(Username)};
+                    {utf8String, Username} when is_list(Username) ->
+                        {ok, Username};
+                    _ ->
+                        extract_cryptic_username_from_san(Rest)
+                end
+            catch
+                _:_ ->
+                    extract_cryptic_username_from_san(Rest)
+            end;
+        _ ->
+            extract_cryptic_username_from_san(Rest)
+    end;
+extract_cryptic_username_from_san([{rfc822Name, Email} | Rest]) ->
+    %% Try email local part as username (user@domain -> user)
+    try
+        EmailStr =
+            if
+                is_binary(Email) -> binary_to_list(Email);
+                is_list(Email) -> Email
+            end,
+        case string:split(EmailStr, "@") of
+            [LocalPart, _Domain] ->
+                {ok, LocalPart};
+            _ ->
+                extract_cryptic_username_from_san(Rest)
+        end
+    catch
+        _:_ ->
+            extract_cryptic_username_from_san(Rest)
+    end;
+extract_cryptic_username_from_san([{dNSName, Name} | Rest]) ->
+    %% Try DNS name if it looks like a simple username (no dots)
+    try
+        NameStr =
+            if
+                is_binary(Name) -> binary_to_list(Name);
+                is_list(Name) -> Name
+            end,
+        case string:find(NameStr, ".") of
+            nomatch ->
+                %% No dots, might be a username
+                {ok, NameStr};
+            _ ->
+                %% Has dots, probably a real DNS name
+                extract_cryptic_username_from_san(Rest)
+        end
+    catch
+        _:_ ->
+            extract_cryptic_username_from_san(Rest)
+    end;
+extract_cryptic_username_from_san([_ | Rest]) ->
+    %% Skip other GeneralName types
+    extract_cryptic_username_from_san(Rest).
 
 %% @doc Extract Common Name from certificate subject
 %%
@@ -865,11 +984,9 @@ terminate(_Reason, _Req, #{username := Username}) ->
 terminate(_Reason, _Req, _State) ->
     ok.
 
-
 %% -------------------------------------------------------------------
 %% H E L P E R S
 %% -------------------------------------------------------------------
-
 
 %% @doc Store identity keys for a user (5-step authentication flow).
 %%
@@ -915,8 +1032,6 @@ store_identity_keys(Username, IdentityKeys) ->
         _:Error ->
             {error, Error}
     end.
-
-
 
 %% @doc Store prekey bundle (one-time prekeys) for a user.
 %%
@@ -981,14 +1096,22 @@ get_key_bundle(Username) ->
                 }
             } = IdentityData,
 
-            ?debug("get_key_bundle: Retrieved IdentitySignPub: ~p",
-                   [IdentitySignPub]),
-            ?debug("get_key_bundle: Retrieved IdentityDHPub: ~p",
-                   [IdentityDHPub]),
-            ?debug("get_key_bundle: Retrieved SignedPrekeyPub: ~p",
-                   [SignedPrekeyPub]),
-            ?debug("get_key_bundle: Retrieved SignedPrekeySignature: ~p",
-                   [SignedPrekeySignature]),
+            ?debug(
+                "get_key_bundle: Retrieved IdentitySignPub: ~p",
+                [IdentitySignPub]
+            ),
+            ?debug(
+                "get_key_bundle: Retrieved IdentityDHPub: ~p",
+                [IdentityDHPub]
+            ),
+            ?debug(
+                "get_key_bundle: Retrieved SignedPrekeyPub: ~p",
+                [SignedPrekeyPub]
+            ),
+            ?debug(
+                "get_key_bundle: Retrieved SignedPrekeySignature: ~p",
+                [SignedPrekeySignature]
+            ),
 
             %% key_id might not exist for upload_identity_keys flow
             KeyId = maps:get(
@@ -997,8 +1120,10 @@ get_key_bundle(Username) ->
 
             %% Get OTPKs for this user
             AvailableOtpks = get_available_otpks(Username),
-            ?debug("Available OTPKs for ~p: ~p",
-                   [Username, length(AvailableOtpks)]),
+            ?debug(
+                "Available OTPKs for ~p: ~p",
+                [Username, length(AvailableOtpks)]
+            ),
 
             %% Reconstruct bundle in expected format
             ReconstructedBundle = #{
@@ -1024,7 +1149,6 @@ get_key_bundle(Username) ->
             {error, not_found}
     end.
 
-
 %% @doc Get available one-time prekeys for a user.
 %%
 %% Retrieves all unconsumed OTPKs for the specified user using
@@ -1045,7 +1169,6 @@ get_available_otpks(Username) ->
         }
      || [PrekeyData] <- Matches, not maps:get(consumed, PrekeyData, false)
     ].
-
 
 %% @doc Mark one-time prekey as consumed to ensure one-time use.
 %%
@@ -1068,3 +1191,13 @@ mark_otpk_consumed(Username, OtpkId) ->
             ok
     end.
 
+%% @doc Store a message for a user.
+%%
+%% @param Username
+%% @param Message (as a Map)
+%% @returns ok
+-spec store_message(string(), map()) -> ok.
+store_message(ToUser, MessageBlob) ->
+    MessageId = erlang:unique_integer([positive]),
+    ets:insert(?MESSAGE_TABLE, {MessageId, ToUser, MessageBlob}),
+    ok.
