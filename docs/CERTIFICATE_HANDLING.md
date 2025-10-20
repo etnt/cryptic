@@ -1,10 +1,16 @@
 # Cryptic - Certificate Handling
 
-The Cryptic system uses the [`myca`](https://github.com/etnt/myca.git) Certificate Authority framework for managing X.509 certificates required for WebSocket mTLS authentication. This section explains how to set up the CA infrastructure and manage client certificates.
+The Cryptic system uses the [`myca`](https://github.com/etnt/myca.git)
+Certificate Authority framework for managing X.509 certificates required for
+WebSocket mTLS authentication. This section explains how to set up the CA
+infrastructure and manage client certificates.
 
 ## CA Infrastructure Setup
 
-The certificate infrastructure is based on the `myca` framework located in the `CA/` directory. This provides a complete Certificate Authority with modern elliptic curve cryptography (secp384r1) for enhanced security and performance.
+The certificate infrastructure is based on the `myca` framework located in
+the `CA/` directory. This provides a complete Certificate Authority with
+modern elliptic curve cryptography (secp384r1) for enhanced security and
+performance.
 
 ### Initial CA and Server Certificate Creation
 
@@ -158,6 +164,96 @@ erl -pa _build/default/lib/*/ebin -eval "cryptic_ws_ui:start(\"alice\", \"localh
 
 This approach allows flexible certificate management without modifying code,
 making it suitable for different deployment environments.
+
+
+## How to securely deliver a client certificate using GPG
+
+### Recipient — create keypair and share public key
+1. Create a GPG keypair (interactive; choose RSA 3072+ or ECC):
+```
+gpg --full-generate-key
+```
+- Follow prompts: select key type (RSA or ECC), size, expiry, and
+  user ID (name/email). Protect with a strong passphrase.
+
+2. Export your public key to send to the sender:
+```
+gpg --armor --export you@example.com > recipient_pub.asc
+```
+- Replace you@example.com with the UID you used when creating the key.
+- Send recipient_pub.asc to the sender (email, paste, or file transfer).
+  Never send your private key.
+
+3. Keep your private key safe (stored in GPG keyring). Optionally export
+   an ASCII-armored backup for safekeeping:
+```
+gpg --armor --export-secret-keys you@example.com > recipient_priv_backup.asc
+chmod 600 recipient_priv_backup.asc
+# store this backup offline/encrypted; do NOT send it
+```
+
+### Sender — encrypt the private SSL key with recipient’s public key
+
+Assume you have the recipient’s public key file recipient_pub.asc and the
+SSL private key file mykey.pem.
+
+1. Import the recipient public key (optional, for local keyring use):
+```
+gpg --import recipient_pub.asc
+```
+
+2. Encrypt the file to the recipient (creates mykey.gpg):
+```
+gpg --encrypt --recipient you@example.com --output mykey.gpg mykey.pem
+```
+- If you did not import the key, use the recipient’s key ID or the 
+  recipient option with the email shown in recipient_pub.asc.
+- For a file that only the recipient can decrypt, omit --sign.
+  To also sign, add `--sign` and ensure you have a local signing key.
+
+3. Send mykey.gpg to the recipient.
+
+### Recipient — decrypt the received file
+Assume you received mykey.gpg.
+
+1. Decrypt:
+```
+gpg --output mykey.pem --decrypt mykey.gpg
+```
+- If the private key is passphrase-protected, GPG will prompt for it.
+
+2. Secure the decrypted private key:
+```
+chmod 600 mykey.pem
+```
+- Verify contents and store it securely (e.g., in an encrypted filesystem or hardware token).
+
+3. Remove temporary files if any.
+
+---
+
+### Optional: verify signature (if sender signed)
+If the sender signed the encrypted file, GPG will report the signature status
+during decryption. To manually check:
+```
+gpg --verify mykey.gpg
+```
+
+### Extract the Certificate and Key from a PEM file
+```
+# Extract Certificate
+openssl x509 -in my.pem > my.crt
+
+# Extract Private Key
+openssl pkey -in my.pem > my.key
+```
+
+
+### Security notes (brief)
+- Never share private keys or backups.  
+- Use a strong passphrase for your GPG private key.  
+- Prefer using GPG’s default secure algorithms; update GPG if using old versions.
+
 
 ## Certificate Security Features
 
