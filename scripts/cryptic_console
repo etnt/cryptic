@@ -8,6 +8,7 @@
 %%%   --username <user>        Username (required)
 %%%   --server-host <host>     Server hostname (default: localhost)
 %%%   --server-port <port>     Server port (default: 8443)
+%%%   --notifier <file-path>   Path to notification script (optional)
 %%%   --verbose                Enable verbose output
 %%%   --help                   Show this help
 
@@ -25,6 +26,7 @@ main(Args) ->
             Username = maps:get(username, Opts),
             ServerHost = maps:get(server_host, Opts, "localhost"),
             ServerPort = maps:get(server_port, Opts, 8443),
+            Notifier = maps:get(notifier, Opts, undefined),
             Verbose = maps:get(verbose, Opts, false),
 
             %% Start Erlang distribution using username as node name
@@ -35,6 +37,7 @@ main(Args) ->
                 username => list_to_binary(Username),
                 server_host => ServerHost,
                 server_port => ServerPort,
+                notifier => Notifier,
                 verbose => Verbose
             },
 
@@ -87,6 +90,13 @@ spec() ->
                 type => int,
                 default => 8443,
                 help => "Server port to connect to"
+            },
+            #{
+                name => notifier,
+                short => $n,
+                long => "notifier",
+                help =>
+                    "Path to notification script (invoked on message arrival)"
             },
             #{
                 name => verbose,
@@ -146,14 +156,18 @@ start_distribution(Username, Verbose) ->
             case Verbose of
                 true ->
                     io:format("Distribution started: ~p~n", [node()]),
-                    io:format("Connect with: erl -sname debug -remsh ~p~n", [node()]);
+                    io:format("Connect with: erl -sname debug -remsh ~p~n", [
+                        node()
+                    ]);
                 false ->
                     ok
             end;
         {error, {already_started, _Pid}} ->
             case Verbose of
-                true -> io:format("Distribution already running: ~p~n", [node()]);
-                false -> ok
+                true ->
+                    io:format("Distribution already running: ~p~n", [node()]);
+                false ->
+                    ok
             end;
         {error, Reason} ->
             io:format("Failed to start distribution: ~p~n", [Reason]),

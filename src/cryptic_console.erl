@@ -100,7 +100,8 @@
     server_port :: non_neg_integer(),
     verbose :: boolean(),
     console_pid :: pid() | undefined,
-    input_buffer_table :: ets:tid() | undefined
+    input_buffer_table :: ets:tid() | undefined,
+    notifier :: string() | undefined
 }).
 
 %%%===================================================================
@@ -178,7 +179,8 @@ main(InitCfg) ->
         server_port = ServerPort,
         verbose = maps:get(verbose, CertCfg, false),
         console_pid = ConsolePid,
-        input_buffer_table = InputBufferTable
+        input_buffer_table = InputBufferTable,
+        notifier = maps:get(notifier, InitCfg, undefined)
     },
 
     cryptic_shell:print_success(
@@ -387,6 +389,8 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             exit(InputPid, kill),
             %% Display the user message
             display_user_message(FromUsername, Message, Timestamp),
+            notify_user(FromUsername, Message, Timestamp,
+                 State#console_state.notifier),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
@@ -548,6 +552,26 @@ display_system_message(Message) ->
     io:format("~s", [""]),
     %% Longer delay to ensure terminal has processed all ANSI sequences
     timer:sleep(100).
+
+notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
+    F = fun() ->
+            case Notifier of
+                undefined ->
+                    ok;
+                NotifierPath when is_list(NotifierPath) ->
+                    %% Call the notifier script with FromUsername as argument
+                    Command = lists:flatten(io_lib:format("~s ~s", 
+                                [NotifierPath, FromUsername])),
+                    ?dbg("Running notifier command: ~s~n", [Command]),
+                    os:cmd(Command),
+                    ok;
+                _ ->
+                    ok
+            end
+        end,
+    %% Run notifier in a separate process to avoid blocking
+    spawn(F).
+
 
 %% @doc Cleanup resources
 cleanup(State) ->

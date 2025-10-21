@@ -58,14 +58,18 @@ Cryptic implements a secure messaging system using:
 
 ## Quick Start
 
-### WebSocket mTLS Mode (Current Implementation)
 ```bash
 # Start the server with WebSocket support
 > ./scripts/start-server.sh
 
 # In another terminal, start the UI client
 > ./scripts/cryptic_console -u alice
+
+# Specify the server and port to be used
+> ./scripts/cryptic_console -u alice -s cryptic.example.com -p 9999
 ```
+
+## The Client
 
 So when you start the Client Console, you are immediately prompted for a
 passphrase; this passphrase is used for encrypting your keys stored on your
@@ -134,6 +138,22 @@ Active sessions: 2
 - **Prev[X msgs]**: Messages processed in previous receiving chain before rotation
 - **Skipped[X keys]**: Out-of-order messages cached (network health indicator)
 
+### Get Notified
+
+By using the option `--notifier <file-path>` you can specify a script
+that will be invoked whenever a message arrives. The script will be
+invoked with the Username of the sender as argument. So on Linux this
+script can for example call `notify-send` and on Mac it can call
+`terminal-notifier`. This will produce a Desktop alert to pop-up.
+
+Example (Mac):
+```bash
+> ./cryptic-console -u alice --notifier /home/alice/.cryptic/notify.sh
+
+> cat /home/alice/.cryptic/notify.sh
+#!/bin/bash
+terminal-notifier -title "Cryptic" -message "Cryptic message from: $1" -sound default
+```
 
 ## Certificate Handling
 
