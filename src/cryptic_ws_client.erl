@@ -66,6 +66,10 @@
 
 -include("cryptic.hrl").
 
+-define(RECONNECT_TIMEOUT, 30000). % 30 seconds
+-define(PING_TIMEOUT, 30000).      % 30 seconds
+-define(MSG_RETRY_TIMEOUT, 30000). % 30 seconds
+
 %% Internal state record for the WebSocket client gen_server.
 %%
 %% Fields:
@@ -82,6 +86,8 @@
 %%   <li>`pending_commands' - Commands queued while disconnected</li>
 %%   <li>`ui_pid' - PID of the UI process for message forwarding</li>
 %%   <li>`ping_timer_ref' - Timer reference for WebSocket keepalive</li>
+%%   <li>`reconnect_timer_ref' - Timer reference for reconnection attempts</li>
+%%   <li>`pending_acks' - Map of message_id to {Command, TimerRef, RetryCount}</li>
 %% </ul>
 -record(state, {
     username,
@@ -96,7 +102,9 @@
     pending_commands = [],
     ui_pid,
     engine_pid :: pid(),
-    ping_timer_ref
+    ping_timer_ref,
+    reconnect_timer_ref,
+    pending_acks = #{}
 }).
 
 %%%===================================================================
@@ -287,16 +295,30 @@ init({UIPid, Username, ServerHost, Config}) ->
 %% @param State Current gen_server state
 %% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
 handle_call({send_message, Command}, _From, State) ->
-    JsonCommand = jsx:encode(Command),
-    ?msg_out("~s~n", [maps:get(<<"type">>, Command, <<"unknown...">>)]),
+    %% Add message_id if this is a message that needs acknowledgment
+    {CommandWithId, NewState} =
+        case maps:get(<<"type">>, Command, undefined) of
+            <<"x3dh">> ->
+                add_message_tracking(Command, State);
+            <<"ratchet">> ->
+                add_message_tracking(Command, State);
+            _ ->
+                %% Other commands don't need acknowledgment tracking
+                {Command, State}
+        end,
+
+    JsonCommand = jsx:encode(CommandWithId),
+    ?msg_out("~s~n", [maps:get(<<"type">>, CommandWithId, <<"unknown...">>)]),
     ?dbg(
         "send_message: ConnPid=~p, StreamRef=~p , Command=~p~n",
-        [State#state.conn_pid, State#state.stream_ref, Command]
+        [NewState#state.conn_pid, NewState#state.stream_ref, CommandWithId]
     ),
     ok = gun:ws_send(
-        State#state.conn_pid, State#state.stream_ref, {text, JsonCommand}
+        NewState#state.conn_pid,
+        NewState#state.stream_ref,
+        {text, JsonCommand}
     ),
-    {reply, ok, State};
+    {reply, ok, NewState};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call({set_engine_pid, EnginePid}, _From, State) ->
@@ -335,6 +357,12 @@ handle_info(
 ) ->
     ?info("WebSocket connection established for ~s", [State#state.username]),
 
+    %% Cancel reconnect timer if one is active
+    case State#state.reconnect_timer_ref of
+        undefined -> ok;
+        ReconnectTimer -> erlang:cancel_timer(ReconnectTimer)
+    end,
+
     %% Send any pending commands
     lists:foreach(
         fun(Command) ->
@@ -345,66 +373,105 @@ handle_info(
         lists:reverse(State#state.pending_commands)
     ),
 
-    %% Start ping timer to keep connection alive (ping every 30 seconds)
-    PingTimerRef = erlang:send_after(30000, self(), send_ping),
+    %% Resend any pending acknowledged messages
+    %% (messages that were sent but not yet acknowledged)
+    PendingCount = maps:size(State#state.pending_acks),
+    case PendingCount of
+        0 ->
+            ok;
+        _ ->
+            ?info("Resending ~p pending messages after reconnection", [
+                PendingCount
+            ]),
+            maps:foreach(
+                fun(_MessageId, {Command, _TimerRef, _RetryCount}) ->
+                    JsonCommand = jsx:encode(Command),
+                    gun:ws_send(ConnPid, StreamRef, {text, JsonCommand})
+                end,
+                State#state.pending_acks
+            )
+    end,
+
+    %% Start ping timer to keep connection alive
+    PingTimerRef = erlang:send_after(?PING_TIMEOUT, self(), send_ping),
 
     {noreply, State#state{
-        connected = true, pending_commands = [], ping_timer_ref = PingTimerRef
+        connected = true,
+        pending_commands = [],
+        ping_timer_ref = PingTimerRef,
+        reconnect_timer_ref = undefined
     }};
 handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
     ?dbg("Received WebSocket message: ~p~n", [Data]),
     case jsx:decode(Data, [return_maps]) of
         DecodedMessage when is_map(DecodedMessage) ->
-            %% 2. Verify message follows cryptic_messages module definitions
-            case cryptic_messages:validate_message(DecodedMessage) of
-                {ok, ValidatedMessage} ->
-                    %% Log message type for debugging
-                    MessageType = maps:get(
-                        <<"type">>, ValidatedMessage, <<"unknown">>
-                    ),
-                    ?msg_in("Incoming message: ~s~n", [MessageType]),
+            %% Check if this is a message_sent acknowledgment
+            case maps:get(<<"type">>, DecodedMessage, undefined) of
+                <<"message_sent">> ->
+                    %% Handle acknowledgment
+                    handle_message_ack(DecodedMessage, State);
+                _ ->
+                    %% 2. Verify message follows cryptic_messages module definitions
+                    case cryptic_messages:validate_message(DecodedMessage) of
+                        {ok, ValidatedMessage} ->
+                            %% Log message type for debugging
+                            MessageType = maps:get(
+                                <<"type">>, ValidatedMessage, <<"unknown">>
+                            ),
+                            ?msg_in("Incoming message: ~s~n", [MessageType]),
 
-                    %% 3. Dispatch valid message to ui_pid
-                    dispatch_to_engine(ValidatedMessage, State);
-                {error, ValidationError} ->
-                    %% 4. Drop invalid message and log the fact
-                    ?warning("Message validation failed: ~p, Original: ~s", [
-                        ValidationError, Data
-                    ]),
-                    {noreply, State}
+                            %% 3. Dispatch valid message to ui_pid
+                            dispatch_to_engine(ValidatedMessage, State);
+                        {error, ValidationError} ->
+                            %% 4. Drop invalid message and log the fact
+                            ?warning(
+                                "Message validation failed: ~p, Original: ~s", [
+                                    ValidationError, Data
+                                ]
+                            ),
+                            {noreply, State}
+                    end
             end;
         _ ->
             %% JSON decode failed
             ?warning("Invalid JSON format: ~s", [Data]),
             {noreply, State}
     end;
+%%
 handle_info({gun_ws, _ConnPid, _StreamRef, {close, Code, Reason}}, State) ->
     ?info("WebSocket closed: ~p ~s", [Code, Reason]),
     {noreply, State#state{connected = false}};
+%%
 handle_info({gun_error, _ConnPid, _StreamRef, Reason}, State) ->
     ?error("WebSocket error: ~p", [Reason]),
     {noreply, State#state{connected = false}};
-handle_info(
-    {gun_down, ConnPid, _Protocol, Reason, _KilledStreams},
-    State = #state{conn_pid = ConnPid}
-) ->
+%%
+handle_info({gun_down, ConnPid, _Protocol, Reason, _KilledStreams},
+            State = #state{conn_pid = ConnPid}) ->
     ?warning("Connection down: ~p", [Reason]),
     %% Cancel ping timer if connection is down
     case State#state.ping_timer_ref of
         undefined -> ok;
         TimerRef -> erlang:cancel_timer(TimerRef)
     end,
-    {noreply, State#state{connected = false, ping_timer_ref = undefined}};
-%% Handle ping timer - send ping to keep connection alive
-handle_info(
-    send_ping,
-    State = #state{connected = true, conn_pid = ConnPid, stream_ref = StreamRef}
-) ->
-    %% Send WebSocket ping frame
-    %%?msg_out("Sending WebSocket ping", []),
+    %% Start reconnection timer
+    ?info("Will attempt to reconnect in ~p seconds", [?RECONNECT_TIMEOUT/1000]),
+    ReconnectTimerRef =
+        erlang:send_after(?RECONNECT_TIMEOUT, self(), attempt_reconnect),
+    {noreply, State#state{
+        connected = false,
+        ping_timer_ref = undefined,
+        reconnect_timer_ref = ReconnectTimerRef
+    }};
+%% 
+handle_info(send_ping,
+            State = #state{connected = true,
+                           conn_pid = ConnPid,
+                           stream_ref = StreamRef}) ->
+    %% Handle ping timer - send ping to keep connection alive
     gun:ws_send(ConnPid, StreamRef, ping),
-    %% Schedule next ping in 30 seconds
-    PingTimerRef = erlang:send_after(30000, self(), send_ping),
+    %% Schedule next ping
+    PingTimerRef = erlang:send_after(?PING_TIMEOUT, self(), send_ping),
     {noreply, State#state{ping_timer_ref = PingTimerRef}};
 handle_info(send_ping, State = #state{connected = false}) ->
     %% Don't send ping if not connected
@@ -413,6 +480,97 @@ handle_info(send_ping, State = #state{connected = false}) ->
 handle_info({gun_ws, _ConnPid, _StreamRef, pong}, State) ->
     %%?msg_in("Received WebSocket pong", []),
     {noreply, State};
+%% Handle reconnection attempt
+handle_info(attempt_reconnect, State = #state{connected = false}) ->
+    ?info("Attempting to reconnect to ~s:~p", [
+        State#state.server_host, State#state.server_port
+    ]),
+    %% Close old connection if it exists
+    case State#state.conn_pid of
+        undefined -> ok;
+        OldConnPid -> gun:close(OldConnPid)
+    end,
+    %% Attempt to reconnect
+    case
+        connect_websocket(State#state{
+            conn_pid = undefined, stream_ref = undefined
+        })
+    of
+        {ok, NewState} ->
+            ?info("Reconnection successful", []),
+            {noreply, NewState#state{reconnect_timer_ref = undefined}};
+        {error, Reason} ->
+            ?warning("Reconnection failed: ~p, will retry in 60 seconds", [
+                Reason
+            ]),
+            %% Schedule another reconnection attempt
+            ReconnectTimerRef = erlang:send_after(
+                ?RECONNECT_TIMEOUT, self(), attempt_reconnect
+            ),
+            {noreply, State#state{reconnect_timer_ref = ReconnectTimerRef}}
+    end;
+handle_info(attempt_reconnect, State = #state{connected = true}) ->
+    %% Already connected, ignore
+    {noreply, State#state{reconnect_timer_ref = undefined}};
+%% Handle message retry timeout
+handle_info({retry_message, MessageId}, State) ->
+    case maps:get(MessageId, State#state.pending_acks, undefined) of
+        undefined ->
+            %% Message was already acknowledged or removed
+            {noreply, State};
+        {Command, _OldTimerRef, RetryCount} ->
+            MaxRetries = 5,
+            case State#state.connected of
+                false ->
+                    %% Not connected, don't count this as a retry attempt
+                    %% Just reschedule for later (30 seconds)
+                    ?dbg(
+                        "Message ~s waiting for connection, will retry when connected",
+                        [MessageId]
+                    ),
+                    NewTimerRef = erlang:send_after(
+                        ?MSG_RETRY_TIMEOUT, self(), {retry_message, MessageId}
+                    ),
+                    NewPendingAcks = maps:put(
+                        MessageId,
+                        {Command, NewTimerRef, RetryCount},
+                        State#state.pending_acks
+                    ),
+                    {noreply, State#state{pending_acks = NewPendingAcks}};
+                true when RetryCount >= MaxRetries ->
+                    %% Give up after max retries while connected
+                    ?error(
+                        "Message ~s failed after ~p retries, giving up",
+                        [MessageId, MaxRetries]
+                    ),
+                    NewPendingAcks = maps:remove(
+                        MessageId, State#state.pending_acks
+                    ),
+                    {noreply, State#state{pending_acks = NewPendingAcks}};
+                true ->
+                    %% Connected - retry sending the message
+                    ?warning(
+                        "Retrying message ~s (attempt ~p/~p)",
+                        [MessageId, RetryCount + 1, MaxRetries]
+                    ),
+                    JsonCommand = jsx:encode(Command),
+                    gun:ws_send(
+                        State#state.conn_pid,
+                        State#state.stream_ref,
+                        {text, JsonCommand}
+                    ),
+                    %% Schedule another retry
+                    NewTimerRef = erlang:send_after(
+                        ?MSG_RETRY_TIMEOUT, self(), {retry_message, MessageId}
+                    ),
+                    NewPendingAcks = maps:put(
+                        MessageId,
+                        {Command, NewTimerRef, RetryCount + 1},
+                        State#state.pending_acks
+                    ),
+                    {noreply, State#state{pending_acks = NewPendingAcks}}
+            end
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -425,16 +583,51 @@ handle_info(_Info, State) ->
 %% @param Reason Termination reason
 %% @param State Final gen_server state
 %% @returns `ok'
-terminate(_Reason, #state{conn_pid = ConnPid, ping_timer_ref = TimerRef}) when
-    ConnPid =/= undefined
-->
+terminate(_Reason, #state{
+    conn_pid = ConnPid,
+    ping_timer_ref = PingTimerRef,
+    reconnect_timer_ref = ReconnectTimerRef,
+    pending_acks = PendingAcks
+}) when ConnPid =/= undefined ->
     %% Cancel ping timer
-    case TimerRef of
+    case PingTimerRef of
         undefined -> ok;
-        _ -> erlang:cancel_timer(TimerRef)
+        _ -> erlang:cancel_timer(PingTimerRef)
     end,
+    %% Cancel reconnect timer
+    case ReconnectTimerRef of
+        undefined -> ok;
+        _ -> erlang:cancel_timer(ReconnectTimerRef)
+    end,
+    %% Cancel all pending message retry timers
+    maps:foreach(
+        fun(_MessageId, {_Command, TimerRef, _RetryCount}) ->
+            erlang:cancel_timer(TimerRef)
+        end,
+        PendingAcks
+    ),
     gun:close(ConnPid);
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{
+    ping_timer_ref = PingTimerRef,
+    reconnect_timer_ref = ReconnectTimerRef,
+    pending_acks = PendingAcks
+}) ->
+    %% Cancel timers even if no connection
+    case PingTimerRef of
+        undefined -> ok;
+        _ -> erlang:cancel_timer(PingTimerRef)
+    end,
+    case ReconnectTimerRef of
+        undefined -> ok;
+        _ -> erlang:cancel_timer(ReconnectTimerRef)
+    end,
+    %% Cancel all pending message retry timers
+    maps:foreach(
+        fun(_MessageId, {_Command, TimerRef, _RetryCount}) ->
+            erlang:cancel_timer(TimerRef)
+        end,
+        PendingAcks
+    ),
     ok.
 
 %% @private
@@ -577,3 +770,72 @@ dispatch_to_engine(ValidatedMessage, State) ->
             EnginePid ! {websocket_message, ValidatedMessage}
     end,
     {noreply, State}.
+
+%% @private
+%% @doc Add message tracking for messages that need acknowledgment.
+%%
+%% Generates a unique message_id (if not present), adds it to the command,
+%% and starts tracking the message for acknowledgment.
+%%
+%% @param Command The command to send
+%% @param State Current client state
+%% @returns {CommandWithId, NewState}
+add_message_tracking(Command, State) ->
+    %% Use existing message_id or generate a new one
+    MessageId =
+        case maps:get(<<"message_id">>, Command, undefined) of
+            undefined ->
+                %% Generate unique ID using timestamp and random bytes
+                Timestamp = erlang:system_time(microsecond),
+                RandomBytes = crypto:strong_rand_bytes(8),
+                base64:encode(<<Timestamp:64, RandomBytes/binary>>);
+            ExistingId ->
+                ExistingId
+        end,
+
+    %% Add message_id to command
+    CommandWithId = Command#{<<"message_id">> => MessageId},
+
+    %% Start retry timer
+    TimerRef =
+        erlang:send_after(?MSG_RETRY_TIMEOUT,self(),{retry_message,MessageId}),
+
+    %% Track this message
+    NewPendingAcks = maps:put(
+        MessageId, {CommandWithId, TimerRef, 0}, State#state.pending_acks
+    ),
+
+    {CommandWithId, State#state{pending_acks = NewPendingAcks}}.
+
+%% @private
+%% @doc Handle message acknowledgment from the server.
+%%
+%% Removes the message from pending acknowledgments and cancels the retry timer.
+%%
+%% @param AckMessage The message_sent acknowledgment from server
+%% @param State Current client state
+%% @returns {noreply, NewState}
+handle_message_ack(AckMessage, State) ->
+    case maps:get(<<"message_id">>, AckMessage, undefined) of
+        undefined ->
+            ?warning("Received message_sent without message_id: ~p", [
+                AckMessage
+            ]),
+            {noreply, State};
+        MessageId ->
+            case maps:get(MessageId, State#state.pending_acks, undefined) of
+                undefined ->
+                    %% Unknown message_id, might be a duplicate ack
+                    ?dbg("Received ack for unknown message: ~s", [MessageId]),
+                    {noreply, State};
+                {_Command, TimerRef, _RetryCount} ->
+                    %% Cancel the retry timer
+                    erlang:cancel_timer(TimerRef),
+                    %% Remove from pending acks
+                    NewPendingAcks = maps:remove(
+                        MessageId, State#state.pending_acks
+                    ),
+                    ?dbg("Message ~s acknowledged by server", [MessageId]),
+                    {noreply, State#state{pending_acks = NewPendingAcks}}
+            end
+    end.

@@ -565,6 +565,7 @@ handle_command(
 
             {reply, #{
                 type => <<"message_sent">>,
+                message_id => MessageIdB64,
                 success => true,
                 message => <<"X3DH message sent">>
             }};
@@ -608,11 +609,25 @@ handle_command(
                     store_message(ToUser, MessageBlob)
             end,
 
-            {reply, #{
-                type => <<"message_sent">>,
-                success => true,
-                message => <<"Double Ratchet message sent">>
-            }};
+            %% Extract message_id if present for acknowledgment
+            MessageId = maps:get(<<"message_id">>, RatchetMessage, undefined),
+            Response =
+                case MessageId of
+                    undefined ->
+                        #{
+                            type => <<"message_sent">>,
+                            success => true,
+                            message => <<"Double Ratchet message sent">>
+                        };
+                    _ ->
+                        #{
+                            type => <<"message_sent">>,
+                            message_id => MessageId,
+                            success => true,
+                            message => <<"Double Ratchet message sent">>
+                        }
+                end,
+            {reply, Response};
         _OtherUser ->
             %% The 'from' field doesn't match the authenticated user
             {reply, #{

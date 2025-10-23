@@ -111,6 +111,8 @@
 %% @doc Main entry point for the console
 -spec main(Config :: map()) -> ok.
 main(InitCfg) ->
+    process_flag(trap_exit, true),
+    
     cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
@@ -137,7 +139,23 @@ main(InitCfg) ->
 
     %% Start WebSocket client
     WsCfg = CertCfg#{callback_mod => ?MODULE},
-    {ok, WsClientPid} = cryptic_ws_client:start_link(WsCfg),
+    WsClientPid =
+        try cryptic_ws_client:start_link(WsCfg) of
+            {ok, _WsClientPid} -> _WsClientPid;
+            _Error ->
+                cryptic_shell:print_error(
+                    "Failed to start WebSocket client: " ++
+                        lists:flatten(io_lib:format("~p~n", [_Error]))
+                ),
+                halt(1)
+        catch
+            error:Reason ->
+                cryptic_shell:print_error(
+                    "Failed to start WebSocket client: " ++
+                        lists:flatten(io_lib:format("~p~n", [Reason]))
+                ),
+                halt(1)
+        end,
 
     %% Prompt for passphrase early, before initializing cryptic engine
     Passphrase = get_passphrase(),
