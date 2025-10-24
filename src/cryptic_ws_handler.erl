@@ -743,7 +743,7 @@ get_client_identity(Req) ->
 %% Decodes an X.509 certificate and extracts the username for authentication.
 %% Username extraction follows this priority order:
 %%
-%% 1. **Subject Alternative Name (SAN)** - Looks for `otherName` with OID 1.3.6.1.4.1.99999.1
+%% 1. **Subject Alternative Name (SAN)** - Looks for `otherName' with OID 1.3.6.1.4.1.99999.1
 %%    (Cryptic username extension). This is the recommended approach for production.
 %%
 %% 2. **Common Name (CN)** - Falls back to CN field from subject DN. This provides
@@ -753,7 +753,7 @@ get_client_identity(Req) ->
 %%
 %% To generate certificates with Cryptic username in SAN:
 %%
-%% ```bash
+%% <pre>
 %% # In openssl.cnf, add:
 %% [cryptic_client]
 %% subjectAltName = otherName:1.3.6.1.4.1.99999.1;UTF8:alice
@@ -761,7 +761,7 @@ get_client_identity(Req) ->
 %% # Or using command line:
 %% openssl req -new -key client.key -out client.csr -subj "/CN=user123" \
 %%   -addext "subjectAltName=otherName:1.3.6.1.4.1.99999.1;UTF8:alice"
-%% ```
+%% </pre>
 %%
 %% This allows CN to be an employee ID, certificate serial, or any identifier,
 %% while the actual Cryptic username is in the SAN extension.

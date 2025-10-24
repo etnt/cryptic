@@ -13,6 +13,7 @@
 %%%   <li><b>Input Buffer Preservation</b>: Save/restore partial input across process restarts</li>
 %%%   <li><b>Password Input</b>: Secure input with character masking</li>
 %%%   <li><b>ANSI Colors</b>: Rich terminal formatting for better UX</li>
+%%%   <li><b>Terminal Width Aware</b>: Calculates line wrapping for clean prompt display</li>
 %%%   <li><b>Escape Sequence Handling</b>: Robust handling of terminal escape codes</li>
 %%% </ul>
 %%%
@@ -66,6 +67,16 @@
 %%%   <li>Detect and consume ANSI color codes (ESC[...m)</li>
 %%%   <li>Handle broken arrow key sequences (ESC A instead of ESC [ A)</li>
 %%%   <li>Distinguish between escape sequences and user input</li>
+%%% </ul>
+%%%
+%%% == Display Management ==
+%%% The shell provides intelligent terminal display management:
+%%% <ul>
+%%%   <li><b>Line Wrapping</b>: Automatically detects terminal width via `io:columns()'</li>
+%%%   <li><b>Multi-line Clearing</b>: Calculates wrapped lines to properly clear commands</li>
+%%%   <li><b>ANSI-aware Measurement</b>: Strips escape codes when measuring visible text</li>
+%%%   <li><b>Clean Output</b>: Sent messages replace command input without artifacts</li>
+%%%   <li><b>Silent Restoration</b>: Partial input restored seamlessly after interruptions</li>
 %%% </ul>
 %%%
 %%% @see cryptic_console
