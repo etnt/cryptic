@@ -564,19 +564,28 @@ handle_info(
             ),
             {noreply, UpdatedState}
     end;
-handle_info(
-    {websocket_message, #{<<"type">> := _Type} = _Message},
-    State
-) ->
+%%
+handle_info({websocket_message, #{<<"type">> := <<"welcome">>} = _Message},
+            State) ->
+    %% We have been disconnected and reconnected - need to re-request pending messages
+    ?dbg("Received welcome message - re-requesting pending messages~n", []),
+    {ok, UpdatedState} = request_pending_messages(State),
+    {noreply, UpdatedState};
+%%
+handle_info({websocket_message, #{<<"type">> := _Type} = _Message},
+            State) ->
     % Handle other WebSocket message types
     ?dbg("Received unhandled websocket message type: ~p", [_Type]),
     {noreply, State};
+%%
 handle_info({key_request_timeout, _RequestId}, State) ->
     % TODO: Handle key request timeouts
     {noreply, State};
+%%
 handle_info({'EXIT', _RatchetEnginePid, _Reason}, State) ->
     % TODO: Handle ratchet engine crashes
     {noreply, State};
+%%
 handle_info(_Info, State) ->
     ?dbg("Unhandled info msg: ~p~n", [_Info]),
     {noreply, State}.
