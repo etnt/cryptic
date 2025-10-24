@@ -1,0 +1,38 @@
+{"1.2.0",
+[{<<"cecho">>,
+  {git,"https://github.com/mazenharake/cecho.git",
+       {ref,"dabe9f35def4085420eada4f629fbbc2b45a858b"}},
+  0},
+ {<<"cowboy">>,{pkg,<<"cowboy">>,<<"2.9.0">>},0},
+ {<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.16.0">>},0},
+ {<<"eclip">>,
+  {git,"https://github.com/mbj4668/eclip.git",
+       {ref,"97d5fb8e3f5b94789f9e700a4dcd547495979973"}},
+  0},
+ {<<"gun">>,{pkg,<<"gun">>,<<"2.0.1">>},0},
+ {<<"jsx">>,{pkg,<<"jsx">>,<<"3.1.0">>},0},
+ {<<"lux">>,
+  {git,"https://github.com/hawk/lux.git",
+       {ref,"78fc8a32eb1118a6890eda3a4f7bb19170d710c2"}},
+  0},
+ {<<"quickrand">>,{pkg,<<"quickrand">>,<<"2.0.7">>},1},
+ {<<"ranch">>,{pkg,<<"ranch">>,<<"2.1.0">>},0},
+ {<<"uuid">>,{pkg,<<"uuid_erl">>,<<"2.0.6">>},0}]}.
+[
+{pkg_hash,[
+ {<<"cowboy">>, <<"865DD8B6607E14CF03282E10E934023A1BD8BE6F6BACF921A7E2A96D800CD452">>},
+ {<<"cowlib">>, <<"54592074EBBBB92EE4746C8A8846E5605052F29309D3A873468D76CDF932076F">>},
+ {<<"gun">>, <<"160A9A5394800FCBA41BC7E6D421295CF9A7894C2252C0678244948E3336AD73">>},
+ {<<"jsx">>, <<"D12516BAA0BB23A59BB35DCCAF02A1BD08243FCBB9EFE24F2D9D056CCFF71268">>},
+ {<<"quickrand">>, <<"D2BD76676A446E6A058D678444B7FDA1387B813710D1AF6D6E29BB92186C8820">>},
+ {<<"ranch">>, <<"2261F9ED9574DCFCC444106B9F6DA155E6E540B2F82BA3D42B339B93673B72A3">>},
+ {<<"uuid">>, <<"8767AAE0D93A0EFD062B5B30BB21188E121721C683200E164445065C08C2100A">>}]},
+{pkg_hash_ext,[
+ {<<"cowboy">>, <<"2C729F934B4E1AA149AFF882F57C6372C15399A20D54F65C8D67BEF583021BDE">>},
+ {<<"cowlib">>, <<"7F478D80D66B747344F0EA7708C187645CFCC08B11AA424632F78E25BF05DB51">>},
+ {<<"gun">>, <<"A10BC8D6096B9502205022334F719CC9A08D9ADCFBFC0DBEE9EF31B56274A20B">>},
+ {<<"jsx">>, <<"0C5CC8FDC11B53CC25CF65AC6705AD39E54ECC56D1C22E4ADB8F5A53FB9427F3">>},
+ {<<"quickrand">>, <<"B8ACBF89A224BC217C3070CA8BEBC6EB236DBE7F9767993B274084EA044D35F0">>},
+ {<<"ranch">>, <<"244EE3FA2A6175270D8E1FC59024FD9DBC76294A321057DE8F803B1479E76916">>},
+ {<<"uuid">>, <<"1D54D5DE4CC66317D882F62347A21655601E84CCCE913E80AADE202CDB3A8C65">>}]}
+].
