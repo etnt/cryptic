@@ -27,11 +27,24 @@
 %%%
 %%% The handler processes JSON commands over WebSocket:
 %%% <ul>
-%%%   <li>`upload_key_bundle' - Upload user's public key for encryption</li>
-%%%   <li>`get_prekey' - Request another user's public key</li>
-%%%   <li>`send_message' - Send encrypted message to another user</li>
+%%%   <li>`upload_identity_keys' - Upload user's identity and signed prekeys</li>
+%%%   <li>`upload_prekey_bundle' - Upload one-time prekeys for forward secrecy</li>
+%%%   <li>`get_key_bundle' - Request another user's key bundle for X3DH</li>
+%%%   <li>`x3dh' - Send X3DH initial key exchange message</li>
+%%%   <li>`ratchet' - Send Double Ratchet encrypted message</li>
 %%%   <li>`get_messages' - Retrieve stored messages</li>
+%%%   <li>`request_pending_messages' - Request delivery of pending messages</li>
 %%%   <li>`list_users' - Get list of registered users</li>
+%%% </ul>
+%%%
+%%% == Message Acknowledgment ==
+%%%
+%%% The server supports reliable message delivery through acknowledgments:
+%%% <ul>
+%%%   <li>Clients include a unique `message_id' in x3dh and ratchet messages</li>
+%%%   <li>Server responds with `message_sent' containing the same `message_id'</li>
+%%%   <li>This allows clients to track delivery and retry on network failures</li>
+%%%   <li>Messages are delivered immediately to online users or stored for offline users</li>
 %%% </ul>
 %%%
 %%% == Connection Management ==

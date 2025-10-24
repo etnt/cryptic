@@ -9,12 +9,35 @@
 %%%
 %%% <ul>
 %%%   <li>mTLS WebSocket connections with client certificate authentication</li>
-%%%   <li>Automatic connection establishment and reconnection handling</li>
+%%%   <li>Automatic reconnection on connection loss (VPN changes, host suspend, etc.)</li>
+%%%   <li>Reliable message delivery with acknowledgment tracking and retries</li>
 %%%   <li>Command queuing when disconnected</li>
 %%%   <li>Bidirectional message forwarding between UI and server</li>
 %%%   <li>WebSocket keepalive with ping/pong mechanism</li>
 %%%   <li>Certificate-based user authentication</li>
 %%%   <li>JSON message encoding/decoding</li>
+%%% </ul>
+%%%
+%%% == Connection Management ==
+%%%
+%%% The client automatically handles connection failures and reconnection:
+%%% <ul>
+%%%   <li>Detects connection loss (network issues, VPN changes, host suspend)</li>
+%%%   <li>Automatically attempts reconnection every 30 seconds</li>
+%%%   <li>Continues reconnection attempts until successful</li>
+%%%   <li>Resends pending unacknowledged messages after reconnection</li>
+%%%   <li>Maintains WebSocket keepalive with periodic ping frames</li>
+%%% </ul>
+%%%
+%%% == Message Reliability ==
+%%%
+%%% For critical message types (x3dh, ratchet), the client ensures delivery:
+%%% <ul>
+%%%   <li>Assigns unique message_id to each message</li>
+%%%   <li>Waits for server acknowledgment (message_sent response)</li>
+%%%   <li>Retries unacknowledged messages up to 5 times (while connected)</li>
+%%%   <li>Pauses retries during disconnection without counting against limit</li>
+%%%   <li>Automatically resends all pending messages on reconnection</li>
 %%% </ul>
 %%%
 %%% == Message Flow ==
@@ -23,6 +46,7 @@
 %%% <ul>
 %%%   <li>`welcome' - Server welcome message on connection</li>
 %%%   <li>`success' - Operation success confirmations</li>
+%%%   <li>`message_sent' - Acknowledgment for x3dh/ratchet messages</li>
 %%%   <li>`prekey' - User public keys for message encryption</li>
 %%%   <li>`users' - List of registered users</li>
 %%%   <li>`user_status' - User online/offline status</li>
@@ -66,9 +90,12 @@
 
 -include("cryptic.hrl").
 
--define(RECONNECT_TIMEOUT, 30000). % 30 seconds
--define(PING_TIMEOUT, 30000).      % 30 seconds
--define(MSG_RETRY_TIMEOUT, 30000). % 30 seconds
+% 30 seconds
+-define(RECONNECT_TIMEOUT, 30000).
+% 30 seconds
+-define(PING_TIMEOUT, 30000).
+% 30 seconds
+-define(MSG_RETRY_TIMEOUT, 30000).
 
 %% Internal state record for the WebSocket client gen_server.
 %%
@@ -446,8 +473,10 @@ handle_info({gun_error, _ConnPid, _StreamRef, Reason}, State) ->
     ?error("WebSocket error: ~p", [Reason]),
     {noreply, State#state{connected = false}};
 %%
-handle_info({gun_down, ConnPid, _Protocol, Reason, _KilledStreams},
-            State = #state{conn_pid = ConnPid}) ->
+handle_info(
+    {gun_down, ConnPid, _Protocol, Reason, _KilledStreams},
+    State = #state{conn_pid = ConnPid}
+) ->
     ?warning("Connection down: ~p", [Reason]),
     %% Cancel ping timer if connection is down
     case State#state.ping_timer_ref of
@@ -455,7 +484,7 @@ handle_info({gun_down, ConnPid, _Protocol, Reason, _KilledStreams},
         TimerRef -> erlang:cancel_timer(TimerRef)
     end,
     %% Start reconnection timer
-    ?info("Will attempt to reconnect in ~p seconds", [?RECONNECT_TIMEOUT/1000]),
+    ?info("Will attempt to reconnect in ~p seconds", [?RECONNECT_TIMEOUT / 1000]),
     ReconnectTimerRef =
         erlang:send_after(?RECONNECT_TIMEOUT, self(), attempt_reconnect),
     {noreply, State#state{
@@ -463,11 +492,15 @@ handle_info({gun_down, ConnPid, _Protocol, Reason, _KilledStreams},
         ping_timer_ref = undefined,
         reconnect_timer_ref = ReconnectTimerRef
     }};
-%% 
-handle_info(send_ping,
-            State = #state{connected = true,
-                           conn_pid = ConnPid,
-                           stream_ref = StreamRef}) ->
+%%
+handle_info(
+    send_ping,
+    State = #state{
+        connected = true,
+        conn_pid = ConnPid,
+        stream_ref = StreamRef
+    }
+) ->
     %% Handle ping timer - send ping to keep connection alive
     gun:ws_send(ConnPid, StreamRef, ping),
     %% Schedule next ping
@@ -798,7 +831,9 @@ add_message_tracking(Command, State) ->
 
     %% Start retry timer
     TimerRef =
-        erlang:send_after(?MSG_RETRY_TIMEOUT,self(),{retry_message,MessageId}),
+        erlang:send_after(
+            ?MSG_RETRY_TIMEOUT, self(), {retry_message, MessageId}
+        ),
 
     %% Track this message
     NewPendingAcks = maps:put(
