@@ -112,7 +112,7 @@
 -spec main(Config :: map()) -> ok.
 main(InitCfg) ->
     process_flag(trap_exit, true),
-    
+
     cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
@@ -141,7 +141,8 @@ main(InitCfg) ->
     WsCfg = CertCfg#{callback_mod => ?MODULE},
     WsClientPid =
         try cryptic_ws_client:start_link(WsCfg) of
-            {ok, _WsClientPid} -> _WsClientPid;
+            {ok, _WsClientPid} ->
+                _WsClientPid;
             _Error ->
                 cryptic_shell:print_error(
                     "Failed to start WebSocket client: " ++
@@ -181,11 +182,12 @@ main(InitCfg) ->
 
     %% Extract server host and port from config
     ServerHostRaw = maps:get(server_host, InitCfg, <<"localhost">>),
-    ServerHost = case ServerHostRaw of
-        S when is_binary(S) -> binary_to_list(S);
-        S when is_list(S) -> S;
-        _ -> "localhost"
-    end,
+    ServerHost =
+        case ServerHostRaw of
+            S when is_binary(S) -> binary_to_list(S);
+            S when is_list(S) -> S;
+            _ -> "localhost"
+        end,
     ServerPort = maps:get(server_port, InitCfg, 8443),
 
     %% Initialize console state with self() PID
@@ -270,11 +272,12 @@ setup_event_management(Config) ->
 -spec get_cert_config(Cfg :: map()) -> map().
 get_cert_config(Cfg) ->
     Username = binary_to_list(maps:get(username, Cfg)),
-    ServerHost = case maps:get(server_host, Cfg) of
-        S when is_binary(S) -> binary_to_list(S);
-        S when is_list(S) -> S;
-        _ -> "localhost"
-    end,
+    ServerHost =
+        case maps:get(server_host, Cfg) of
+            S when is_binary(S) -> binary_to_list(S);
+            S when is_list(S) -> S;
+            _ -> "localhost"
+        end,
     ServerPort = maps:get(server_port, Cfg, 8443),
     CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
     %% Create certificate configuration using environment variables
@@ -307,19 +310,8 @@ command_loop(State) ->
     %% Check for any pending system messages before prompting
     check_messages(),
 
-    %% Check if there was interrupted input to restore
-    BufferTable = State#console_state.input_buffer_table,
-    RestoredInput =
-        case ets:lookup(BufferTable, current_input) of
-            [{current_input, Buffer}] ->
-                ets:delete(BufferTable, current_input),
-                Buffer;
-            [] ->
-                ""
-        end,
-
     %% Spawn a process to get input asynchronously with monitoring
-    {InputPid, MonitorRef} = spawn_input_process(RestoredInput),
+    {InputPid, MonitorRef} = spawn_input_process(),
 
     %% Wait for either input or messages
     wait_for_input_or_messages(InputPid, MonitorRef, State).
@@ -327,34 +319,15 @@ command_loop(State) ->
 %% @doc Spawn an input process to get user input asynchronously
 %% The input process will wait for user input and send the result back
 %% to the console process, then terminate.
--spec spawn_input_process(RestoredInput :: string()) -> {pid(), reference()}.
-spawn_input_process(RestoredInput) ->
+-spec spawn_input_process() -> {pid(), reference()}.
+spawn_input_process() ->
     ConsolePid = self(),
-    %% Capture for closure
-    RestoredInputCopy = RestoredInput,
     spawn_opt(
         fun() ->
-            %% If we have restored input, display it with a notification
-            if
-                RestoredInputCopy =/= "" ->
-                    io:format("[Input restored: ~s] ", [RestoredInputCopy]);
-                true ->
-                    ok
-            end,
+            %% cryptic_shell:get_line() will automatically restore any saved
+            %% input from the ETS table if present
             Result = cryptic_shell:get_line("cryptic> "),
-            %% Prepend restored input if any
-            FinalResult =
-                if
-                    RestoredInputCopy =:= "" ->
-                        Result;
-                    Result =:= eof ->
-                        eof;
-                    element(1, Result) =:= error ->
-                        Result;
-                    true ->
-                        RestoredInputCopy ++ Result
-                end,
-            ConsolePid ! {input_result, FinalResult}
+            ConsolePid ! {input_result, Result}
         end,
         [monitor]
     ).
@@ -407,8 +380,12 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             exit(InputPid, kill),
             %% Display the user message
             display_user_message(FromUsername, Message, Timestamp),
-            notify_user(FromUsername, Message, Timestamp,
-                 State#console_state.notifier),
+            notify_user(
+                FromUsername,
+                Message,
+                Timestamp,
+                State#console_state.notifier
+            ),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
@@ -506,8 +483,8 @@ show_engine_status(State) ->
                     cryptic_shell:print_engine_status(Status);
                 {error, Reason} ->
                     cryptic_shell:print_error(
-                        "Failed to get engine status: " ++ 
-                        lists:flatten(io_lib:format("~p", [Reason]))
+                        "Failed to get engine status: " ++
+                            lists:flatten(io_lib:format("~p", [Reason]))
                     )
             end
     end.
@@ -523,7 +500,9 @@ send_message_to_user(ToUsername, Message, State) ->
                 ok ->
                     %% Display sent message confirmation with timestamp
                     Timestamp = erlang:timestamp(),
-                    cryptic_shell:print_sent_message(ToUsername, Message, Timestamp),
+                    cryptic_shell:print_sent_message(
+                        ToUsername, Message, Timestamp
+                    ),
                     ?dbg("Message sent successfully~n", []);
                 {error, Reason} ->
                     ?error("Failed to send message: ~p~n", [Reason])
@@ -560,7 +539,6 @@ display_user_message(FromUsername, Message, Timestamp) ->
     %% Longer delay to ensure terminal has processed all ANSI sequences
     timer:sleep(100).
 
-
 %% @doc Display an async message without disrupting the prompt
 display_system_message(Message) ->
     %% Clear current line and print system message
@@ -573,23 +551,26 @@ display_system_message(Message) ->
 
 notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
     F = fun() ->
-            case Notifier of
-                undefined ->
-                    ok;
-                NotifierPath when is_list(NotifierPath) ->
-                    %% Call the notifier script with FromUsername as argument
-                    Command = lists:flatten(io_lib:format("~s ~s", 
-                                [NotifierPath, FromUsername])),
-                    ?dbg("Running notifier command: ~s~n", [Command]),
-                    os:cmd(Command),
-                    ok;
-                _ ->
-                    ok
-            end
-        end,
+        case Notifier of
+            undefined ->
+                ok;
+            NotifierPath when is_list(NotifierPath) ->
+                %% Call the notifier script with FromUsername as argument
+                Command = lists:flatten(
+                    io_lib:format(
+                        "~s ~s",
+                        [NotifierPath, FromUsername]
+                    )
+                ),
+                ?dbg("Running notifier command: ~s~n", [Command]),
+                os:cmd(Command),
+                ok;
+            _ ->
+                ok
+        end
+    end,
     %% Run notifier in a separate process to avoid blocking
     spawn(F).
-
 
 %% @doc Cleanup resources
 cleanup(State) ->

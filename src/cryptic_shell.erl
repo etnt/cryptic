@@ -80,27 +80,42 @@
 -include("cryptic.hrl").
 
 %% API
--export([start_shell/0, start_shell/1, get_line/1, get_password/1, cleanup/0,
-         print_user_message/3, print_sent_message/3, print_success/1, print_error/1,
-         print_warning/1, print_info/1, print_highlight/1, print_engine_status/1,
-         print_help/0, print_console_status/1]).
+-export([
+    start_shell/0, start_shell/1,
+    get_line/1,
+    get_password/1,
+    cleanup/0,
+    print_user_message/3,
+    print_sent_message/3,
+    print_success/1,
+    print_error/1,
+    print_warning/1,
+    print_info/1,
+    print_highlight/1,
+    print_engine_status/1,
+    print_help/0,
+    print_console_status/1
+]).
 
-    %% Enhanced output functions with ANSI formatting
+%% Enhanced output functions with ANSI formatting
 
 %% Internal state record for line editing
 -record(line_state,
-        {%% Current line content
-         buffer = [] :: [char()],
-         %% Cursor position (0-based from start)
-         cursor = 0 :: non_neg_integer(),
-         %% Current prompt string
-         prompt :: string(),
-         %% Optional ETS table for buffer persistence
-         buffer_table :: ets:tid() | undefined,
-         %% History navigation state
-         history_pos :: undefined | non_neg_integer(),
-         %% Original buffer before history navigation
-         original_buffer = [] :: [char()]}).
+    %% Current line content
+    {
+        buffer = [] :: [char()],
+        %% Cursor position (0-based from start)
+        cursor = 0 :: non_neg_integer(),
+        %% Current prompt string
+        prompt :: string(),
+        %% Optional ETS table for buffer persistence
+        buffer_table :: ets:tid() | undefined,
+        %% History navigation state
+        history_pos :: undefined | non_neg_integer(),
+        %% Original buffer before history navigation
+        original_buffer = [] :: [char()]
+    }
+).
 
 %%%===================================================================
 %%% API Functions
@@ -122,7 +137,9 @@ start_shell(Options) ->
             ok ->
                 case Verbose of
                     true ->
-                        io:format("~s\r\n", [?FG_GREEN(?BOLD("Cryptic Shell (OTP 28 raw mode)"))]);
+                        io:format("~s\r\n", [
+                            ?FG_GREEN(?BOLD("Cryptic Shell (OTP 28 raw mode)"))
+                        ]);
                     false ->
                         ok
                 end,
@@ -130,8 +147,16 @@ start_shell(Options) ->
             {error, _Reason} ->
                 case Verbose of
                     true ->
-                        io:format("~s\r\n",
-                                  [?FG_YELLOW(?BOLD("OTP 28 mode failed, trying fallback..."))]);
+                        io:format(
+                            "~s\r\n",
+                            [
+                                ?FG_YELLOW(
+                                    ?BOLD(
+                                        "OTP 28 mode failed, trying fallback..."
+                                    )
+                                )
+                            ]
+                        );
                     false ->
                         ok
                 end,
@@ -141,8 +166,16 @@ start_shell(Options) ->
         error:undef ->
             case Verbose of
                 true ->
-                    io:format("~s\r\n",
-                              [?FG_YELLOW(?BOLD("OTP 28 shell function not available, trying fallback..."))]);
+                    io:format(
+                        "~s\r\n",
+                        [
+                            ?FG_YELLOW(
+                                ?BOLD(
+                                    "OTP 28 shell function not available, trying fallback..."
+                                )
+                            )
+                        ]
+                    );
                 false ->
                     ok
             end,
@@ -150,10 +183,19 @@ start_shell(Options) ->
         _:Error ->
             case Verbose of
                 true ->
-                    io:format("~s\r\n",
-                              [?FG_WHITE_BG_RED(?BOLD("Shell setup error: "
-                                                      ++ lists:flatten(
-                                                             io_lib:format("~p", [Error]))))]);
+                    io:format(
+                        "~s\r\n",
+                        [
+                            ?FG_WHITE_BG_RED(
+                                ?BOLD(
+                                    "Shell setup error: " ++
+                                        lists:flatten(
+                                            io_lib:format("~p", [Error])
+                                        )
+                                )
+                            )
+                        ]
+                    );
                 false ->
                     ok
             end,
@@ -191,10 +233,12 @@ get_line(Prompt) ->
         end,
 
     LineState =
-        #line_state{buffer = InitialBuffer,
-                    cursor = length(InitialBuffer),
-                    prompt = FormattedPrompt,
-                    buffer_table = cryptic_console_input_buffer},
+        #line_state{
+            buffer = InitialBuffer,
+            cursor = length(InitialBuffer),
+            prompt = FormattedPrompt,
+            buffer_table = cryptic_console_input_buffer
+        },
     %% Small delay to let terminal finish processing the prompt ANSI codes
     %% before we start reading input. This prevents characters from being
     %% consumed/lost when the terminal is still processing escape sequences.
@@ -374,7 +418,11 @@ finish_line(Buffer) ->
                             0 ->
                                 true;
                             _ ->
-                                case ets:lookup(TableRef, {history, HistoryCount - 1}) of
+                                case
+                                    ets:lookup(
+                                        TableRef, {history, HistoryCount - 1}
+                                    )
+                                of
                                     [{_, LastCmd}] ->
                                         TrimmedCmd =/= LastCmd;
                                     [] ->
@@ -384,9 +432,13 @@ finish_line(Buffer) ->
                     case ShouldSave of
                         true ->
                             %% Save command to history
-                            ets:insert(TableRef, {{history, HistoryCount}, TrimmedCmd}),
+                            ets:insert(TableRef, {
+                                {history, HistoryCount}, TrimmedCmd
+                            }),
                             %% Update history count
-                            ets:insert(TableRef, {history_count, HistoryCount + 1}),
+                            ets:insert(
+                                TableRef, {history_count, HistoryCount + 1}
+                            ),
                             %% Keep only last 100 commands
                             cleanup_old_history(TableRef, HistoryCount + 1);
                         false ->
@@ -416,11 +468,15 @@ save_buffer_to_ets(BufferTable, Buffer) ->
     end.
 
 %% @doc Insert character at cursor position
-insert_char(#line_state{buffer = Buffer,
-                        cursor = Cursor,
-                        buffer_table = BufferTable} =
-                State,
-            Char) ->
+insert_char(
+    #line_state{
+        buffer = Buffer,
+        cursor = Cursor,
+        buffer_table = BufferTable
+    } =
+        State,
+    Char
+) ->
     {Left, Right} = lists:split(Cursor, Buffer),
     NewBuffer = Left ++ [Char] ++ Right,
     NewCursor = Cursor + 1,
@@ -477,10 +533,14 @@ handle_ctrl_b(#line_state{cursor = Cursor} = State) ->
     line_editor_loop(State#line_state{cursor = Cursor - 1}).
 
 %% @doc Delete character at cursor (Ctrl+D)
-handle_ctrl_d(#line_state{buffer = Buffer,
-                          cursor = Cursor,
-                          buffer_table = BufferTable} =
-                  State) ->
+handle_ctrl_d(
+    #line_state{
+        buffer = Buffer,
+        cursor = Cursor,
+        buffer_table = BufferTable
+    } =
+        State
+) ->
     case Cursor < length(Buffer) of
         true ->
             {Left, [_ | Right]} = lists:split(Cursor, Buffer),
@@ -499,10 +559,14 @@ handle_ctrl_d(#line_state{buffer = Buffer,
 %% @doc Backspace (Ctrl+H)
 handle_ctrl_h(#line_state{cursor = 0} = State) ->
     line_editor_loop(State);
-handle_ctrl_h(#line_state{buffer = Buffer,
-                          cursor = Cursor,
-                          buffer_table = BufferTable} =
-                  State) ->
+handle_ctrl_h(
+    #line_state{
+        buffer = Buffer,
+        cursor = Cursor,
+        buffer_table = BufferTable
+    } =
+        State
+) ->
     {Left, Right} = lists:split(Cursor, Buffer),
     NewBuffer = lists:droplast(Left) ++ Right,
     NewCursor = Cursor - 1,
@@ -516,10 +580,14 @@ handle_ctrl_h(#line_state{buffer = Buffer,
     line_editor_loop(NewState).
 
 %% @doc Kill from cursor to end (Ctrl+K)
-handle_ctrl_k(#line_state{buffer = Buffer,
-                          cursor = Cursor,
-                          buffer_table = BufferTable} =
-                  State) ->
+handle_ctrl_k(
+    #line_state{
+        buffer = Buffer,
+        cursor = Cursor,
+        buffer_table = BufferTable
+    } =
+        State
+) ->
     {Left, _Right} = lists:split(Cursor, Buffer),
     NewState = State#line_state{buffer = Left},
 
@@ -543,12 +611,16 @@ handle_ctrl_u(#line_state{prompt = Prompt, buffer_table = BufferTable} = State) 
 handle_ctrl_p(#line_state{buffer_table = undefined} = State) ->
     %% No history available
     line_editor_loop(State);
-handle_ctrl_p(#line_state{buffer_table = BufferTable,
-                          history_pos = HistoryPos,
-                          buffer = CurrentBuffer,
-                          original_buffer = OriginalBuffer,
-                          prompt = Prompt} =
-                  State) ->
+handle_ctrl_p(
+    #line_state{
+        buffer_table = BufferTable,
+        history_pos = HistoryPos,
+        buffer = CurrentBuffer,
+        original_buffer = OriginalBuffer,
+        prompt = Prompt
+    } =
+        State
+) ->
     case ets:whereis(BufferTable) of
         undefined ->
             line_editor_loop(State);
@@ -599,11 +671,15 @@ handle_ctrl_p(#line_state{buffer_table = BufferTable,
                                         end,
 
                                     %% Replace current line with history entry
-                                    replace_line_with_text(Prompt,
-                                                           HistoryCmd,
-                                                           State#line_state{history_pos = NewPos,
-                                                                            original_buffer =
-                                                                                NewOriginal});
+                                    replace_line_with_text(
+                                        Prompt,
+                                        HistoryCmd,
+                                        State#line_state{
+                                            history_pos = NewPos,
+                                            original_buffer =
+                                                NewOriginal
+                                        }
+                                    );
                                 [] ->
                                     line_editor_loop(State)
                             end
@@ -618,11 +694,15 @@ handle_ctrl_n(#line_state{buffer_table = undefined} = State) ->
 handle_ctrl_n(#line_state{history_pos = undefined} = State) ->
     %% Not navigating history, nothing to do
     line_editor_loop(State);
-handle_ctrl_n(#line_state{buffer_table = BufferTable,
-                          history_pos = HistoryPos,
-                          original_buffer = OriginalBuffer,
-                          prompt = Prompt} =
-                  State) ->
+handle_ctrl_n(
+    #line_state{
+        buffer_table = BufferTable,
+        history_pos = HistoryPos,
+        original_buffer = OriginalBuffer,
+        prompt = Prompt
+    } =
+        State
+) ->
     case ets:whereis(BufferTable) of
         undefined ->
             line_editor_loop(State);
@@ -641,17 +721,23 @@ handle_ctrl_n(#line_state{buffer_table = BufferTable,
             case NewPos >= HistoryCount of
                 true ->
                     %% Return to original buffer
-                    replace_line_with_text(Prompt,
-                                           OriginalBuffer,
-                                           State#line_state{history_pos = undefined,
-                                                            original_buffer = []});
+                    replace_line_with_text(
+                        Prompt,
+                        OriginalBuffer,
+                        State#line_state{
+                            history_pos = undefined,
+                            original_buffer = []
+                        }
+                    );
                 false ->
                     %% Go to next entry
                     case ets:lookup(TableRef, {history, NewPos}) of
                         [{_, HistoryCmd}] ->
-                            replace_line_with_text(Prompt,
-                                                   HistoryCmd,
-                                                   State#line_state{history_pos = NewPos});
+                            replace_line_with_text(
+                                Prompt,
+                                HistoryCmd,
+                                State#line_state{history_pos = NewPos}
+                            );
                         [] ->
                             line_editor_loop(State)
                     end
@@ -687,8 +773,10 @@ cleanup_old_history(TableRef, CurrentCount) ->
         true ->
             %% Delete oldest entries
             NumToDelete = CurrentCount - MaxHistory,
-            lists:foreach(fun(N) -> ets:delete(TableRef, {history, N}) end,
-                          lists:seq(0, NumToDelete - 1));
+            lists:foreach(
+                fun(N) -> ets:delete(TableRef, {history, N}) end,
+                lists:seq(0, NumToDelete - 1)
+            );
         false ->
             ok
     end.
@@ -700,10 +788,11 @@ redraw_from_cursor(#line_state{buffer = Buffer, cursor = Cursor}) ->
 
     io:format("\e[K~s", [RightText]),
     BackDistance = length(Right),
-    if BackDistance > 0 ->
-           io:format("~s", [lists:duplicate(BackDistance, "\b")]);
-       true ->
-           ok
+    if
+        BackDistance > 0 ->
+            io:format("~s", [lists:duplicate(BackDistance, "\b")]);
+        true ->
+            ok
     end.
 
 %% @doc Password input loop with masking
@@ -740,8 +829,9 @@ handle_password_backspace([_Last | Rest]) ->
 %%% Enhanced Output Functions with ANSI Formatting
 %%%===================================================================
 
-print_user_message(FromUser, Message, Timestamp)
-    when is_list(FromUser) andalso is_binary(Message) ->
+print_user_message(FromUser, Message, Timestamp) when
+    is_list(FromUser) andalso is_binary(Message)
+->
     %% Clear the current line first (in case we're interrupting a prompt)
     io:format("\r~s", [?CLEAR_LINE]),
     %% Should print like:
@@ -750,32 +840,113 @@ print_user_message(FromUser, Message, Timestamp)
     {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
-    io:format("~s: ~s (~s)\r\n",
-              [?FG_CYAN("<" ++ FromUser ++ ">"),
-               ?FG_WHITE(binary_to_list(Message)),
-               ?FG_YELLOW(TimeStr)]).
+    io:format(
+        "~s: ~s (~s)\r\n",
+        [
+            ?FG_CYAN("<" ++ FromUser ++ ">"),
+            ?FG_WHITE(binary_to_list(Message)),
+            ?FG_YELLOW(TimeStr)
+        ]
+    ).
 
 %% @doc Print a sent message to show confirmation
 %% Formats as: &lt;You => bob&gt; Message text (HH:MM:SS)
--spec print_sent_message(ToUser :: string() | binary(),
-                         Message :: binary(),
-                         Timestamp :: erlang:timestamp()) ->
-                            ok.
+-spec print_sent_message(
+    ToUser :: string() | binary(),
+    Message :: binary(),
+    Timestamp :: erlang:timestamp()
+) ->
+    ok.
 print_sent_message(ToUser, Message, Timestamp) when is_binary(ToUser) ->
     print_sent_message(binary_to_list(ToUser), Message, Timestamp);
-print_sent_message(ToUser, Message, Timestamp)
-    when is_list(ToUser) andalso is_binary(Message) ->
-    %% Move up one line and clear it to remove the command input
-    io:format("~s\r~s", [?CURSOR_UP(1), ?CLEAR_LINE]),
-    %% Should print like:
-    %% <You => bob> Message text (12:34:56)
+print_sent_message(ToUser, Message, Timestamp) when
+    is_list(ToUser) andalso is_binary(Message)
+->
+    %% Calculate how many lines the command took up and clear them
+    %% The last command was: "cryptic> " + the actual command
+    %% We need to reconstruct what was typed to know how many lines to clear
+    Prompt = "cryptic> ",
+
+    %% Get terminal width (default to 80 if we can't determine it)
+    TermWidth =
+        case io:columns() of
+            {ok, Cols} -> Cols;
+            _ -> 80
+        end,
+
+    %% Reconstruct the command line that was just executed
+    %% Format: ":s <username> <message>" or "send <username> <message>"
+    CommandLine = Prompt ++ ":s " ++ ToUser ++ " " ++ binary_to_list(Message),
+
+    %% Calculate how many lines this wrapped to
+    LinesToClear = calculate_wrapped_lines(CommandLine, TermWidth),
+
+    %% Move up and clear all those lines
+    clear_lines_up(LinesToClear),
+
+    %% Now print the sent message confirmation
     {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
-    io:format("~s ~s (~s)\r\n",
-              [?FG_GREEN("<You => " ++ ToUser ++ ">"),
-               ?FG_WHITE(binary_to_list(Message)),
-               ?FG_YELLOW(TimeStr)]).
+    io:format(
+        "~s ~s (~s)\r\n",
+        [
+            ?FG_GREEN("<You => " ++ ToUser ++ ">"),
+            ?FG_WHITE(binary_to_list(Message)),
+            ?FG_YELLOW(TimeStr)
+        ]
+    ).
+
+%% @doc Calculate how many lines a text string will wrap to given terminal width
+%% Takes into account ANSI escape sequences which don't consume visible columns
+-spec calculate_wrapped_lines(string(), pos_integer()) -> pos_integer().
+calculate_wrapped_lines(Text, TermWidth) ->
+    %% Strip ANSI escape sequences to get visible length
+    VisibleText = strip_ansi_codes(Text),
+    VisibleLength = length(VisibleText),
+
+    %% Calculate number of lines (at least 1)
+    max(1, (VisibleLength + TermWidth - 1) div TermWidth).
+
+%% @doc Strip ANSI escape sequences from a string
+-spec strip_ansi_codes(string()) -> string().
+strip_ansi_codes(Text) ->
+    %% Remove ANSI escape sequences: ESC[...m and similar
+    %% This is a simple implementation - for more complex sequences,
+    %% we'd need a proper state machine
+    strip_ansi_codes(Text, [], false).
+
+strip_ansi_codes([], Acc, _InEscape) ->
+    lists:reverse(Acc);
+strip_ansi_codes([27 | Rest], Acc, _InEscape) ->
+    %% ESC character - start of escape sequence
+    strip_ansi_codes(Rest, Acc, true);
+strip_ansi_codes([Char | Rest], Acc, true) ->
+    %% Inside escape sequence - skip until we hit a letter
+    case
+        (Char >= $A andalso Char =< $Z) orelse (Char >= $a andalso Char =< $z)
+    of
+        true ->
+            %% End of escape sequence
+            strip_ansi_codes(Rest, Acc, false);
+        false ->
+            %% Still in escape sequence
+            strip_ansi_codes(Rest, Acc, true)
+    end;
+strip_ansi_codes([Char | Rest], Acc, false) ->
+    %% Regular character
+    strip_ansi_codes(Rest, [Char | Acc], false).
+
+%% @doc Clear N lines upward from current cursor position
+-spec clear_lines_up(pos_integer()) -> ok.
+clear_lines_up(N) when N =< 0 ->
+    ok;
+clear_lines_up(N) ->
+    %% Move up N lines
+    io:format("~s", [?CURSOR_UP(N)]),
+    %% Clear from cursor to end of screen (clears current line and all below)
+    io:format("\e[J"),
+    ok.
 
 %% @doc Print success message with green formatting
 -spec print_success(string()) -> ok.
@@ -811,35 +982,57 @@ print_engine_status(Status) ->
     io:format(?ALT_SCREEN_ON),
     io:format(?CLEAR_SCREEN),
     io:format(?MVTO_ROW_COL(1, 1)),
-    
+
     %% Display header with border
-    io:format(?BOLD("╔═══════════════════════════════════════════════════════════════╗") ++ "\r\n"),
-    io:format(?BOLD("║") ++ ?FG_CYAN("              CRYPTIC ENGINE STATUS                            ") ++ ?BOLD("║") ++ "\r\n"),
-    io:format(?BOLD("╚═══════════════════════════════════════════════════════════════╝") ++ "\r\n\r\n"),
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CRYPTIC ENGINE STATUS                            "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
 
     %% Format username
     Username = maps:get(username, Status, <<"unknown">>),
-    UsernameStr = case Username of
-        U when is_binary(U) -> binary_to_list(U);
-        U when is_list(U) -> U;
-        _ -> "unknown"
-    end,
+    UsernameStr =
+        case Username of
+            U when is_binary(U) -> binary_to_list(U);
+            U when is_list(U) -> U;
+            _ -> "unknown"
+        end,
     io:format(?FG_GREEN("  Username:         ") ++ UsernameStr ++ "\r\n"),
 
     %% Format active sessions
     ActiveSessions = maps:get(active_sessions, Status, 0),
-    io:format(?FG_GREEN("  Active Sessions:  ") ++ integer_to_list(ActiveSessions) ++ "\r\n"),
+    io:format(
+        ?FG_GREEN("  Active Sessions:  ") ++ integer_to_list(ActiveSessions) ++
+            "\r\n"
+    ),
 
     %% Format message count
     MessageCount = maps:get(message_count, Status, 0),
-    io:format(?FG_GREEN("  Messages Sent:    ") ++ integer_to_list(MessageCount) ++ "\r\n"),
+    io:format(
+        ?FG_GREEN("  Messages Sent:    ") ++ integer_to_list(MessageCount) ++
+            "\r\n"
+    ),
 
     %% Format error count with conditional coloring
     ErrorCount = maps:get(error_count, Status, 0),
     ErrorStr = integer_to_list(ErrorCount),
-    ErrorColored = if ErrorCount > 0 -> ?FG_RED(ErrorStr);
-                      true -> ErrorStr
-                   end,
+    ErrorColored =
+        if
+            ErrorCount > 0 -> ?FG_RED(ErrorStr);
+            true -> ErrorStr
+        end,
     io:format(?FG_GREEN("  Errors:           ") ++ ErrorColored ++ "\r\n"),
 
     %% Format uptime
@@ -855,7 +1048,11 @@ print_engine_status(Status) ->
         _ ->
             io:format("\r\n"),
             io:format(?BOLD(?FG_CYAN("Active Ratchet Sessions:")) ++ "\r\n"),
-            io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
+            io:format(
+                ?BOLD(
+                    "─────────────────────────────────────────────────────────────────"
+                ) ++ "\r\n"
+            ),
 
             lists:foreach(fun format_session_info/1, SessionDetails),
 
@@ -863,15 +1060,34 @@ print_engine_status(Status) ->
             io:format("\r\n"),
             io:format(
                 ?FG_CYAN(
-                "  Step X: ") ++ ?FG_MAGENTA("Number of DH ratchet steps (key rotations) that have occurred") ++ "\r\n"
-                ?FG_CYAN(
-                "  Chain[X init/Y resp]:") ++ ?FG_MAGENTA(" Current initiator/responder chain message counters") ++ "\r\n"
-                ?FG_MAGENTA(
-                "                        These reset to 0 when DH ratchet steps occur") ++ "\r\n"
-                ?FG_CYAN(
-                "  Prev[X msgs]:") ++ ?FG_MAGENTA(" Messages from the previous receiving chain") ++ "\r\n"
-                ?FG_CYAN(
-                "  Skipped[X keys]:") ++ ?FG_MAGENTA(" Out-of-order messages cached for delayed delivery") ++ "\r\n"
+                    "  Step X: "
+                ) ++
+                    ?FG_MAGENTA(
+                        "Number of DH ratchet steps (key rotations) that have occurred"
+                    ) ++
+                    "\r\n"
+                    ?FG_CYAN(
+                        "  Chain[X init/Y resp]:"
+                    ) ++
+                    ?FG_MAGENTA(
+                        " Current initiator/responder chain message counters"
+                    ) ++
+                    "\r\n"
+                    ?FG_MAGENTA(
+                        "                        These reset to 0 when DH ratchet steps occur"
+                    ) ++
+                    "\r\n"
+                    ?FG_CYAN(
+                        "  Prev[X msgs]:"
+                    ) ++
+                    ?FG_MAGENTA(" Messages from the previous receiving chain") ++
+                    "\r\n"
+                    ?FG_CYAN(
+                        "  Skipped[X keys]:"
+                    ) ++
+                    ?FG_MAGENTA(
+                        " Out-of-order messages cached for delayed delivery"
+                    ) ++ "\r\n"
             )
     end,
 
@@ -890,11 +1106,12 @@ print_engine_status(Status) ->
 -spec format_session_info(map()) -> ok.
 format_session_info(SessionInfo) ->
     PeerUsername = maps:get(peer_username, SessionInfo, <<"unknown">>),
-    Peer = case PeerUsername of
-        P when is_binary(P) -> binary_to_list(P);
-        P when is_list(P) -> P;
-        _ -> "unknown"
-    end,
+    Peer =
+        case PeerUsername of
+            P when is_binary(P) -> binary_to_list(P);
+            P when is_list(P) -> P;
+            _ -> "unknown"
+        end,
     DHStep = maps:get(dh_ratchet_step, SessionInfo, 0),
     CurrentSend = maps:get(send_msg_number, SessionInfo, 0),
     CurrentRecv = maps:get(recv_msg_number, SessionInfo, 0),
@@ -905,11 +1122,19 @@ format_session_info(SessionInfo) ->
     PeerColored = ?FG_CYAN(Peer),
     io:format("  " ++ PeerColored ++ ": "),
     io:format(?FG_GREEN("Step ") ++ integer_to_list(DHStep) ++ ", "),
-    io:format(?FG_GREEN("Chain")++"[" ++ integer_to_list(CurrentSend) ++ ?FG_YELLOW(" init") ++  ", "),
+    io:format(
+        ?FG_GREEN("Chain") ++ "[" ++ integer_to_list(CurrentSend) ++
+            ?FG_YELLOW(" init") ++ ", "
+    ),
     io:format(integer_to_list(CurrentRecv) ++ ?FG_YELLOW(" resp") ++ "], "),
-    io:format(?FG_GREEN("Prev") ++ "[" ++ integer_to_list(PrevChain) ++ ?FG_YELLOW(" msgs") ++ "]" ++ ", "),
-    io:format(?FG_GREEN("Skipped") ++ "[" ++ integer_to_list(SkippedKeys) ++ ?FG_YELLOW(" keys") ++ "]\r\n").
-
+    io:format(
+        ?FG_GREEN("Prev") ++ "[" ++ integer_to_list(PrevChain) ++
+            ?FG_YELLOW(" msgs") ++ "]" ++ ", "
+    ),
+    io:format(
+        ?FG_GREEN("Skipped") ++ "[" ++ integer_to_list(SkippedKeys) ++
+            ?FG_YELLOW(" keys") ++ "]\r\n"
+    ).
 
 %% @doc Format uptime from microseconds to human-readable string
 %% Helper function for print_engine_status/1
@@ -926,14 +1151,26 @@ format_uptime(Microseconds) ->
 
     if
         Days > 0 ->
-            lists:flatten(io_lib:format("~B days, ~B hours, ~B minutes",
-                                       [Days, RemainderHours, RemainderMinutes]));
+            lists:flatten(
+                io_lib:format(
+                    "~B days, ~B hours, ~B minutes",
+                    [Days, RemainderHours, RemainderMinutes]
+                )
+            );
         Hours > 0 ->
-            lists:flatten(io_lib:format("~B hours, ~B minutes",
-                                       [Hours, RemainderMinutes]));
+            lists:flatten(
+                io_lib:format(
+                    "~B hours, ~B minutes",
+                    [Hours, RemainderMinutes]
+                )
+            );
         Minutes > 0 ->
-            lists:flatten(io_lib:format("~B minutes, ~B seconds",
-                                       [Minutes, RemainderSeconds]));
+            lists:flatten(
+                io_lib:format(
+                    "~B minutes, ~B seconds",
+                    [Minutes, RemainderSeconds]
+                )
+            );
         true ->
             lists:flatten(io_lib:format("~B seconds", [Seconds]))
     end.
@@ -947,42 +1184,106 @@ print_help() ->
     io:format(?MVTO_ROW_COL(1, 1)),
 
     %% Display header with border
-    io:format(?BOLD("╔═══════════════════════════════════════════════════════════════╗") ++ "\r\n"),
-    io:format(?BOLD("║") ++ ?FG_CYAN("              CRYPTIC CONSOLE HELP                             ") ++ ?BOLD("║") ++ "\r\n"),
-    io:format(?BOLD("╚═══════════════════════════════════════════════════════════════╝") ++ "\r\n\r\n"),
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CRYPTIC CONSOLE HELP                             "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
 
     %% Commands section
     io:format(?BOLD(?FG_CYAN("Available Commands:")) ++ "\r\n"),
-    io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
-    io:format(?FG_GREEN("  send") ++ " " ++ ?FG_YELLOW("<username> <message>") ++ "  - Send message to user " ++ ?FG_MAGENTA("(:s)") ++ "\r\n"),
-    io:format(?FG_GREEN("  status") ++ "                     - Show console status " ++ ?FG_MAGENTA("(:st)") ++ "\r\n"),
-    io:format(?FG_GREEN("  engine_status") ++ "              - Show engine status " ++ ?FG_MAGENTA("(:es)") ++ "\r\n"),
-    io:format(?FG_GREEN("  verbose") ++ "                    - Toggle verbose mode " ++ ?FG_MAGENTA("(:v)") ++ "\r\n"),
-    io:format(?FG_GREEN("  help") ++ "                       - Show this help " ++ ?FG_MAGENTA("(:h)") ++ "\r\n"),
-    io:format(?FG_GREEN("  quit") ++ "                       - Exit console " ++ ?FG_MAGENTA("(:q)") ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  send") ++ " " ++ ?FG_YELLOW("<username> <message>") ++
+            "  - Send message to user " ++ ?FG_MAGENTA("(:s)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  status") ++ "                     - Show console status " ++
+            ?FG_MAGENTA("(:st)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  engine_status") ++ "              - Show engine status " ++
+            ?FG_MAGENTA("(:es)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  verbose") ++ "                    - Toggle verbose mode " ++
+            ?FG_MAGENTA("(:v)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help") ++ "                       - Show this help " ++
+            ?FG_MAGENTA("(:h)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  quit") ++ "                       - Exit console " ++
+            ?FG_MAGENTA("(:q)") ++ "\r\n"
+    ),
 
     %% Line editing section
     io:format("\r\n"),
     io:format(?BOLD(?FG_CYAN("Line Editing Keys:")) ++ "\r\n"),
-    io:format(?BOLD("─────────────────────────────────────────────────────────────────") ++ "\r\n"),
-    io:format(?FG_GREEN("  Ctrl+A") ++ "                     - Beginning of line\r\n"),
-    io:format(?FG_GREEN("  Ctrl+E") ++ "                     - End of line\r\n"),
-    io:format(?FG_GREEN("  Ctrl+F / Right Arrow") ++ "       - Forward one character\r\n"),
-    io:format(?FG_GREEN("  Ctrl+B / Left Arrow") ++ "        - Back one character\r\n"),
-    io:format(?FG_GREEN("  Ctrl+P / Up Arrow") ++ "          - Previous command in history\r\n"),
-    io:format(?FG_GREEN("  Ctrl+N / Down Arrow") ++ "        - Next command in history\r\n"),
-    io:format(?FG_GREEN("  Ctrl+D") ++ "                     - Delete character\r\n"),
-    io:format(?FG_GREEN("  Ctrl+H / Backspace") ++ "         - Delete previous character\r\n"),
-    io:format(?FG_GREEN("  Ctrl+K") ++ "                     - Kill to end of line\r\n"),
-    io:format(?FG_GREEN("  Ctrl+U") ++ "                     - Kill entire line\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+A") ++ "                     - Beginning of line\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+E") ++ "                     - End of line\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+F / Right Arrow") ++
+            "       - Forward one character\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+B / Left Arrow") ++ "        - Back one character\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+P / Up Arrow") ++
+            "          - Previous command in history\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+N / Down Arrow") ++
+            "        - Next command in history\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+D") ++ "                     - Delete character\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+H / Backspace") ++
+            "         - Delete previous character\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+K") ++
+            "                     - Kill to end of line\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+U") ++ "                     - Kill entire line\r\n"
+    ),
 
     %% Show instructions and wait for keypress
     io:format("\r\n\r\n"),
     io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
-    
+
     %% Wait for a keypress
     io:get_chars("", 1),
-    
+
     %% Return to main screen buffer
     io:format(?ALT_SCREEN_OFF).
 
@@ -993,11 +1294,24 @@ print_console_status(Status) ->
     io:format(?ALT_SCREEN_ON),
     io:format(?CLEAR_SCREEN),
     io:format(?MVTO_ROW_COL(1, 1)),
-    
+
     %% Display header with border
-    io:format(?BOLD("╔═══════════════════════════════════════════════════════════════╗") ++ "\r\n"),
-    io:format(?BOLD("║") ++ ?FG_CYAN("              CRYPTIC CONSOLE STATUS                          ") ++ ?BOLD("║") ++ "\r\n"),
-    io:format(?BOLD("╚═══════════════════════════════════════════════════════════════╝") ++ "\r\n\r\n"),
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CRYPTIC CONSOLE STATUS                          "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
 
     %% Format username
     Username = maps:get(username, Status, "unknown"),
@@ -1006,39 +1320,44 @@ print_console_status(Status) ->
     %% Format server connection
     ServerHost = maps:get(server_host, Status, "unknown"),
     ServerPort = maps:get(server_port, Status, 0),
-    io:format(?FG_GREEN("  Server:           ") ++ ServerHost ++ ":" ++ integer_to_list(ServerPort) ++ "\r\n"),
+    io:format(
+        ?FG_GREEN("  Server:           ") ++ ServerHost ++ ":" ++
+            integer_to_list(ServerPort) ++ "\r\n"
+    ),
 
     %% Format connection status
     WsConnected = maps:get(ws_client_connected, Status, false),
-    WsStatus = case WsConnected of
-        true -> ?FG_GREEN("Connected");
-        false -> ?FG_RED("Disconnected")
-    end,
+    WsStatus =
+        case WsConnected of
+            true -> ?FG_GREEN("Connected");
+            false -> ?FG_RED("Disconnected")
+        end,
     io:format(?FG_GREEN("  WebSocket:        ") ++ WsStatus ++ "\r\n"),
 
     %% Format engine status
     EngineRunning = maps:get(engine_running, Status, false),
-    EngineStatus = case EngineRunning of
-        true -> ?FG_GREEN("Running");
-        false -> ?FG_RED("Stopped")
-    end,
+    EngineStatus =
+        case EngineRunning of
+            true -> ?FG_GREEN("Running");
+            false -> ?FG_RED("Stopped")
+        end,
     io:format(?FG_GREEN("  Engine:           ") ++ EngineStatus ++ "\r\n"),
 
     %% Format verbose mode
     Verbose = maps:get(verbose, Status, false),
-    VerboseStr = case Verbose of
-        true -> ?FG_YELLOW("Enabled");
-        false -> "Disabled"
-    end,
+    VerboseStr =
+        case Verbose of
+            true -> ?FG_YELLOW("Enabled");
+            false -> "Disabled"
+        end,
     io:format(?FG_GREEN("  Verbose Mode:     ") ++ VerboseStr ++ "\r\n"),
 
     %% Show instructions and wait for keypress
     io:format("\r\n\r\n"),
     io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
-    
+
     %% Wait for a keypress
     io:get_chars("", 1),
-    
+
     %% Return to main screen buffer
     io:format(?ALT_SCREEN_OFF).
-
