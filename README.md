@@ -160,6 +160,20 @@ terminal-notifier -title "Cryptic" -message "Cryptic message from: $1" -sound de
 Read [here](docs/CERTIFICATE_HANDLING.md) to learn how to create certificates
 for new Clients and how to securely deliver them to the new Client.
 
+## The Server
+
+The main idea of the Cryptic Server is to make it as _dumb_ as possible.
+
+It mainly functions as a relay point for messages routed between the Clients;
+but it also need to hold uploaded Client (Public) keys and pending encrypted
+messages, waiting to be delivered as soon as the receiving Client comes online.
+
+Nothing is stored on disk, hence if the Server goes down while holding
+pending messages, they are lost.
+
+The Server can be run either via the `scripts/start-server.sh` script,
+or via a tailor made [docker container](docs/DOCKER.md) .
+
 ## Features
 
 ### WebSocket mTLS Communication

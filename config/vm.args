@@ -1,0 +1,28 @@
+## Name of the node
+-name cryptic@127.0.0.1
+
+## Cookie for distributed erlang
+-setcookie cryptic_cookie
+
+## Heartbeat management; auto-restarts VM if it dies or becomes unresponsive
+## (Disabled by default..use with caution!)
+##-heart
+
+## Enable kernel poll and a few async threads
++K true
++A 16
+
+## Increase number of concurrent ports/sockets
+-env ERL_MAX_PORTS 65536
+
+## Tweak GC to run more often
+-env ERL_FULLSWEEP_AFTER 10
+
+## Set the location of crash dumps
+-env ERL_CRASH_DUMP /opt/cryptic/logs/erl_crash.dump
+
+## Start the shell (for foreground mode)
++Bd -noinput
+
+## Erlang distribution buffer busy limit
++zdbbl 8192

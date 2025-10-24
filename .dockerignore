@@ -1,0 +1,78 @@
+# .dockerignore - Exclude unnecessary files from Docker build context
+
+# Git files
+.git
+.gitignore
+.github
+
+# Build artifacts
+_build
+*.beam
+*.dump
+erl_crash.dump
+*.o
+*.so
+
+# Backup files
+backups/
+*~
+*.bak
+*.swp
+*.orig
+
+# Test files and results
+TEST-*.xml
+*.beam
+edbg_trace.config*
+edbg.trace_result
+
+# Logs
+logs/
+log/
+*.log
+
+# Documentation build artifacts (keep source docs)
+doc/*.html
+doc/*.css
+doc/*.js
+doc/*.png
+doc/edoc-info
+doc/modules-frame.html
+doc/overview-summary.html
+doc/packages-frame.html
+doc/stylesheet.css
+
+# IDE files
+.vscode
+.idea
+*.iml
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+
+# Docker files (don't need these in the image)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Scripts that are for local development
+scripts/start-server.sh
+scripts/cryptic_console
+
+# CA directory - we'll mount certificates at runtime
+CA/
+
+# Rebar3 plugins directory
+_checkouts/
+
+# gunsmoke directory
+gunsmoke/
+
+# Local config overrides
+config/local.config
+
+# Database backups
+*.db
+backups/*.db
