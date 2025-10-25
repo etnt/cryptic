@@ -106,7 +106,12 @@
     print_highlight/1,
     print_engine_status/1,
     print_help/0,
-    print_console_status/1
+    print_help/1,
+    print_console_status/1,
+    make_prompt/0,
+    make_prompt/1,
+    calculate_wrapped_lines/2,
+    clear_lines_up/1
 ]).
 
 %% Enhanced output functions with ANSI formatting
@@ -165,77 +170,19 @@ start_shell() ->
 
 %% @doc Start the shell with options
 -spec start_shell(map()) -> ok | {error, term()}.
-start_shell(Options) ->
-    Verbose = maps:get(verbose, Options, false),
-
+start_shell(_Options) ->
     try
         %% Try OTP 28 raw mode first
         case shell:start_interactive({noshell, raw}) of
             ok ->
-                case Verbose of
-                    true ->
-                        io:format("~s\r\n", [
-                            ?FG_GREEN(?BOLD("Cryptic Shell (OTP 28 raw mode)"))
-                        ]);
-                    false ->
-                        ok
-                end,
                 ok;
             {error, _Reason} ->
-                case Verbose of
-                    true ->
-                        io:format(
-                            "~s\r\n",
-                            [
-                                ?FG_YELLOW(
-                                    ?BOLD(
-                                        "OTP 28 mode failed, trying fallback..."
-                                    )
-                                )
-                            ]
-                        );
-                    false ->
-                        ok
-                end,
                 fallback_raw_mode()
         end
     catch
         error:undef ->
-            case Verbose of
-                true ->
-                    io:format(
-                        "~s\r\n",
-                        [
-                            ?FG_YELLOW(
-                                ?BOLD(
-                                    "OTP 28 shell function not available, trying fallback..."
-                                )
-                            )
-                        ]
-                    );
-                false ->
-                    ok
-            end,
             fallback_raw_mode();
         _:Error ->
-            case Verbose of
-                true ->
-                    io:format(
-                        "~s\r\n",
-                        [
-                            ?FG_WHITE_BG_RED(
-                                ?BOLD(
-                                    "Shell setup error: " ++
-                                        lists:flatten(
-                                            io_lib:format("~p", [Error])
-                                        )
-                                )
-                            )
-                        ]
-                    );
-                false ->
-                    ok
-            end,
             {error, Error}
     end.
 
@@ -1219,11 +1166,37 @@ format_uptime(Microseconds) ->
 %% @doc Display help information on alternate screen
 -spec print_help() -> ok.
 print_help() ->
+    print_help("").
+
+%% @doc Display topic-specific help or general help
+-spec print_help(string()) -> ok.
+print_help(Topic) ->
     %% Switch to alternate screen buffer
     io:format(?ALT_SCREEN_ON),
     io:format(?CLEAR_SCREEN),
     io:format(?MVTO_ROW_COL(1, 1)),
 
+    case Topic of
+        "alias" ->
+            print_alias_help();
+        "line_edit" ->
+            print_line_edit_help();
+        _ ->
+            print_general_help()
+    end,
+
+    %% Show instructions and wait for keypress
+    io:format("\r\n\r\n"),
+    io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
+
+    %% Wait for a keypress
+    io:get_chars("", 1),
+
+    %% Return to main screen buffer
+    io:format(?ALT_SCREEN_OFF).
+
+%% @doc Print general help
+print_general_help() ->
     %% Display header with border
     io:format(
         ?BOLD(
@@ -1254,6 +1227,11 @@ print_help() ->
             "  - Send message to user " ++ ?FG_MAGENTA("(:s)") ++ "\r\n"
     ),
     io:format(
+        ?FG_GREEN("  alias") ++
+            "                      - Manage message aliases " ++
+            ?FG_MAGENTA("(:a)") ++ "\r\n"
+    ),
+    io:format(
         ?FG_GREEN("  status") ++ "                     - Show console status " ++
             ?FG_MAGENTA("(:st)") ++ "\r\n"
     ),
@@ -1262,71 +1240,190 @@ print_help() ->
             ?FG_MAGENTA("(:es)") ++ "\r\n"
     ),
     io:format(
-        ?FG_GREEN("  verbose") ++ "                    - Toggle verbose mode " ++
-            ?FG_MAGENTA("(:v)") ++ "\r\n"
-    ),
-    io:format(
-        ?FG_GREEN("  help") ++ "                       - Show this help " ++
-            ?FG_MAGENTA("(:h)") ++ "\r\n"
+        ?FG_GREEN("  help") ++ " " ++ ?FG_YELLOW("[<topic>]") ++
+            "             - Show help " ++ ?FG_MAGENTA("(:h)") ++ "\r\n"
     ),
     io:format(
         ?FG_GREEN("  quit") ++ "                       - Exit console " ++
             ?FG_MAGENTA("(:q)") ++ "\r\n"
     ),
 
-    %% Line editing section
+    %% Topics section
     io:format("\r\n"),
-    io:format(?BOLD(?FG_CYAN("Line Editing Keys:")) ++ "\r\n"),
+    io:format(?BOLD(?FG_CYAN("Help Topics:")) ++ "\r\n"),
     io:format(
         ?BOLD(
             "─────────────────────────────────────────────────────────────────"
         ) ++ "\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+A") ++ "                     - Beginning of line\r\n"
+        ?FG_GREEN("  help alias") ++
+            "                  - Alias command details\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+E") ++ "                     - End of line\r\n"
+        ?FG_GREEN("  help line_edit") ++
+            "              - Line editing keybindings\r\n"
+    ).
+
+%% @doc Print alias-specific help
+print_alias_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+F / Right Arrow") ++
-            "       - Forward one character\r\n"
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              ALIAS COMMAND HELP                               "
+            ) ++ ?BOLD("║") ++ "\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+B / Left Arrow") ++ "        - Back one character\r\n"
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  Aliases allow you to send messages to multiple users at once.\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+P / Up Arrow") ++
-            "          - Previous command in history\r\n"
+        "  Think of them as group messaging shortcuts.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+N / Down Arrow") ++
-            "        - Next command in history\r\n"
+        ?FG_GREEN("  alias") ++ " or " ++ ?FG_MAGENTA(":a") ++
+            "                 - List all aliases\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+D") ++ "                     - Delete character\r\n"
+        ?FG_GREEN("  alias new") ++ " " ++ ?FG_YELLOW("<name> <users...>") ++
+            " - Create alias " ++ ?FG_MAGENTA("(:an)") ++ "\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+H / Backspace") ++
-            "         - Delete previous character\r\n"
+        ?FG_GREEN("  alias delete") ++ " " ++ ?FG_YELLOW("<name>") ++
+            "         - Delete alias " ++ ?FG_MAGENTA("(:ad)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  alias add") ++ " " ++ ?FG_YELLOW("<name> <users...>") ++
+            " - Add members " ++ ?FG_MAGENTA("(:aa)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  alias rm") ++ " " ++ ?FG_YELLOW("<name> <users...>") ++
+            "  - Remove members " ++ ?FG_MAGENTA("(:ar)") ++ "\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Usage Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :an work bob alice dave") ++
+            "     # Create alias 'work'\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :s @work Coffee break?") ++
+            "      # Send to all in 'work'\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :aa work eve") ++ "                # Add eve to 'work'\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :ar work dave") ++
+            "               # Remove dave from 'work'\r\n"
+    ).
+
+%% @doc Print line editing help
+print_line_edit_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              LINE EDITING KEYS                                "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Navigation:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+A") ++ " or " ++ ?FG_GREEN("Home") ++
+            "           - Beginning of line\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+E") ++ " or " ++ ?FG_GREEN("End") ++
+            "            - End of line\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+F") ++ " or " ++ ?FG_GREEN("Right Arrow") ++
+            "    - Forward one character\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+B") ++ " or " ++ ?FG_GREEN("Left Arrow") ++
+            "     - Back one character\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Editing:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+D") ++ " or " ++ ?FG_GREEN("Delete") ++
+            "         - Delete character at cursor\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+H") ++ " or " ++ ?FG_GREEN("Backspace") ++
+            "      - Delete previous character\r\n"
     ),
     io:format(
         ?FG_GREEN("  Ctrl+K") ++
-            "                     - Kill to end of line\r\n"
+            "                   - Kill to end of line\r\n"
     ),
     io:format(
-        ?FG_GREEN("  Ctrl+U") ++ "                     - Kill entire line\r\n"
+        ?FG_GREEN("  Ctrl+U") ++ "                   - Kill entire line\r\n"
     ),
 
-    %% Show instructions and wait for keypress
-    io:format("\r\n\r\n"),
-    io:format(?FG_YELLOW("Press any key to return...") ++ "\r\n"),
-
-    %% Wait for a keypress
-    io:get_chars("", 1),
-
-    %% Return to main screen buffer
-    io:format(?ALT_SCREEN_OFF).
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("History:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+P") ++ " or " ++ ?FG_GREEN("Up Arrow") ++
+            "       - Previous command\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  Ctrl+N") ++ " or " ++ ?FG_GREEN("Down Arrow") ++
+            "     - Next command\r\n"
+    ).
 
 %% @doc Display console status information on alternate screen
 -spec print_console_status(map()) -> ok.

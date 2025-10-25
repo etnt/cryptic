@@ -133,6 +133,15 @@ main(InitCfg) ->
             )
     end,
 
+    %% Initialize alias storage
+    case cryptic_alias:initialize() of
+        ok ->
+            ok;
+        {error, already_exists} ->
+            %% Table already exists, which is fine
+            ok
+    end,
+
     %% Now continue with initialization
     setup_event_management(InitCfg),
     CertCfg = get_cert_config(InitCfg),
@@ -353,7 +362,10 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
                     cryptic_shell:print_highlight("Goodbye!"),
                     cleanup(State);
                 {help} ->
-                    show_help(),
+                    cryptic_shell:print_help(),
+                    command_loop(State);
+                {help, Topic} ->
+                    cryptic_shell:print_help(Topic),
                     command_loop(State);
                 ParsedCmd ->
                     NewState = execute_command(ParsedCmd, State),
@@ -405,6 +417,11 @@ parse_command(":es") ->
     {engine_status};
 parse_command(":v") ->
     {verbose, toggle};
+%% Alias shortcut commands
+parse_command(":a") ->
+    {alias_cmd, list};
+parse_command(":al") ->
+    {alias_cmd, list};
 %% Full commands
 parse_command("help") ->
     {help};
@@ -418,13 +435,21 @@ parse_command("engine_status") ->
     {engine_status};
 parse_command("verbose") ->
     {verbose, toggle};
+parse_command("alias") ->
+    {alias_cmd, list};
 %% Check for shortcut send command ":s <username> <message>"
+%% Check for shortcut alias commands ":an/:ad/:aa/:ar <...>"
 parse_command(Line) ->
     case string:prefix(Line, ":s ") of
         nomatch ->
-            %% Not a shortcut, parse as regular command
-            Parts = string:tokens(Line, " "),
-            parse_command_parts(Parts);
+            case check_alias_shortcuts(Line) of
+                nomatch ->
+                    %% Not a shortcut, parse as regular command
+                    Parts = string:tokens(Line, " "),
+                    parse_command_parts(Parts);
+                AliasCmd ->
+                    AliasCmd
+            end;
         Rest ->
             %% Shortcut send command
             Parts = string:tokens(Rest, " "),
@@ -433,9 +458,93 @@ parse_command(Line) ->
 
 parse_command_parts(["send", ToUsername | MessageParts]) ->
     Message = string:join(MessageParts, " "),
-    {send_message, list_to_binary(ToUsername), list_to_binary(Message)};
+    %% Check if ToUsername starts with @
+    case ToUsername of
+        [$@ | AliasName] ->
+            %% Expand alias to multiple send commands
+            case cryptic_alias:list(AliasName) of
+                {ok, Members} ->
+                    {send_to_alias, AliasName, Members,
+                        list_to_binary(Message)};
+                {error, not_found} ->
+                    {error, "Alias '@" ++ AliasName ++ "' not found"}
+            end;
+        _ ->
+            {send_message, list_to_binary(ToUsername), list_to_binary(Message)}
+    end;
+parse_command_parts(["alias"]) ->
+    {alias_cmd, list};
+parse_command_parts(["alias", "list"]) ->
+    {alias_cmd, list};
+parse_command_parts(["alias", "new", AliasName | Members]) when
+    length(Members) > 0
+->
+    {alias_cmd, new, AliasName, Members};
+parse_command_parts(["alias", "delete", AliasName]) ->
+    {alias_cmd, delete, AliasName};
+parse_command_parts(["alias", "add", AliasName | Members]) when
+    length(Members) > 0
+->
+    {alias_cmd, add, AliasName, Members};
+parse_command_parts(["alias", "rm", AliasName | Members]) when
+    length(Members) > 0
+->
+    {alias_cmd, rm, AliasName, Members};
+parse_command_parts(["help"]) ->
+    {help};
+parse_command_parts(["help", Topic]) ->
+    {help, Topic};
 parse_command_parts(_) ->
     {error, "Unknown command"}.
+
+%% @doc Check for alias shortcut commands
+check_alias_shortcuts(Line) ->
+    case string:prefix(Line, ":an ") of
+        nomatch ->
+            case string:prefix(Line, ":ad ") of
+                nomatch ->
+                    case string:prefix(Line, ":aa ") of
+                        nomatch ->
+                            case string:prefix(Line, ":ar ") of
+                                nomatch -> nomatch;
+                                Rest -> parse_alias_rm_shortcut(Rest)
+                            end;
+                        Rest ->
+                            parse_alias_add_shortcut(Rest)
+                    end;
+                Rest ->
+                    {alias_cmd, delete, string:trim(Rest)}
+            end;
+        Rest ->
+            parse_alias_new_shortcut(Rest)
+    end.
+
+%% @doc Parse alias new shortcut: ":an <name> <member1> <member2> ..."
+parse_alias_new_shortcut(Rest) ->
+    case string:tokens(Rest, " ") of
+        [AliasName | Members] when length(Members) > 0 ->
+            {alias_cmd, new, AliasName, Members};
+        _ ->
+            {error, "Usage: :an <alias_name> <member1> [member2 ...]"}
+    end.
+
+%% @doc Parse alias add shortcut: ":aa <name> <member1> <member2> ..."
+parse_alias_add_shortcut(Rest) ->
+    case string:tokens(Rest, " ") of
+        [AliasName | Members] when length(Members) > 0 ->
+            {alias_cmd, add, AliasName, Members};
+        _ ->
+            {error, "Usage: :aa <alias_name> <member1> [member2 ...]"}
+    end.
+
+%% @doc Parse alias rm shortcut: ":ar <name> <member1> <member2> ..."
+parse_alias_rm_shortcut(Rest) ->
+    case string:tokens(Rest, " ") of
+        [AliasName | Members] when length(Members) > 0 ->
+            {alias_cmd, rm, AliasName, Members};
+        _ ->
+            {error, "Usage: :ar <alias_name> <member1> [member2 ...]"}
+    end.
 
 %% @doc Execute parsed commands
 execute_command({noop}, State) ->
@@ -453,6 +562,99 @@ execute_command({verbose, toggle}, State) ->
     NewVerbose = not State#console_state.verbose,
     io:format("Verbose mode: ~p~n", [NewVerbose]),
     State#console_state{verbose = NewVerbose};
+execute_command({alias_cmd, list}, State) ->
+    case cryptic_alias:list_all() of
+        [] ->
+            cryptic_shell:print_info("No aliases defined");
+        Aliases ->
+            cryptic_shell:print_info("Aliases:"),
+            lists:foreach(
+                fun({Name, Members}) ->
+                    MemberStr = string:join(Members, ", "),
+                    io:format("  ~s: ~s\r\n", [
+                        ?FG_CYAN(Name),
+                        ?FG_YELLOW(MemberStr)
+                    ])
+                end,
+                Aliases
+            )
+    end,
+    State;
+execute_command({alias_cmd, new, AliasName, Members}, State) ->
+    case cryptic_alias:new(AliasName, Members) of
+        ok ->
+            MemberStr = string:join(Members, ", "),
+            cryptic_shell:print_info(
+                "Created alias '" ++ AliasName ++ "' with members: " ++
+                    MemberStr
+            );
+        {error, Reason} ->
+            cryptic_shell:print_error(
+                "Failed to create alias: " ++
+                    lists:flatten(io_lib:format("~p", [Reason]))
+            )
+    end,
+    State;
+execute_command({alias_cmd, delete, AliasName}, State) ->
+    case cryptic_alias:delete(AliasName) of
+        ok ->
+            cryptic_shell:print_info("Deleted alias '" ++ AliasName ++ "'");
+        {error, not_found} ->
+            cryptic_shell:print_warning("Alias '" ++ AliasName ++ "' not found")
+    end,
+    State;
+execute_command({alias_cmd, add, AliasName, Members}, State) ->
+    case cryptic_alias:add(AliasName, Members) of
+        ok ->
+            MemberStr = string:join(Members, ", "),
+            cryptic_shell:print_info(
+                "Added to alias '" ++ AliasName ++ "': " ++ MemberStr
+            );
+        {error, not_found} ->
+            cryptic_shell:print_warning("Alias '" ++ AliasName ++ "' not found")
+    end,
+    State;
+execute_command({alias_cmd, rm, AliasName, Members}, State) ->
+    case cryptic_alias:rm(AliasName, Members) of
+        ok ->
+            MemberStr = string:join(Members, ", "),
+            cryptic_shell:print_info(
+                "Removed from alias '" ++ AliasName ++ "': " ++ MemberStr
+            );
+        {error, not_found} ->
+            cryptic_shell:print_warning("Alias '" ++ AliasName ++ "' not found")
+    end,
+    State;
+execute_command({send_to_alias, _AliasName, Members, Message}, State) ->
+    %% Clear the command line once
+    clear_command_line(Message),
+
+    %% Send to all members and collect results
+    Timestamp = erlang:timestamp(),
+    lists:foreach(
+        fun(Member) ->
+            case State#console_state.engine_pid of
+                undefined ->
+                    ok;
+                EnginePid ->
+                    case
+                        cryptic_engine:send_message(
+                            EnginePid, list_to_binary(Member), Message
+                        )
+                    of
+                        ok ->
+                            %% Print simple confirmation without clearing lines
+                            print_alias_send_confirmation(
+                                Member, Message, Timestamp
+                            );
+                        {error, _Reason} ->
+                            ok
+                    end
+            end
+        end,
+        Members
+    ),
+    State;
 execute_command({send_message, ToUsername, Message}, State) ->
     send_message_to_user(ToUsername, Message, State),
     State.
@@ -491,6 +693,10 @@ show_engine_status(State) ->
 
 %% @doc Send message to another user
 send_message_to_user(ToUsername, Message, State) ->
+    send_message_to_user(ToUsername, Message, State, true).
+
+%% @doc Send message to another user with optional display
+send_message_to_user(ToUsername, Message, State, ShowConfirmation) ->
     case State#console_state.engine_pid of
         undefined ->
             ?error("No engine running~n", []);
@@ -498,20 +704,59 @@ send_message_to_user(ToUsername, Message, State) ->
             ?dbg("Sending message to ~s: ~s~n", [ToUsername, Message]),
             case cryptic_engine:send_message(EnginePid, ToUsername, Message) of
                 ok ->
-                    %% Display sent message confirmation with timestamp
-                    Timestamp = erlang:timestamp(),
-                    cryptic_shell:print_sent_message(
-                        ToUsername, Message, Timestamp
-                    ),
+                    %% Display sent message confirmation with timestamp if requested
+                    case ShowConfirmation of
+                        true ->
+                            Timestamp = erlang:timestamp(),
+                            cryptic_shell:print_sent_message(
+                                ToUsername, Message, Timestamp
+                            );
+                        false ->
+                            ok
+                    end,
                     ?dbg("Message sent successfully~n", []);
                 {error, Reason} ->
                     ?error("Failed to send message: ~p~n", [Reason])
             end
     end.
 
-%% @doc Show help
-show_help() ->
-    cryptic_shell:print_help().
+%% @doc Print alias send confirmation without clearing command line
+%% Used when sending to multiple recipients via alias to avoid overwriting
+print_alias_send_confirmation(ToUser, Message, Timestamp) ->
+    {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
+        calendar:now_to_universal_time(Timestamp),
+    TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
+    io:format(
+        "~s ~s (~s)\r\n",
+        [
+            ?FG_GREEN("<You => " ++ ToUser ++ ">"),
+            ?FG_WHITE(binary_to_list(Message)),
+            ?FG_YELLOW(TimeStr)
+        ]
+    ).
+
+%% @doc Clear the command line once (for alias sends)
+clear_command_line(Message) ->
+    Prompt = cryptic_shell:make_prompt(),
+
+    %% Get terminal width (default to 80 if we can't determine it)
+    TermWidth =
+        case io:columns() of
+            {ok, Cols} -> Cols;
+            _ -> 80
+        end,
+
+    %% Reconstruct the command line that was just executed
+    %% The command was something like ":s @alias message"
+    CommandLine = Prompt ++ ":s @work " ++ binary_to_list(Message),
+
+    %% Calculate how many lines this wrapped to
+    LinesToClear = cryptic_shell:calculate_wrapped_lines(
+        CommandLine, TermWidth
+    ),
+
+    %% Move up and clear all those lines
+    cryptic_shell:clear_lines_up(LinesToClear).
 
 %% @doc Check for and handle any pending messages
 check_messages() ->

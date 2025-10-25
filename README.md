@@ -114,11 +114,31 @@ since (currently) the private key used for client authentication
 (e.g `alice.key`) is unprotected.
 
 ### UI Commands (short form)
-- **`help`** - Show available commands (:h)
+- **`help [<topic>]`** - Show available commands (:h)
 - **`send <user> <message>`** - Send encrypted message to user (:s)
 - **`status`** - Display some general Cryptic status (:st)
 - **`engine_status`** - Display Cryptic engine status (:es)
 - **`quit`** - Exit the application (:q)
+
+Help topics:
+- `help alias` - Alias command details
+- `help line_edit` - Line editing keybindings
+
+### Aliases - Group Messaging
+
+Aliases is a Poor man's chat room functionality.
+
+The console supports aliases for group messaging. Create named
+aliases containing multiple usernames, then send messages to all members
+at once using the `@alias` syntax. For example, create a work group with
+`:an work bob alice dave`, then broadcast messages with
+`:s @work Coffee break?`. Aliases support full management operations
+including adding/removing members (`:aa`, `:ar`), deletion (`:ad`), and
+listing (`:a`). Each message sent to an alias shows individual deliver
+confirmations for all members. See `help alias` in the console for complete
+documentation and examples.
+
+### Engine Status 
 
 The **engine_status** command will show details of the Double-Ratchet engine:
 ```
