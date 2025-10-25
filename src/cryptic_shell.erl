@@ -93,6 +93,7 @@
 %% API
 -export([
     start_shell/0, start_shell/1,
+    get_line/0,
     get_line/1,
     get_password/1,
     cleanup/0,
@@ -131,6 +132,31 @@
 %%%===================================================================
 %%% API Functions
 %%%===================================================================
+
+%% @doc Make a standard prompt
+%% This function can be extended in the future to create dynamic prompts
+%% based on context (username, connection status, session info, etc.)
+-spec make_prompt() -> string().
+make_prompt() ->
+    make_prompt(#{}).
+
+%% @doc Make a prompt with optional context information
+%% Currently returns the standard "cryptic> " prompt, but can be enhanced
+%% to include context like:
+%% - Username: "alice@cryptic> "
+%% - Server status: "cryptic [connected]> "
+%% - Session count: "cryptic (2 active)> "
+%% - Custom modes: "cryptic [debug]> "
+-spec make_prompt(map()) -> string().
+make_prompt(_Context) ->
+    %% For now, return the standard prompt
+    %% Future enhancement example:
+    %% Username = maps:get(username, Context, undefined),
+    %% case Username of
+    %%     undefined -> "cryptic> ";
+    %%     User -> User ++ "@cryptic> "
+    %% end
+    "cryptic> ".
 
 %% @doc Start the shell in raw mode
 -spec start_shell() -> ok | {error, term()}.
@@ -217,6 +243,10 @@ start_shell(Options) ->
 -spec cleanup() -> ok.
 cleanup() ->
     io:setopts(standard_io, [{raw, false}]).
+
+-spec get_line() -> string() | eof | {error, term()}.
+get_line() ->
+    get_line(make_prompt()).
 
 %% @doc Get a line of input with line editing
 -spec get_line(string()) -> string() | eof | {error, term()}.
@@ -874,9 +904,9 @@ print_sent_message(ToUser, Message, Timestamp) when
     is_list(ToUser) andalso is_binary(Message)
 ->
     %% Calculate how many lines the command took up and clear them
-    %% The last command was: "cryptic> " + the actual command
+    %% The last command was: prompt + the actual command
     %% We need to reconstruct what was typed to know how many lines to clear
-    Prompt = "cryptic> ",
+    Prompt = make_prompt(),
 
     %% Get terminal width (default to 80 if we can't determine it)
     TermWidth =
@@ -1353,15 +1383,6 @@ print_console_status(Status) ->
             false -> ?FG_RED("Stopped")
         end,
     io:format(?FG_GREEN("  Engine:           ") ++ EngineStatus ++ "\r\n"),
-
-    %% Format verbose mode
-    Verbose = maps:get(verbose, Status, false),
-    VerboseStr =
-        case Verbose of
-            true -> ?FG_YELLOW("Enabled");
-            false -> "Disabled"
-        end,
-    io:format(?FG_GREEN("  Verbose Mode:     ") ++ VerboseStr ++ "\r\n"),
 
     %% Show instructions and wait for keypress
     io:format("\r\n\r\n"),

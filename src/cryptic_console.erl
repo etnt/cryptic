@@ -326,7 +326,7 @@ spawn_input_process() ->
         fun() ->
             %% cryptic_shell:get_line() will automatically restore any saved
             %% input from the ETS table if present
-            Result = cryptic_shell:get_line("cryptic> "),
+            Result = cryptic_shell:get_line(),
             ConsolePid ! {input_result, Result}
         end,
         [monitor]
