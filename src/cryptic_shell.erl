@@ -99,6 +99,7 @@
     cleanup/0,
     print_user_message/3,
     print_sent_message/3,
+    print_history_message/6,
     print_success/1,
     print_error/1,
     print_warning/1,
@@ -885,6 +886,74 @@ print_sent_message(ToUser, Message, Timestamp) when
         ]
     ).
 
+%% @doc Print a message from history
+%% Format: [timestamp] from -> to @ server:port: message
+%% When ServerHost/ServerPort are undefined, format as: [timestamp] from -> to : message
+-spec print_history_message(
+    FromUser :: binary() | string(),
+    ToUser :: binary() | string(),
+    Message :: binary() | string(),
+    Timestamp :: calendar:datetime(),
+    ServerHost :: binary() | string() | undefined,
+    ServerPort :: non_neg_integer() | undefined
+) ->
+    ok.
+print_history_message(
+    FromUser, ToUser, Message, Timestamp, ServerHost, ServerPort
+) ->
+    %% Convert inputs to strings
+    FromUserStr =
+        case FromUser of
+            F when is_binary(F) -> binary_to_list(F);
+            F when is_list(F) -> F
+        end,
+    ToUserStr =
+        case ToUser of
+            T when is_binary(T) -> binary_to_list(T);
+            T when is_list(T) -> T
+        end,
+    MessageStr =
+        case Message of
+            M when is_binary(M) -> binary_to_list(M);
+            M when is_list(M) -> M
+        end,
+
+    %% Format timestamp
+    {{Year, Month, Day}, {Hour, Minute, Second}} = Timestamp,
+    TimeStr = lists:flatten(
+        io_lib:format(
+            "~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B",
+            [Year, Month, Day, Hour, Minute, Second]
+        )
+    ),
+
+    %% Print formatted message with or without server info
+    case {ServerHost, ServerPort} of
+        {undefined, undefined} ->
+            %% No server info - simpler format
+            io:format("[~s] ~s -> ~s : ~s\r\n", [
+                ?FG_CYAN(TimeStr),
+                ?FG_YELLOW(FromUserStr),
+                ?FG_YELLOW(ToUserStr),
+                ?FG_WHITE(MessageStr)
+            ]);
+        {_, _} ->
+            %% Include server info
+            ServerHostStr =
+                case ServerHost of
+                    S when is_binary(S) -> binary_to_list(S);
+                    S when is_list(S) -> S
+                end,
+            io:format("[~s] ~s -> ~s @ ~s:~p: ~s\r\n", [
+                ?FG_CYAN(TimeStr),
+                ?FG_YELLOW(FromUserStr),
+                ?FG_YELLOW(ToUserStr),
+                ?FG_MAGENTA(ServerHostStr),
+                ServerPort,
+                ?FG_WHITE(MessageStr)
+            ])
+    end.
+
 %% @doc Calculate how many lines a text string will wrap to given terminal width
 %% Takes into account ANSI escape sequences which don't consume visible columns
 -spec calculate_wrapped_lines(string(), pos_integer()) -> pos_integer().
@@ -1179,6 +1248,10 @@ print_help(Topic) ->
     case Topic of
         "alias" ->
             print_alias_help();
+        "history" ->
+            print_history_help();
+        "db" ->
+            print_db_help();
         "line_edit" ->
             print_line_edit_help();
         _ ->
@@ -1232,6 +1305,15 @@ print_general_help() ->
             ?FG_MAGENTA("(:a)") ++ "\r\n"
     ),
     io:format(
+        ?FG_GREEN("  history") ++ " " ++ ?FG_YELLOW("[query]") ++
+            "            - View message history " ++
+            ?FG_MAGENTA("(:h <query>)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  db") ++ " " ++ ?FG_YELLOW("[enable|disable|status]") ++
+            " - Control message storage\r\n"
+    ),
+    io:format(
         ?FG_GREEN("  status") ++ "                     - Show console status " ++
             ?FG_MAGENTA("(:st)") ++ "\r\n"
     ),
@@ -1259,6 +1341,14 @@ print_general_help() ->
     io:format(
         ?FG_GREEN("  help alias") ++
             "                  - Alias command details\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help history") ++
+            "                - Message history queries\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help db") ++
+            "                     - Database storage control\r\n"
     ),
     io:format(
         ?FG_GREEN("  help line_edit") ++
@@ -1336,11 +1426,199 @@ print_alias_help() ->
             "      # Send to all in 'work'\r\n"
     ),
     io:format(
-        ?FG_YELLOW("  :aa work eve") ++ "                # Add eve to 'work'\r\n"
+        ?FG_YELLOW("  :aa work eve") ++
+            "                # Add eve to 'work'\r\n"
     ),
     io:format(
         ?FG_YELLOW("  :ar work dave") ++
             "               # Remove dave from 'work'\r\n"
+    ).
+
+%% @doc Print history-specific help
+print_history_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "            MESSAGE HISTORY HELP                               "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  View your encrypted message history stored locally.\r\n"
+    ),
+    io:format(
+        "  All messages are encrypted with your passphrase.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  history") ++ " or " ++ ?FG_MAGENTA(":history") ++
+            "           - Show last 10 messages\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  history last") ++ " " ++ ?FG_YELLOW("<N>") ++
+            "              - Show last N messages (max 1000)\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  history from") ++ " " ++ ?FG_YELLOW("<user>") ++
+            " yesterday - Messages from user yesterday\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  history from") ++ " " ++ ?FG_YELLOW("<user>") ++
+            " last " ++ ?FG_YELLOW("<N>") ++ "  - Last N messages from user\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  history with") ++ " " ++ ?FG_YELLOW("<user>") ++
+            " last " ++ ?FG_YELLOW("<N>") ++ "  - Conversation with user\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Shortcuts:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_MAGENTA("  :hi") ++ " " ++ ?FG_YELLOW("<query>") ++
+            "                   - Short for 'history <query>'\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :history") ++
+            "                      # Last 10 messages\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :hi last 20") ++
+            "                   # Last 20 messages\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :hi from alice yesterday") ++
+            "      # Yesterday's messages from alice\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :hi from bob last 15") ++
+            "          # Last 15 messages from bob\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :hi with alice last 30") ++
+            "        # Last 30 messages with alice\r\n"
+    ).
+
+%% @doc Print database storage help
+print_db_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              DATABASE STORAGE CONTROL                        "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Overview:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        "  The database storage feature saves all received messages in an\r\n"
+    ),
+    io:format(
+        "  encrypted SQLite database. You can enable/disable this feature at\r\n"
+    ),
+    io:format(
+        "  runtime for privacy control during sensitive conversations.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  db enable") ++
+            "                  - Enable message storage\r\n"
+    ),
+    io:format(
+        "                             Messages will be encrypted and saved\r\n\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  db disable") ++
+            "                 - Disable message storage\r\n"
+    ),
+    io:format(
+        "                             New messages will NOT be saved to disk\r\n\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  db status") ++ " or " ++ ?FG_GREEN("db") ++
+            "           - Check current storage status\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Configuration:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        "  Set " ++ ?FG_YELLOW("{enable_db, true}") ++
+            " in config/sys.config to enable by default\r\n"
+    ),
+    io:format(
+        "  Set " ++ ?FG_YELLOW("{enable_db, false}") ++
+            " to disable by default (current)\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Security Note:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        "  All messages are encrypted using ChaCha20-Poly1305 with your\r\n"
+    ),
+    io:format(
+        "  passphrase. However, metadata (usernames, timestamps, server info)\r\n"
+    ),
+    io:format(
+        "  is stored in plaintext. Disable storage for maximum privacy.\r\n"
     ).
 
 %% @doc Print line editing help
@@ -1480,6 +1758,15 @@ print_console_status(Status) ->
             false -> ?FG_RED("Stopped")
         end,
     io:format(?FG_GREEN("  Engine:           ") ++ EngineStatus ++ "\r\n"),
+
+    %% Format database status
+    DbEnabled = maps:get(db_enabled, Status, false),
+    DbStatus =
+        case DbEnabled of
+            true -> ?FG_GREEN("Enabled (saving messages)");
+            false -> ?FG_YELLOW("Disabled (not saving)")
+        end,
+    io:format(?FG_GREEN("  Database:         ") ++ DbStatus ++ "\r\n"),
 
     %% Show instructions and wait for keypress
     io:format("\r\n\r\n"),

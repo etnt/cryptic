@@ -27,10 +27,10 @@ main(Args) ->
             ServerHost = maps:get(server_host, Opts, "localhost"),
             ServerPort = maps:get(server_port, Opts, 8443),
             Notifier = maps:get(notifier, Opts, undefined),
-            Verbose = maps:get(verbose, Opts, false),
+            EnableDb = maps:get(enable_db, Opts, false),
 
             %% Start Erlang distribution using username as node name
-            start_distribution(Username, Verbose),
+            start_distribution(Username),
 
             %% Build configuration map
             Config = #{
@@ -38,18 +38,11 @@ main(Args) ->
                 server_host => ServerHost,
                 server_port => ServerPort,
                 notifier => Notifier,
-                verbose => Verbose
+                enable_db => EnableDb
             },
 
             %% Display startup banner
-            case Verbose of
-                true ->
-                    io:format("=== Cryptic Console ===~n"),
-                    io:format("Config: ~p~n", [Config]),
-                    io:format("Node: ~p~n", [node()]);
-                false ->
-                    io:format("=== Cryptic Console ===~n")
-            end,
+            io:format("=== Cryptic Console ===~n"),
 
             %% Start the console
             cryptic_console:main(Config);
@@ -99,11 +92,11 @@ spec() ->
                     "Path to notification script (invoked on message arrival)"
             },
             #{
-                name => verbose,
-                short => $v,
-                long => "verbose",
+                name => enable_db,
+                long => "enable-db",
                 type => flag,
-                help => "Enable verbose output"
+                help =>
+                    "Enable encrypted message database storage (default: disabled for privacy)"
             }
         ]
     }.
@@ -127,7 +120,8 @@ setup_code_paths() ->
         filename:join([RepoRoot, "_build", "default", "lib", "ranch", "ebin"]),
         filename:join([RepoRoot, "_build", "default", "lib", "cowlib", "ebin"]),
         filename:join([RepoRoot, "_build", "default", "lib", "uuid", "ebin"]),
-        filename:join([RepoRoot, "_build", "default", "lib", "cecho", "ebin"])
+        filename:join([RepoRoot, "_build", "default", "lib", "cecho", "ebin"]),
+        filename:join([RepoRoot, "_build", "default", "lib", "esqlite", "ebin"])
     ],
 
     %% Add each path if it exists
@@ -145,30 +139,16 @@ setup_code_paths() ->
 
 %% @doc Start Erlang distribution using username as node name
 %% @param Username The username (will be used as node name)
-%% @param Verbose Whether to print debug info
-start_distribution(Username, Verbose) ->
+start_distribution(Username) ->
     %% Create node name as username@localhost
     NodeName = list_to_atom(Username ++ "@localhost"),
 
     %% Start distribution with short name
     case net_kernel:start([NodeName, shortnames]) of
         {ok, _Pid} ->
-            case Verbose of
-                true ->
-                    io:format("Distribution started: ~p~n", [node()]),
-                    io:format("Connect with: erl -sname debug -remsh ~p~n", [
-                        node()
-                    ]);
-                false ->
-                    ok
-            end;
+            ok;
         {error, {already_started, _Pid}} ->
-            case Verbose of
-                true ->
-                    io:format("Distribution already running: ~p~n", [node()]);
-                false ->
-                    ok
-            end;
+            ok;
         {error, Reason} ->
             io:format("Failed to start distribution: ~p~n", [Reason]),
             io:format("Continuing without distribution...~n")

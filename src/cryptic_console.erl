@@ -101,7 +101,10 @@
     verbose :: boolean(),
     console_pid :: pid() | undefined,
     input_buffer_table :: ets:tid() | undefined,
-    notifier :: string() | undefined
+    notifier :: string() | undefined,
+    passphrase :: binary() | undefined,
+    % Whether encrypted message storage is enabled
+    db_enabled :: boolean()
 }).
 
 %%%===================================================================
@@ -170,6 +173,32 @@ main(InitCfg) ->
     %% Prompt for passphrase early, before initializing cryptic engine
     Passphrase = get_passphrase(),
 
+    %% Check if database storage is enabled (from config map or application env)
+    DbEnabled = maps:get(
+        enable_db, InitCfg, application:get_env(cryptic, enable_db, false)
+    ),
+    %% Initialize message storage only if enabled
+    case DbEnabled of
+        true ->
+            case
+                cryptic_chat_storage:init_storage(
+                    binary_to_list(Username), Passphrase
+                )
+            of
+                ok ->
+                    cryptic_shell:print_info("Message storage initialized");
+                {error, StorageReason} ->
+                    cryptic_shell:print_warning(
+                        "Failed to initialize message storage: " ++
+                            lists:flatten(io_lib:format("~p", [StorageReason]))
+                    )
+            end;
+        false ->
+            cryptic_shell:print_info(
+                "Message storage disabled (enable_db=false in config)"
+            )
+    end,
+
     %% Get console PID to pass to callbacks
     ConsolePid = self(),
 
@@ -199,7 +228,7 @@ main(InitCfg) ->
         end,
     ServerPort = maps:get(server_port, InitCfg, 8443),
 
-    %% Initialize console state with self() PID
+    %% Initialize console state with self() PID and passphrase
     State = #console_state{
         ws_client_pid = WsClientPid,
         engine_pid = EnginePid,
@@ -209,7 +238,9 @@ main(InitCfg) ->
         verbose = maps:get(verbose, CertCfg, false),
         console_pid = ConsolePid,
         input_buffer_table = InputBufferTable,
-        notifier = maps:get(notifier, InitCfg, undefined)
+        notifier = maps:get(notifier, InitCfg, undefined),
+        passphrase = Passphrase,
+        db_enabled = DbEnabled
     },
 
     cryptic_shell:print_success(
@@ -317,7 +348,7 @@ get_cert_config(Cfg) ->
 %% @doc Main command loop with async message handling
 command_loop(State) ->
     %% Check for any pending system messages before prompting
-    check_messages(),
+    check_messages_with_state(State),
 
     %% Spawn a process to get input asynchronously with monitoring
     {InputPid, MonitorRef} = spawn_input_process(),
@@ -398,6 +429,44 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
                 Timestamp,
                 State#console_state.notifier
             ),
+
+            %% Save message to storage if database is enabled
+            case State of
+                #console_state{
+                    username = ToUsername,
+                    server_host = ServerHost,
+                    server_port = ServerPort,
+                    passphrase = Passphrase,
+                    db_enabled = true
+                } when Passphrase =/= undefined ->
+                    % Message is already a binary, no need to convert
+                    % Convert erlang:timestamp() to calendar:datetime()
+                    DateTime = calendar:now_to_datetime(Timestamp),
+                    case
+                        cryptic_chat_storage:save_encrypted_message(
+                            FromUsername,
+                            binary_to_list(ToUsername),
+                            ServerHost,
+                            ServerPort,
+                            Message,
+                            DateTime,
+                            Passphrase
+                        )
+                    of
+                        ok ->
+                            ok;
+                        {error, Reason} ->
+                            io:format(
+                                "~n[ERROR] Failed to save message: ~p~n", [
+                                    Reason
+                                ]
+                            )
+                    end;
+                _ ->
+                    % Skip storage if no state, passphrase, or database disabled
+                    ok
+            end,
+
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
@@ -422,6 +491,11 @@ parse_command(":a") ->
     {alias_cmd, list};
 parse_command(":al") ->
     {alias_cmd, list};
+%% History shortcut commands
+parse_command(":hi") ->
+    {history_cmd, {last_n, 10}};
+parse_command(":hi " ++ Args) ->
+    parse_history_command(Args);
 %% Full commands
 parse_command("help") ->
     {help};
@@ -437,6 +511,18 @@ parse_command("verbose") ->
     {verbose, toggle};
 parse_command("alias") ->
     {alias_cmd, list};
+parse_command("db enable") ->
+    {db_cmd, enable};
+parse_command("db disable") ->
+    {db_cmd, disable};
+parse_command("db status") ->
+    {db_cmd, status};
+parse_command("db") ->
+    {db_cmd, status};
+parse_command("history") ->
+    {history_cmd, {last_n, 10}};
+parse_command("history " ++ Args) ->
+    parse_history_command(Args);
 %% Check for shortcut send command ":s <username> <message>"
 %% Check for shortcut alias commands ":an/:ad/:aa/:ar <...>"
 parse_command(Line) ->
@@ -544,6 +630,48 @@ parse_alias_rm_shortcut(Rest) ->
             {alias_cmd, rm, AliasName, Members};
         _ ->
             {error, "Usage: :ar <alias_name> <member1> [member2 ...]"}
+    end.
+
+%% @doc Parse history command arguments
+%% Examples:
+%%   "from bob yesterday"  -> {from, "bob", yesterday}
+%%   "from alice last 10"  -> {from_last_n, "alice", 10}
+%%   "last 10"             -> {last_n, 10}
+%%   "with bob last 20"    -> {conversation, "bob", 20}
+%%   ""                    -> {last_n, 10} (default)
+parse_history_command("") ->
+    {history_cmd, {last_n, 10}};
+parse_history_command(Args) ->
+    Tokens = string:tokens(Args, " "),
+    Result =
+        case Tokens of
+            ["from", User, "yesterday"] ->
+                {from_yesterday, User};
+            ["from", User, "last", NStr] ->
+                try_parse_last_n(NStr, fun(N) -> {from_last_n, User, N} end);
+            ["last", NStr] ->
+                try_parse_last_n(NStr, fun(N) -> {last_n, N} end);
+            ["with", User, "last", NStr] ->
+                try_parse_last_n(NStr, fun(N) -> {conversation, User, N} end);
+            ["with", User] ->
+                % Default to last 20 messages
+                {conversation, User, 20};
+            _ ->
+                {error,
+                    "Usage: history [from <user> yesterday|last N] | [last N] | [with <user> [last N]]"}
+        end,
+    {history_cmd, Result}.
+
+%% Helper to try parsing a number string
+try_parse_last_n(NStr, SuccessFun) ->
+    try list_to_integer(NStr) of
+        N when N > 0, N =< 1000 ->
+            SuccessFun(N);
+        _ ->
+            {error, "Number must be between 1 and 1000"}
+    catch
+        _:_ ->
+            {error, "Invalid number: " ++ NStr}
     end.
 
 %% @doc Execute parsed commands
@@ -655,6 +783,63 @@ execute_command({send_to_alias, _AliasName, Members, Message}, State) ->
         Members
     ),
     State;
+execute_command({db_cmd, enable}, State) ->
+    case State#console_state.db_enabled of
+        true ->
+            cryptic_shell:print_info("Database storage is already enabled");
+        false ->
+            %% Initialize storage
+            Username = binary_to_list(State#console_state.username),
+            ServerHost = State#console_state.server_host,
+            ServerPort = State#console_state.server_port,
+            Passphrase = State#console_state.passphrase,
+
+            case
+                cryptic_chat_storage:init_storage(
+                    Username, ServerHost, ServerPort, Passphrase
+                )
+            of
+                ok ->
+                    cryptic_shell:print_success("Database storage enabled"),
+                    %% Return updated state with db_enabled = true
+                    State#console_state{db_enabled = true};
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to enable database: " ++
+                            lists:flatten(io_lib:format("~p", [Reason]))
+                    ),
+                    State
+            end
+    end;
+execute_command({db_cmd, disable}, State) ->
+    case State#console_state.db_enabled of
+        false ->
+            cryptic_shell:print_info("Database storage is already disabled");
+        true ->
+            cryptic_shell:print_warning(
+                "Database storage disabled. New messages will not be saved."
+            ),
+            %% Return updated state with db_enabled = false
+            State#console_state{db_enabled = false}
+    end;
+execute_command({db_cmd, status}, State) ->
+    case State#console_state.db_enabled of
+        true ->
+            cryptic_shell:print_info(
+                "Database storage: ENABLED (messages are being saved)"
+            );
+        false ->
+            cryptic_shell:print_info(
+                "Database storage: DISABLED (messages are NOT saved)"
+            )
+    end,
+    State;
+execute_command({history_cmd, {error, Msg}}, State) ->
+    cryptic_shell:print_error(Msg),
+    State;
+execute_command({history_cmd, Query}, State) ->
+    execute_history_query(Query, State),
+    State;
 execute_command({send_message, ToUsername, Message}, State) ->
     send_message_to_user(ToUsername, Message, State),
     State.
@@ -669,7 +854,8 @@ show_status(State) ->
         server_port => State#console_state.server_port,
         verbose => State#console_state.verbose,
         ws_client_connected => State#console_state.ws_client_pid =/= undefined,
-        engine_running => State#console_state.engine_pid =/= undefined
+        engine_running => State#console_state.engine_pid =/= undefined,
+        db_enabled => State#console_state.db_enabled
     },
     cryptic_shell:print_console_status(Status).
 
@@ -690,6 +876,119 @@ show_engine_status(State) ->
                     )
             end
     end.
+
+%% @doc Execute history query
+execute_history_query(Query, State) ->
+    Username = binary_to_list(State#console_state.username),
+    Passphrase = State#console_state.passphrase,
+
+    case Passphrase of
+        undefined ->
+            cryptic_shell:print_error(
+                "No passphrase available for message history"
+            );
+        _ ->
+            Result =
+                case Query of
+                    {from_yesterday, FromUser} ->
+                        cryptic_chat_storage:get_messages_from_yesterday(
+                            Username, FromUser, Passphrase
+                        );
+                    {from_last_n, FromUser, N} ->
+                        %% Get messages from specific user
+                        cryptic_chat_storage:get_conversation(
+                            Username, FromUser, N, Passphrase
+                        );
+                    {last_n, N} ->
+                        cryptic_chat_storage:get_last_n_messages(
+                            Username, N, Passphrase
+                        );
+                    {conversation, PeerUser, N} ->
+                        cryptic_chat_storage:get_conversation(
+                            Username, PeerUser, N, Passphrase
+                        );
+                    _ ->
+                        {error, unsupported_query}
+                end,
+
+            case Result of
+                {ok, Messages} when length(Messages) > 0 ->
+                    display_message_history(Messages);
+                {ok, []} ->
+                    cryptic_shell:print_info("No messages found");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to retrieve history: " ++
+                            lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Display message history grouped by server
+display_message_history(Messages) ->
+    %% Group messages by server host and port
+    Grouped = group_messages_by_server(Messages),
+
+    %% Display each server group
+    lists:foreach(
+        fun({ServerHost, ServerPort, ServerMessages}) ->
+            %% Print server header
+            ServerStr =
+                binary_to_list(ServerHost) ++ ":" ++
+                    integer_to_list(ServerPort),
+            cryptic_shell:print_info(
+                "=== Message History (" ++ ServerStr ++ ") ==="
+            ),
+            %% Print messages for this server
+            lists:foreach(
+                fun({FromUser, ToUser, Message, Timestamp, _SH, _SP}) ->
+                    cryptic_shell:print_history_message(
+                        FromUser,
+                        ToUser,
+                        Message,
+                        Timestamp,
+                        undefined,
+                        undefined
+                    )
+                end,
+                ServerMessages
+            )
+        end,
+        Grouped
+    ),
+
+    %% Print total count
+    Count = length(Messages),
+    cryptic_shell:print_info(
+        io_lib:format("=== Total: ~p message(s) ===", [Count])
+    ).
+
+%% @doc Group messages by server host and port
+%% Returns list of {ServerHost, ServerPort, Messages} tuples
+group_messages_by_server(Messages) ->
+    %% Build a map of {ServerHost, ServerPort} -> [Messages]
+    Grouped = lists:foldl(
+        fun(
+            {_FromUser, _ToUser, _Message, _Timestamp, ServerHost, ServerPort} =
+                Msg,
+            Acc
+        ) ->
+            Key = {ServerHost, ServerPort},
+            Existing = maps:get(Key, Acc, []),
+            maps:put(Key, [Msg | Existing], Acc)
+        end,
+        #{},
+        Messages
+    ),
+
+    %% Convert map to sorted list of {ServerHost, ServerPort, Messages}
+    %% Reverse each message list to restore chronological order
+    lists:sort(
+        fun({H1, P1, _}, {H2, P2, _}) ->
+            {H1, P1} =< {H2, P2}
+        end,
+        [{H, P, lists:reverse(Msgs)} || {{H, P}, Msgs} <- maps:to_list(Grouped)]
+    ).
 
 %% @doc Send message to another user
 send_message_to_user(ToUsername, Message, State) ->
@@ -759,18 +1058,56 @@ clear_command_line(Message) ->
     cryptic_shell:clear_lines_up(LinesToClear).
 
 %% @doc Check for and handle any pending messages
-check_messages() ->
+check_messages_with_state(State) ->
     receive
         {system_message, Message} ->
             %% Clear line and print system message
             display_system_message(Message),
             %% Recursively check for more messages
-            check_messages();
+            check_messages_with_state(State);
         {deliver_message, FromUsername, Message, Timestamp} ->
             %% Clear line and print delivered message
             display_user_message(FromUsername, Message, Timestamp),
+
+            %% Save message to storage if State is provided and database is enabled
+            case State of
+                #console_state{
+                    username = ToUsername,
+                    server_host = ServerHost,
+                    server_port = ServerPort,
+                    passphrase = Passphrase,
+                    db_enabled = true
+                } when Passphrase =/= undefined ->
+                    % Message is already a binary, no need to convert
+                    % Convert erlang:timestamp() to calendar:datetime()
+                    DateTime = calendar:now_to_datetime(Timestamp),
+                    case
+                        cryptic_chat_storage:save_encrypted_message(
+                            FromUsername,
+                            binary_to_list(ToUsername),
+                            ServerHost,
+                            ServerPort,
+                            Message,
+                            DateTime,
+                            Passphrase
+                        )
+                    of
+                        ok ->
+                            ok;
+                        {error, Reason} ->
+                            io:format(
+                                "~n[ERROR] Failed to save message: ~p~n", [
+                                    Reason
+                                ]
+                            )
+                    end;
+                _ ->
+                    % Skip storage if no state, passphrase, or database disabled
+                    ok
+            end,
+
             %% Recursively check for more messages
-            check_messages()
+            check_messages_with_state(State)
     after 0 ->
         %% No messages, continue
         ok

@@ -138,6 +138,20 @@ listing (`:a`). Each message sent to an alias shows individual deliver
 confirmations for all members. See `help alias` in the console for complete
 documentation and examples.
 
+### Encrypted Message Storage
+
+Cryptic includes optional SQLite-based message persistence with
+ChaCha20-Poly1305 encryption. All received messages can be automatically
+saved to an encrypted local database, allowing you to query your message
+history using flexible commands like `:hi last 20`, `:hi from alice yesterday`,
+or `:hi with bob`.
+
+The storage feature can be enabled/disabled at runtime via the 
+`db enable/db disable` commands, giving you control over when messages are
+persisted. Messages are encrypted with your passphrase before being stored,
+and history displays are grouped by federated server for clarity.
+Enable at startup by using the `--enable-db` switch.
+
 ### Engine Status 
 
 The **engine_status** command will show details of the Double-Ratchet engine:

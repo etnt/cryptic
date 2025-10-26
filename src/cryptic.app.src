@@ -13,6 +13,7 @@
         cowlib,
         cowboy,
         eclip,
+        esqlite,
         uuid
     ]},
     {mod, {cryptic_app, []}},
