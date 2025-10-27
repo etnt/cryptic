@@ -29,6 +29,233 @@
 5. On success, CA marks Bob's GPG pubkey as verified (or `verified-via-invite`) 
    and allows CSR/cert issuance
 
+## Key Architecture: Two Separate Key Pairs
+
+It's important to understand that users maintain **two distinct cryptographic key pairs** in this system:
+
+### 1. GPG Key Pair (Identity Key)
+
+**Purpose**: Long-term cryptographic identity, proves "I am Bob"
+
+**Components**:
+- **GPG Private Key** (`bob_gpg.sec`) - Kept secure, never shared
+- **GPG Public Key** (`bob_gpg.pub`) - Shared with CA during registration
+
+**Usage**:
+- Sign invite tokens (when acting as inviter)
+- Sign CSRs or nonces to prove identity when requesting certificates
+- Can be used for email signing, file encryption, etc. (outside cryptic)
+
+**Lifecycle**:
+- Long-lived (years), Bob's permanent identity
+- Carefully backed up and protected
+- Rotation requires re-registration with new invite
+
+**Registration**: Sent to CA during initial onboarding via `/register-gpg`
+
+### 2. TLS Key Pair (Session Key)
+
+**Purpose**: Ephemeral credential for TLS/mTLS connections
+
+**Components**:
+- **TLS Private Key** (`bob_tls.key`) - Kept secure, used for TLS handshakes
+- **TLS Public Key** - Embedded in CSR, signed by CA into certificate
+
+**Usage**:
+- Mutual TLS (mTLS) authentication to cryptic servers
+- Session encryption
+- Only valid while certificate is not expired
+
+**Lifecycle**:
+- Short-lived (24-168 hours via certificate expiry)
+- Can be regenerated at any time
+- Rotated with each certificate renewal
+
+**Registration**: Public key sent via CSR to `/ca/v1/csr`, signed by CA into certificate
+
+### Key Relationship Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Bob's Cryptographic Identity                                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │ GPG Key Pair (Long-term Identity)                            │   │
+│  ├─────────────────────────────────────────────────────────────┤   │
+│  │                                                               │   │
+│  │  GPG Private Key          GPG Public Key                      │   │
+│  │  (bob_gpg.sec)           (bob_gpg.pub)                        │   │
+│  │       │                       │                               │   │
+│  │       │                       └──→ Sent to CA during          │   │
+│  │       │                            registration               │   │
+│  │       │                                                        │   │
+│  │       └──→ Signs CSR/nonce as proof of Bob's identity        │   │
+│  │                                                               │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │ TLS Key Pair (Ephemeral Session)                             │   │
+│  ├─────────────────────────────────────────────────────────────┤   │
+│  │                                                               │   │
+│  │  TLS Private Key          TLS Public Key                      │   │
+│  │  (bob_tls.key)           (in CSR)                             │   │
+│  │       │                       │                               │   │
+│  │       │                       └──→ Embedded in CSR, signed    │   │
+│  │       │                            by CA into certificate     │   │
+│  │       │                                                        │   │
+│  │       ├──→ Self-signs CSR (proves possession)                │   │
+│  │       │                                                        │   │
+│  │       └──→ Used for mTLS connections after cert issuance     │   │
+│  │                                                               │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Complete Certificate Request with Both Keys
+
+```bash
+# Bob already has GPG key pair from registration
+# Now Bob needs a TLS certificate for connections
+
+# Step 1: Generate TLS key pair (or reuse existing)
+bob$ openssl ecparam -genkey -name prime256v1 -out bob_tls.key
+
+# Step 2: Create CSR containing TLS public key
+bob$ openssl req -new -key bob_tls.key -out bob.csr \
+  -subj "/CN=bob@cryptic.example.org"
+
+# CSR now contains:
+#   - Bob's TLS public key (extracted from bob_tls.key)
+#   - Subject info (CN=bob@cryptic.example.org)
+#   - Self-signature (using bob_tls.key, proves possession)
+
+# Step 3: Sign CSR with GPG private key as proof of identity
+bob$ gpg --detach-sign --armor -o csr_proof.sig bob.csr
+
+# Step 4: Submit to CA
+bob$ curl -X POST https://ca.example.org/ca/v1/csr \
+  -d '{
+    "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...",
+    "gpg_fp": "6A2C1F8D8B3E4A2F9C3B5D6E7F1A2B3C4D5E6F7A",
+    "gpg_sig_b64": "BASE64(csr_proof.sig)"
+  }'
+
+# CA verifies:
+#   1. CSR is well-formed and self-signed correctly (TLS key)
+#   2. gpg_fp is in verified status (from registration)
+#   3. GPG signature over CSR is valid (proves Bob's identity)
+#   4. Issues certificate binding Bob's identity to TLS public key
+
+# Step 5: Receive certificate
+# bob_cert.pem contains:
+#   - Bob's TLS public key (from CSR)
+#   - CA's signature (vouching for Bob's identity)
+#   - Expiry time (24-168 hours from now)
+#   - Subject: CN=bob@cryptic.example.org
+
+# Step 6: Use for mTLS connections
+bob$ cryptic connect --cert bob_cert.pem --key bob_tls.key
+```
+
+### Why Two Separate Key Pairs?
+
+**Separation of Concerns**:
+- **GPG key** = Who you are (identity)
+- **TLS key** = Current session credential (authorization)
+
+**Security Benefits**:
+1. **Limited blast radius**: Compromised TLS key doesn't compromise GPG identity
+2. **Easy rotation**: TLS key can be regenerated at any cert renewal
+3. **Revocation scope**: Can revoke certificate without revoking GPG key
+4. **Algorithm flexibility**: Can use different crypto (e.g., GPG: RSA 4096, TLS: ECDSA P-256)
+5. **Temporal isolation**: Old TLS keys become useless after cert expires
+
+**Operational Benefits**:
+1. **Backup strategy**: GPG key backed up carefully, TLS key can be ephemeral
+2. **Key storage**: GPG key on secure device, TLS key on application server
+3. **Multi-device**: Same GPG identity, different TLS keys per device
+4. **Renewal simplicity**: New cert with new TLS key, same GPG proof
+
+### Common Workflow Patterns
+
+**Initial Onboarding** (uses GPG key):
+1. Alice creates invite, signs with her GPG key
+2. Bob generates GPG key pair
+3. Bob submits invite + GPG public key
+4. CA verifies and registers Bob's GPG fingerprint
+
+**Certificate Issuance** (uses both keys):
+1. Bob generates TLS key pair
+2. Bob creates CSR with TLS public key
+3. Bob signs CSR with GPG private key
+4. CA issues certificate for TLS public key
+
+**Daily Usage** (uses TLS key):
+1. Bob connects with TLS certificate + private key
+2. Server verifies certificate via mTLS
+3. Secure connection established
+
+**Certificate Renewal** (uses both keys):
+1. Bob generates new TLS key pair (or reuses old)
+2. Bob creates new CSR
+3. Bob signs CSR with same GPG private key
+4. CA issues new certificate (no new invite needed)
+
+### Key Format Examples
+
+**GPG Public Key** (sent during registration):
+```
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mQGNBGcOXBkBDAC8h3wvXxGPQdF0...
+=abcd
+-----END PGP PUBLIC KEY BLOCK-----
+```
+
+**TLS Private Key** (kept secret):
+```
+-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIIqhdmFgNOKd3E88WR...
+-----END EC PRIVATE KEY-----
+```
+
+**CSR** (contains TLS public key):
+```
+-----BEGIN CERTIFICATE REQUEST-----
+MIIBVDCBuwIBADAmMSQwIgYDVQ...
+-----END CERTIFICATE REQUEST-----
+```
+
+**GPG Signature over CSR** (proves identity):
+```
+-----BEGIN PGP SIGNATURE-----
+iQGzBAABCgAdFiEEaiwfjYs+Si...
+-----END PGP SIGNATURE-----
+```
+
+**Issued Certificate** (TLS public key + CA signature):
+```
+-----BEGIN CERTIFICATE-----
+MIICLDCCAdKgAwIBAgIRAKBag9...
+-----END CERTIFICATE-----
+```
+
+### Summary
+
+| Aspect | GPG Key Pair | TLS Key Pair |
+|--------|-------------|--------------|
+| **Purpose** | Prove identity to CA | Authenticate to servers |
+| **Lifespan** | Years (permanent identity) | Hours/days (via cert expiry) |
+| **Usage** | Sign invites, CSRs, proofs | mTLS connections |
+| **Rotation** | Rare, requires re-registration | Frequent, with cert renewal |
+| **Compromise impact** | Identity stolen | Session compromised |
+| **Storage** | Carefully backed up | Can be ephemeral |
+| **Sent to CA** | Public key during registration | Public key in CSR |
+
+This two-key architecture provides **defense in depth**: even if a TLS key is compromised, the attacker cannot create new certificates without Bob's GPG private key.
+
 ## Token Design Choices
 
 Two main design options:

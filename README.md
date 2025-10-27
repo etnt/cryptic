@@ -187,6 +187,9 @@ Example (Mac):
 > cat /home/alice/.cryptic/notify.sh
 #!/bin/bash
 terminal-notifier -title "Cryptic" -message "Cryptic message from: $1" -sound default
+
+# On Linux we could use:
+# notify-send "Cryptic message from: $1"
 ```
 
 ## Certificate Handling
