@@ -142,14 +142,14 @@
 %%% <ol>
 %%%   <li>TCP/TLS Handshake - An acceptor process accepts the connection and
 %%%       performs the TLS handshake with mTLS client certificate validation</li>
-%%%   
+%%%
 %%%   <li>HTTP Process - Ranch/Cowboy creates a new process to handle the HTTP request:
 %%%       <ul>
 %%%         <li>This process is supervised by `ranch_conns_sup'</li>
 %%%         <li>Initially handles HTTP protocol</li>
 %%%       </ul>
 %%%   </li>
-%%%   
+%%%
 %%%   <li>WebSocket Upgrade - When client requests WebSocket upgrade to `/ws':
 %%%       <ul>
 %%%         <li>`cryptic_ws_handler:init/2' is called in the HTTP process</li>
@@ -157,7 +157,7 @@
 %%%         <li>Returns `{cowboy_websocket, Req, State}' to approve upgrade</li>
 %%%       </ul>
 %%%   </li>
-%%%   
+%%%
 %%%   <li>WebSocket Handler Process - The HTTP process transforms into a WebSocket handler:
 %%%       <ul>
 %%%         <li>SAME process continues (not a new process)</li>
@@ -590,10 +590,25 @@ start_websocket_mtls(Config) ->
                 EnvCA
         end,
 
-    %% WebSocket route
+    %% WebSocket and CA API routes
     Dispatch = cowboy_router:compile([
         {'_', [
+            %% WebSocket for general messaging
             {"/ws", cryptic_ws_handler, []},
+
+            %% CA WebSocket for invite management (authenticated clients)
+            {"/ca/ws", cryptic_ca_ws_handler, []},
+
+            %% CA REST API for public operations
+            {"/ca/v1/register-gpg", cryptic_ca_rest_handler, #{
+                operation => register_gpg
+            }},
+            {"/ca/v1/csr", cryptic_ca_rest_handler, #{operation => csr}},
+            {"/ca/v1/status/:fingerprint", cryptic_ca_rest_handler, #{
+                operation => status
+            }},
+
+            %% Static files
             {"/", cowboy_static, {priv_file, cryptic, "index.html"}}
         ]}
     ]),
