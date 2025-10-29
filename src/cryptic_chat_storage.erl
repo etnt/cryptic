@@ -118,7 +118,7 @@ get_storage_path() ->
 
 %% @doc Initialize storage with username and passphrase.
 %%
-%% Creates SQLite database at <cryptic_dir>/<username>/messages.db.
+%% Creates SQLite database at CrypticDir/Username/messages.db.
 %% The database stores messages from all servers with server_host and server_port
 %% columns for federation support. Server information is provided per-message when
 %% saving, not at initialization, to support multiple simultaneous server connections.
