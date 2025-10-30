@@ -116,6 +116,10 @@
 main(InitCfg) ->
     process_flag(trap_exit, true),
 
+    %% Set UTF-8 encoding immediately for emoji support
+    io:setopts(standard_io, [{encoding, utf8}]),
+    io:setopts(group_leader(), [{encoding, utf8}]),
+
     cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
@@ -551,12 +555,13 @@ parse_command_parts(["send", ToUsername | MessageParts]) ->
             case cryptic_alias:list(AliasName) of
                 {ok, Members} ->
                     {send_to_alias, AliasName, Members,
-                        list_to_binary(Message)};
+                        unicode:characters_to_binary(Message)};
                 {error, not_found} ->
                     {error, "Alias '@" ++ AliasName ++ "' not found"}
             end;
         _ ->
-            {send_message, list_to_binary(ToUsername), list_to_binary(Message)}
+            {send_message, unicode:characters_to_binary(ToUsername),
+                unicode:characters_to_binary(Message)}
     end;
 parse_command_parts(["alias"]) ->
     {alias_cmd, list};

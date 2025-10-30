@@ -414,11 +414,11 @@ handle_continue(start_engine, State) ->
     %% Set engine PID in WebSocket client for to receive messages
     ok = cryptic_ws_client:set_engine_pid(
         State#cryptic_engine_state.ws_client_pid,
-        self()),
+        self()
+    ),
     %% Request pending messages now that engine is fully initialized
     {ok, UpdatedState} = request_pending_messages(State),
     {noreply, UpdatedState}.
-
 
 %% @private
 handle_call({send_message, ToUsername, Message}, From, State) ->
@@ -565,15 +565,19 @@ handle_info(
             {noreply, UpdatedState}
     end;
 %%
-handle_info({websocket_message, #{<<"type">> := <<"welcome">>} = _Message},
-            State) ->
+handle_info(
+    {websocket_message, #{<<"type">> := <<"welcome">>} = _Message},
+    State
+) ->
     %% We have been disconnected and reconnected - need to re-request pending messages
     ?dbg("Received welcome message - re-requesting pending messages~n", []),
     {ok, UpdatedState} = request_pending_messages(State),
     {noreply, UpdatedState};
 %%
-handle_info({websocket_message, #{<<"type">> := _Type} = _Message},
-            State) ->
+handle_info(
+    {websocket_message, #{<<"type">> := _Type} = _Message},
+    State
+) ->
     % Handle other WebSocket message types
     ?dbg("Received unhandled websocket message type: ~p", [_Type]),
     {noreply, State};
@@ -1211,8 +1215,20 @@ send_encrypted_message_to_peer(ToUsername, Message, RatchetEnginePid, State) ->
     Username = State#cryptic_engine_state.username,
     Context = State#cryptic_engine_state.callback_context,
 
+    %% Convert message to UTF-8 binary if it's a string
+    %% This is critical! list_to_binary/1 treats each codepoint as a byte,
+    %% which corrupts UTF-8 characters. unicode:characters_to_binary/1 properly
+    %% encodes the Unicode codepoints as UTF-8 bytes.
+    MessageBin =
+        case Message of
+            M when is_list(M) ->
+                unicode:characters_to_binary(M);
+            M when is_binary(M) ->
+                M
+        end,
+
     % Use the ratchet engine to encrypt the message
-    case cryptic_ratchet_engine:encrypt_message(RatchetEnginePid, Message) of
+    case cryptic_ratchet_engine:encrypt_message(RatchetEnginePid, MessageBin) of
         {ok, EncryptedData} ->
             ?dbg("Message encrypted successfully, attempting auto-save~n", []),
             auto_save_session(ToUsername, RatchetEnginePid, State),
@@ -1740,13 +1756,16 @@ cleanup_pending_messages_for_user(Username, State) ->
 
 %% @private
 %% @doc Handle incoming encrypted message (called from async websocket handler)
-handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
- when is_binary(FromUsername) ->
+handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
+    is_binary(FromUsername)
+->
     handle_incoming_encrypted_message(
-binary_to_list(FromUsername), MessagePayload, State);
+        binary_to_list(FromUsername), MessagePayload, State
+    );
 %%
-handle_incoming_encrypted_message(FromUsername, MessagePayload, State)
- when is_list(FromUsername) ->
+handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
+    is_list(FromUsername)
+->
     % Normalize username to binary for consistent session key format
     % (outgoing messages use binary keys, incoming must match)
     FromUsernameBin = list_to_binary(FromUsername),

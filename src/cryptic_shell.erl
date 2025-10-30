@@ -174,15 +174,23 @@ start_shell() ->
 start_shell(_Options) ->
     try
         %% Try OTP 28 raw mode first
-        case shell:start_interactive({noshell, raw}) of
-            ok ->
-                ok;
-            {error, _Reason} ->
-                fallback_raw_mode()
-        end
+        Result =
+            case shell:start_interactive({noshell, raw}) of
+                ok ->
+                    ok;
+                {error, _Reason} ->
+                    fallback_raw_mode()
+            end,
+        %% Set UTF-8 encoding on both standard_io and group leader for proper emoji/unicode support
+        io:setopts(standard_io, [{encoding, utf8}]),
+        io:setopts(group_leader(), [{encoding, utf8}]),
+        Result
     catch
         error:undef ->
-            fallback_raw_mode();
+            Res = fallback_raw_mode(),
+            io:setopts(standard_io, [{encoding, utf8}]),
+            io:setopts(group_leader(), [{encoding, utf8}]),
+            Res;
         _:Error ->
             {error, Error}
     end.
@@ -818,8 +826,8 @@ handle_password_backspace([_Last | Rest]) ->
 %%% Enhanced Output Functions with ANSI Formatting
 %%%===================================================================
 
-print_user_message(FromUser, Message, Timestamp) when
-    is_list(FromUser) andalso is_binary(Message)
+print_user_message(FromUser, BinMessage, Timestamp) when
+    is_list(FromUser) andalso is_binary(BinMessage)
 ->
     %% Clear the current line first (in case we're interrupting a prompt)
     io:format("\r~s", [?CLEAR_LINE]),
@@ -829,11 +837,12 @@ print_user_message(FromUser, Message, Timestamp) when
     {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
+    EmojiMsg = cryptic_emoji:replace_all(BinMessage),
     io:format(
-        "~s: ~s (~s)\r\n",
+        "~ts: \e[37m~ts\e[0m (~ts)\r\n",
         [
             ?FG_CYAN("<" ++ FromUser ++ ">"),
-            ?FG_WHITE(binary_to_list(Message)),
+            EmojiMsg,
             ?FG_YELLOW(TimeStr)
         ]
     ).
@@ -848,8 +857,8 @@ print_user_message(FromUser, Message, Timestamp) when
     ok.
 print_sent_message(ToUser, Message, Timestamp) when is_binary(ToUser) ->
     print_sent_message(binary_to_list(ToUser), Message, Timestamp);
-print_sent_message(ToUser, Message, Timestamp) when
-    is_list(ToUser) andalso is_binary(Message)
+print_sent_message(ToUser, BinMessage, Timestamp) when
+    is_list(ToUser) andalso is_binary(BinMessage)
 ->
     %% Calculate how many lines the command took up and clear them
     %% The last command was: prompt + the actual command
@@ -865,7 +874,8 @@ print_sent_message(ToUser, Message, Timestamp) when
 
     %% Reconstruct the command line that was just executed
     %% Format: ":s <username> <message>" or "send <username> <message>"
-    CommandLine = Prompt ++ ":s " ++ ToUser ++ " " ++ binary_to_list(Message),
+    CommandLine =
+        Prompt ++ ":s " ++ ToUser ++ " " ++ binary_to_list(BinMessage),
 
     %% Calculate how many lines this wrapped to
     LinesToClear = calculate_wrapped_lines(CommandLine, TermWidth),
@@ -877,11 +887,12 @@ print_sent_message(ToUser, Message, Timestamp) when
     {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
+    EmojiMsg = cryptic_emoji:replace_all(BinMessage),
     io:format(
-        "~s ~s (~s)\r\n",
+        "~ts \e[37m~ts\e[0m (~ts)\r\n",
         [
             ?FG_GREEN("<You => " ++ ToUser ++ ">"),
-            ?FG_WHITE(binary_to_list(Message)),
+            EmojiMsg,
             ?FG_YELLOW(TimeStr)
         ]
     ).
@@ -1254,6 +1265,8 @@ print_help(Topic) ->
             print_db_help();
         "line_edit" ->
             print_line_edit_help();
+        "emoji" ->
+            print_emoji_help();
         _ ->
             print_general_help()
     end,
@@ -1353,6 +1366,10 @@ print_general_help() ->
     io:format(
         ?FG_GREEN("  help line_edit") ++
             "              - Line editing keybindings\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help emoji") ++
+            "                  - Emoji shortcuts and usage\r\n"
     ).
 
 %% @doc Print alias-specific help
@@ -1701,6 +1718,120 @@ print_line_edit_help() ->
     io:format(
         ?FG_GREEN("  Ctrl+N") ++ " or " ++ ?FG_GREEN("Down Arrow") ++
             "     - Next command\r\n"
+    ).
+
+%% @doc Print emoji help
+print_emoji_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              EMOJI SHORTCUTS                                  "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  Cryptic automatically converts common ASCII emoticons to emoji\r\n"
+    ),
+    io:format(
+        "  in your messages. Just type the ASCII version and it will be\r\n"
+    ),
+    io:format(
+        "  displayed as a colorful emoji.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Available Emoticons:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  :-)  :)") ++ "   → 😊  " ++
+            ?FG_YELLOW("Smiling face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  ;-)  ;)") ++ "   → 😉  " ++
+            ?FG_YELLOW("Winking face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :-D  :D") ++ "   → 😁  " ++
+            ?FG_YELLOW("Grinning face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :-P  :P") ++ "   → 😛  " ++
+            ?FG_YELLOW("Face with tongue\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :-(  :(") ++ "   → 😞  " ++
+            ?FG_YELLOW("Sad face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :/") ++ "       → 😕  " ++
+            ?FG_YELLOW("Confused face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :o  :O") ++ "   → 😮  " ++
+            ?FG_YELLOW("Surprised face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :*") ++ "       → 😘  " ++
+            ?FG_YELLOW("Kissing face\r\n")
+    ),
+    io:format(
+        ?FG_GREEN("  :|") ++ "       → 😐  " ++
+            ?FG_YELLOW("Neutral face\r\n")
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  send alice ") ++ ?FG_YELLOW("Hello! :-)") ++ "\r\n"
+    ),
+    io:format(
+        "  " ++ ?FG_MAGENTA("→ Displays: ") ++ "Hello! 😊\r\n\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  send bob ") ++ ?FG_YELLOW("That's great ;-)") ++ "\r\n"
+    ),
+    io:format(
+        "  " ++ ?FG_MAGENTA("→ Displays: ") ++ "That's great 😉\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Notes:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        "  • Emoji conversion happens automatically when messages are sent\r\n"
+    ),
+    io:format(
+        "  • Both you and the recipient will see the emoji version\r\n"
+    ),
+    io:format(
+        "  • Works with all Unicode characters including åäö\r\n"
+    ),
+    io:format(
+        "  • Mix ASCII emoticons with text: " ++ ?FG_YELLOW("läget ;-)") ++
+            " → läget 😉\r\n"
     ).
 
 %% @doc Display console status information on alternate screen
