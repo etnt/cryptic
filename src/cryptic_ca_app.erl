@@ -33,7 +33,16 @@ start(_StartType, _StartArgs) ->
     case init_ca() of
         {ok, DbRef} ->
             ?info("CA database initialized: ~p", [DbRef]),
-            {ok, self()};
+            
+            %% Initialize CA environment (load certificates and keys)
+            case cryptic_ca_store:init_ca_environment() of
+                ok ->
+                    ?info("CA environment initialized (cert/key loaded)", []),
+                    {ok, self()};
+                {error, CaReason} ->
+                    ?error("Failed to initialize CA environment: ~p", [CaReason]),
+                    {error, CaReason}
+            end;
         {error, Reason} ->
             ?error("Failed to initialize CA database: ~p", [Reason]),
             {error, Reason}

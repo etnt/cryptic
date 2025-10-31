@@ -357,29 +357,63 @@ csr_impl(Req, State, CsrPem, GpgFp, GpgSigB64) ->
             case cryptic_ca_gpg:verify_signature(GpgSig, GpgPub) of
                 {ok, VerifiedCsr} when VerifiedCsr =:= CsrPem ->
                     %% Signature valid, proceed with certificate issuance
-                    %% TODO: Implement certificate issuance (Phase 3)
-                    %% For now, return a placeholder response
+                    ?info("CSR signature verified for ~s, issuing certificate", [GpgFp]),
 
-                    ?info("CSR signature verified for ~s", [GpgFp]),
+                    %% Issue certificate using cryptic_ca_cert module
+                    case cryptic_ca_cert:issue_from_csr(CsrPem, GpgFp) of
+                        {ok, CertPem} ->
+                            %% Extract validity from configuration
+                            {ok, ValidityDays} = application:get_env(
+                                cryptic_ca,
+                                cert_default_lifetime_days,
+                                7
+                            ),
+                            
+                            Now = erlang:system_time(second),
+                            ExpiresAt = Now + (ValidityDays * 24 * 3600),
 
-                    %% Placeholder: Certificate would be issued here
-                    Now = erlang:system_time(second),
-                    % 7 days default
-                    ExpiresAt = Now + (7 * 24 * 3600),
+                            ?info("Certificate issued for ~s, expires in ~p days",
+                                  [GpgFp, ValidityDays]),
 
-                    RespBody = jsx:encode(#{
-                        status => <<"pending">>,
-                        message =>
-                            <<"Certificate issuance not yet implemented (Phase 3)">>,
-                        expires_at => ExpiresAt,
-                        issued_at => Now
-                    }),
+                            %% Log to audit
+                            AuditLog = #audit_log{
+                                timestamp = Now,
+                                event_type = <<"certificate_issued">>,
+                                gpg_fp = GpgFp,
+                                invite_id = undefined,
+                                details = jsx:encode(#{
+                                    validity_days => ValidityDays,
+                                    expires_at => ExpiresAt
+                                }),
+                                ip_address = get_ip_address(Req)
+                            },
+                            ok = cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
 
-                    Req2 = cowboy_req:set_resp_body(RespBody, Req),
-                    Req3 = cowboy_req:set_resp_header(
-                        <<"content-type">>, <<"application/json">>, Req2
-                    ),
-                    {true, Req3, State};
+                            %% Return certificate to client
+                            RespBody = jsx:encode(#{
+                                status => <<"issued">>,
+                                cert_pem => CertPem,
+                                expires_at => ExpiresAt,
+                                issued_at => Now,
+                                validity_days => ValidityDays
+                            }),
+
+                            Req2 = cowboy_req:set_resp_body(RespBody, Req),
+                            Req3 = cowboy_req:set_resp_header(
+                                <<"content-type">>, <<"application/json">>, Req2
+                            ),
+                            {true, Req3, State};
+                        
+                        {error, Reason} ->
+                            ?error("Certificate issuance failed for ~s: ~p",
+                                   [GpgFp, Reason]),
+                            error_response(
+                                <<"certificate_issuance_failed">>,
+                                iolist_to_binary(io_lib:format("~p", [Reason])),
+                                Req,
+                                State
+                            )
+                    end;
                 {ok, _Other} ->
                     error_response(
                         <<"signature_mismatch">>,

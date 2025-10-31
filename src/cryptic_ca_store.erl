@@ -20,11 +20,18 @@
 -module(cryptic_ca_store).
 
 -include("cryptic_ca.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 -export([
     init/1,
     close/1,
+    open_db/1,
     create_tables/1,
+
+    %% CA certificate operations
+    load_ca_cert/0,
+    load_ca_key/0,
+    init_ca_environment/0,
 
     %% Invite operations
     insert_invite/2,
@@ -99,6 +106,116 @@ init(DbFile) ->
 -spec close(db_ref()) -> ok.
 close(Conn) ->
     esqlite3:close(Conn).
+
+%% @doc Open database connection (for use by other modules)
+-spec open_db(file:filename()) -> {ok, db_ref()} | {error, term()}.
+open_db(DbFile) ->
+    case esqlite3:open(DbFile) of
+        {ok, Conn} ->
+            ok = esqlite3:exec(Conn, "PRAGMA journal_mode=WAL;"),
+            ok = esqlite3:exec(Conn, "PRAGMA synchronous=NORMAL;"),
+            ok = esqlite3:exec(Conn, "PRAGMA foreign_keys=ON;"),
+            {ok, Conn};
+        Error ->
+            Error
+    end.
+
+%%====================================================================
+%% CA Certificate Operations
+%%====================================================================
+
+%% @doc Initialize CA environment by loading certificates and keys
+%%
+%% Reads CA certificate and private key from files specified in
+%% application configuration, parses them, and stores in application
+%% environment for use by certificate issuance.
+%%
+%% This should be called during application startup.
+%%
+%% Configuration:
+%% ```
+%% {cryptic_ca, [
+%%     {ca_cert_file, "CA/certs/ca.crt"},
+%%     {ca_key_file, "CA/private/ca.key"}
+%% ]}.
+%% '''
+-spec init_ca_environment() -> ok | {error, term()}.
+init_ca_environment() ->
+    try
+        {ok, CACert} = load_ca_cert(),
+        {ok, CAKey} = load_ca_key(),
+        
+        application:set_env(cryptic_ca, ca_cert, CACert),
+        application:set_env(cryptic_ca, ca_key, CAKey),
+        
+        ?info("CA environment initialized successfully", []),
+        ok
+    catch
+        ErrorType:ErrorReason:Stack ->
+            ?error("Failed to initialize CA environment: ~p:~p~n~p",
+                   [ErrorType, ErrorReason, Stack]),
+            {error, {ca_init_failed, ErrorReason}}
+    end.
+
+%% @doc Load CA certificate from PEM file
+%%
+%% Reads and parses the CA root certificate. Returns an OTPCertificate
+%% record that can be used for certificate operations.
+-spec load_ca_cert() -> {ok, #'OTPCertificate'{}} | {error, term()}.
+load_ca_cert() ->
+    case application:get_env(cryptic_ca, ca_cert_file) of
+        {ok, CertFile} ->
+            case file:read_file(CertFile) of
+                {ok, CertPEM} ->
+                    try
+                        [{_, CertDER, _}] = public_key:pem_decode(CertPEM),
+                        Cert = public_key:pkix_decode_cert(CertDER, otp),
+                        {ok, Cert}
+                    catch
+                        _:Reason ->
+                            ?error("Failed to parse CA certificate ~s: ~p",
+                                   [CertFile, Reason]),
+                            {error, {cert_parse_failed, Reason}}
+                    end;
+                {error, Reason} = Error ->
+                    ?error("Failed to read CA certificate ~s: ~p",
+                           [CertFile, Reason]),
+                    Error
+            end;
+        undefined ->
+            {error, ca_cert_file_not_configured}
+    end.
+
+%% @doc Load CA private key from PEM file
+%%
+%% Reads and parses the CA private key. Returns an ECPrivateKey
+%% record for ECDSA keys or RSAPrivateKey for RSA keys.
+%%
+%% The key must match the algorithm used in the CA certificate.
+-spec load_ca_key() -> {ok, tuple()} | {error, term()}.
+load_ca_key() ->
+    case application:get_env(cryptic_ca, ca_key_file) of
+        {ok, KeyFile} ->
+            case file:read_file(KeyFile) of
+                {ok, KeyPEM} ->
+                    try
+                        [KeyEntry | _] = public_key:pem_decode(KeyPEM),
+                        Key = public_key:pem_entry_decode(KeyEntry),
+                        {ok, Key}
+                    catch
+                        _:Reason ->
+                            ?error("Failed to parse CA private key ~s: ~p",
+                                   [KeyFile, Reason]),
+                            {error, {key_parse_failed, Reason}}
+                    end;
+                {error, Reason} = Error ->
+                    ?error("Failed to read CA private key ~s: ~p",
+                           [KeyFile, Reason]),
+                    Error
+            end;
+        undefined ->
+            {error, ca_key_file_not_configured}
+    end.
 
 %% @doc Create database tables
 -spec create_tables(db_ref()) -> ok | {error, term()}.

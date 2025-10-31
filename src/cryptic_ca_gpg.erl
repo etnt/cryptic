@@ -11,6 +11,7 @@
 
 -export([
     verify_signature/2,
+    verify_detached_signature/3,
     compute_fingerprint/1,
     extract_public_key/1
 ]).
@@ -90,6 +91,71 @@ verify_signature(SignedData, PublicKey) ->
                 [ErrorType, ErrorReason, Stack]
             ),
             {error, {gpg_verification_exception, ErrorReason}}
+    end.
+
+%% @doc Verify a detached GPG signature over data.
+%%
+%% This function verifies a detached signature (separate from the data)
+%% using a provided GPG public key. This is commonly used for CSR signing
+%% where the signature is sent separately from the CSR data.
+%%
+%% == Use Cases ==
+%% <ul>
+%%   <li>Verify CSR signed by user's GPG private key</li>
+%%   <li>Authenticate certificate requests</li>
+%%   <li>Validate proof-of-possession of GPG private key</li>
+%% </ul>
+%%
+%% == Example ==
+%% ```
+%% %% Verify CSR signature during certificate issuance
+%% CSR_PEM = <<"-----BEGIN CERTIFICATE REQUEST-----\n...">>,
+%% GpgSignature = <<"-----BEGIN PGP SIGNATURE-----\n...">>,
+%% GpgPubKey = <<"-----BEGIN PGP PUBLIC KEY BLOCK-----\n...">>,
+%%
+%% case cryptic_ca_gpg:verify_detached_signature(CSR_PEM, GpgSignature, GpgPubKey) of
+%%     ok ->
+%%         %% Signature valid, proceed with certificate issuance
+%%         issue_certificate(CSR_PEM);
+%%     {error, invalid_signature} ->
+%%         {error, unauthorized_csr_request};
+%%     {error, Reason} ->
+%%         ?error("CSR signature verification failed: ~p", [Reason]),
+%%         {error, verification_failed}
+%% end.
+%% '''
+%%
+%% @param Data The data that was signed (e.g., CSR in PEM format)
+%% @param DetachedSignature The GPG signature (ASCII-armored format)
+%% @param PublicKey The GPG public key to verify against (ASCII-armored format)
+%% @returns `ok' on successful verification, or `{error, Reason}'
+-spec verify_detached_signature(binary(), binary(), gpg_public_key()) ->
+    ok | {error, term()}.
+verify_detached_signature(Data, DetachedSignature, PublicKey) ->
+    try
+        %% First import the public key temporarily
+        case erl_gpg_api:import(PublicKey, "") of
+            {ok, _ImportResult} ->
+                %% Now verify the detached signature
+                case erl_gpg_api:verify_detached(Data, DetachedSignature, "") of
+                    {ok, _VerifyResult} ->
+                        ?debug("GPG detached signature verified successfully", []),
+                        ok;
+                    {error, Reason} = Error ->
+                        ?warning("GPG detached signature verification failed: ~p", [Reason]),
+                        Error
+                end;
+            {error, Reason} = Error ->
+                ?error("Failed to import public key for verification: ~p", [Reason]),
+                Error
+        end
+    catch
+        ErrorType:ErrorReason:Stack ->
+            ?error(
+                "Exception during GPG detached signature verification: ~p:~p~nStack: ~p",
+                [ErrorType, ErrorReason, Stack]
+            ),
+            {error, {gpg_detached_verification_exception, ErrorReason}}
     end.
 
 %% @doc Compute the GPG fingerprint from a public key.
