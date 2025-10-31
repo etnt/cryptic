@@ -17,6 +17,7 @@ replace_all(Input) ->
 
 emojis() ->
     [
+        {<<"(y)" / utf8>>, ?EMOJI_THUMBS_UP},
         {<<":-)"/utf8>>, ?EMOJI_SMILE},
         {<<":)"/utf8>>, ?EMOJI_SIMPLE_SMILE},
         {<<":-D"/utf8>>, ?EMOJI_GRIN},

@@ -610,7 +610,7 @@ check_alias_shortcuts(Line) ->
             parse_alias_new_shortcut(Rest)
     end.
 
-%% @doc Parse alias new shortcut: ":an <name> <member1> <member2> ..."
+%% @doc Parse alias new shortcut: ":an &lt;name&gt; &lt;member1&gt; &lt;member2&gt; ..."
 parse_alias_new_shortcut(Rest) ->
     case string:tokens(Rest, " ") of
         [AliasName | Members] when length(Members) > 0 ->
@@ -619,7 +619,7 @@ parse_alias_new_shortcut(Rest) ->
             {error, "Usage: :an <alias_name> <member1> [member2 ...]"}
     end.
 
-%% @doc Parse alias add shortcut: ":aa <name> <member1> <member2> ..."
+%% @doc Parse alias add shortcut: ":aa &lt;name&gt; &lt;member1&gt; &lt;member2&gt; ..."
 parse_alias_add_shortcut(Rest) ->
     case string:tokens(Rest, " ") of
         [AliasName | Members] when length(Members) > 0 ->
@@ -628,7 +628,7 @@ parse_alias_add_shortcut(Rest) ->
             {error, "Usage: :aa <alias_name> <member1> [member2 ...]"}
     end.
 
-%% @doc Parse alias rm shortcut: ":ar <name> <member1> <member2> ..."
+%% @doc Parse alias rm shortcut: ":ar &lt;name&gt; &lt;member1&gt; &lt;member2&gt; ..."
 parse_alias_rm_shortcut(Rest) ->
     case string:tokens(Rest, " ") of
         [AliasName | Members] when length(Members) > 0 ->

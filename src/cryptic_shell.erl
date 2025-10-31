@@ -838,11 +838,12 @@ print_user_message(FromUser, BinMessage, Timestamp) when
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
     EmojiMsg = cryptic_emoji:replace_all(BinMessage),
+    FormattedMsg = cryptic_markdown:process(EmojiMsg),
     io:format(
         "~ts: \e[37m~ts\e[0m (~ts)\r\n",
         [
             ?FG_CYAN("<" ++ FromUser ++ ">"),
-            EmojiMsg,
+            FormattedMsg,
             ?FG_YELLOW(TimeStr)
         ]
     ).
@@ -888,11 +889,12 @@ print_sent_message(ToUser, BinMessage, Timestamp) when
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
     EmojiMsg = cryptic_emoji:replace_all(BinMessage),
+    FormattedMsg = cryptic_markdown:process(EmojiMsg),
     io:format(
         "~ts \e[37m~ts\e[0m (~ts)\r\n",
         [
             ?FG_GREEN("<You => " ++ ToUser ++ ">"),
-            EmojiMsg,
+            FormattedMsg,
             ?FG_YELLOW(TimeStr)
         ]
     ).
@@ -923,11 +925,18 @@ print_history_message(
             T when is_binary(T) -> binary_to_list(T);
             T when is_list(T) -> T
         end,
-    MessageStr =
+
+    %% Process emoji shortcuts in the message
+    MessageBin =
         case Message of
-            M when is_binary(M) -> binary_to_list(M);
-            M when is_list(M) -> M
+            M when is_binary(M) -> M;
+            M when is_list(M) -> unicode:characters_to_binary(M)
         end,
+    EmojiMessage = cryptic_emoji:replace_all(MessageBin),
+    %% Convert to string for ANSI color macros (which use ++)
+    MessageStr0 = unicode:characters_to_list(EmojiMessage),
+    %% Process markdown formatting
+    MessageStr = cryptic_markdown:process(MessageStr0),
 
     %% Format timestamp
     {{Year, Month, Day}, {Hour, Minute, Second}} = Timestamp,
@@ -942,7 +951,7 @@ print_history_message(
     case {ServerHost, ServerPort} of
         {undefined, undefined} ->
             %% No server info - simpler format
-            io:format("[~s] ~s -> ~s : ~s\r\n", [
+            io:format("[~s] ~s -> ~s : ~ts\r\n", [
                 ?FG_CYAN(TimeStr),
                 ?FG_YELLOW(FromUserStr),
                 ?FG_YELLOW(ToUserStr),
@@ -955,7 +964,7 @@ print_history_message(
                     S when is_binary(S) -> binary_to_list(S);
                     S when is_list(S) -> S
                 end,
-            io:format("[~s] ~s -> ~s @ ~s:~p: ~s\r\n", [
+            io:format("[~s] ~s -> ~s @ ~s:~p: ~ts\r\n", [
                 ?FG_CYAN(TimeStr),
                 ?FG_YELLOW(FromUserStr),
                 ?FG_YELLOW(ToUserStr),
@@ -1267,6 +1276,8 @@ print_help(Topic) ->
             print_line_edit_help();
         "emoji" ->
             print_emoji_help();
+        "markdown" ->
+            print_markdown_help();
         _ ->
             print_general_help()
     end,
@@ -1370,6 +1381,10 @@ print_general_help() ->
     io:format(
         ?FG_GREEN("  help emoji") ++
             "                  - Emoji shortcuts and usage\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help markdown") ++
+            "               - Markdown text formatting\r\n"
     ).
 
 %% @doc Print alias-specific help
@@ -1832,6 +1847,62 @@ print_emoji_help() ->
     io:format(
         "  • Mix ASCII emoticons with text: " ++ ?FG_YELLOW("läget ;-)") ++
             " → läget 😉\r\n"
+    ).
+
+%% @doc Print markdown formatting help
+print_markdown_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              MARKDOWN FORMATTING                              "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(
+        "  Simple markdown-style formatting is supported in messages.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Syntax:")) ++ "\r\n"),
+    io:format(
+        ?FG_GREEN("  *text*") ++ "  → " ++ ?BOLD("Bold") ++ "     " ++
+            ?FG_GREEN("_text_") ++ "  → " ++ ?ESC ++ "2mItalic" ++ ?FG_RESET ++
+            "     " ++
+            ?FG_GREEN("`text`") ++ "  → " ++ ?REVERSE("Code") ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Examples:")) ++ "\r\n"),
+    io:format(
+        ?FG_YELLOW("  This is *important*") ++ "  → This is " ++
+            ?BOLD("important") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  Check `config.txt`") ++ "   → Check " ++
+            ?REVERSE("config.txt") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  I'm _not sure_") ++ "      → I'm " ++ ?ESC ++
+            "2mnot sure" ++ ?FG_RESET ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  *Great* work! :-)") ++ "   → " ++ ?BOLD("Great") ++
+            " work! 😊\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Notes:")) ++ "\r\n"),
+    io:format("  • Applied automatically • Markers must be paired\r\n"),
+    io:format(
+        "  • Combines with emoji   • Empty pairs like ** ignored\r\n"
     ).
 
 %% @doc Display console status information on alternate screen

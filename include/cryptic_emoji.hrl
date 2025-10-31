@@ -23,5 +23,7 @@
 -define(EMOJI_UNSURE, "😕").
 %% :)
 -define(EMOJI_SIMPLE_SMILE, "🙂").
+%% (y)
+-define(EMOJI_THUMBS_UP, "👍").
 
 -endif.
