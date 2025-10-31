@@ -22,7 +22,7 @@
     handle_get/2
 ]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 -include("../include/cryptic_ca.hrl").
 
 %%====================================================================
@@ -177,7 +177,7 @@ handle_register_gpg(Req, State) ->
         InviteId = maps:get(<<"invite_id">>, ReqMap),
         GpgPub = maps:get(<<"gpg_pub">>, ReqMap),
 
-        ?LOG_INFO("GPG registration request for invite: ~s", [InviteId]),
+        ?info("GPG registration request for invite: ~s", [InviteId]),
 
         %% Extract IP address for rate limiting
         IpAddr = get_ip_address(Req2),
@@ -187,7 +187,7 @@ handle_register_gpg(Req, State) ->
             {ok, _Remaining} ->
                 register_gpg_impl(Req2, State, InviteId, GpgPub);
             {error, rate_limited, RetryAfter} ->
-                ?LOG_WARNING(
+                ?warning(
                     "Rate limit exceeded for registration from IP ~s, retry after ~p seconds",
                     [IpAddr, RetryAfter]
                 ),
@@ -195,7 +195,7 @@ handle_register_gpg(Req, State) ->
         end
     catch
         Error:CatchReason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Error processing registration: ~p:~p~nStack: ~p",
                 [Error, CatchReason, Stack]
             ),
@@ -239,7 +239,7 @@ register_gpg_impl(Req, State, InviteId, GpgPub) ->
                                         issued_at => Now
                                     }),
 
-                                    ?LOG_INFO(
+                                    ?info(
                                         "GPG registration successful: ~s", [
                                             GpgFp
                                         ]
@@ -255,7 +255,7 @@ register_gpg_impl(Req, State, InviteId, GpgPub) ->
                                     ),
                                     {true, Req3, State};
                                 {error, Reason} ->
-                                    ?LOG_ERROR("GPG registration failed: ~p", [
+                                    ?error("GPG registration failed: ~p", [
                                         Reason
                                     ]),
                                     error_response(
@@ -277,7 +277,7 @@ register_gpg_impl(Req, State, InviteId, GpgPub) ->
                     error_response(<<"invalid_gpg_key">>, Reason, Req, State)
             end;
         {error, Reason} ->
-            ?LOG_WARNING("Invalid invite: ~s, reason: ~p", [InviteId, Reason]),
+            ?warning("Invalid invite: ~s, reason: ~p", [InviteId, Reason]),
             error_response(<<"verification_failed">>, Reason, Req, State)
     end.
 
@@ -314,14 +314,14 @@ handle_csr(Req, State) ->
         GpgFp = maps:get(<<"gpg_fp">>, ReqMap),
         GpgSigB64 = maps:get(<<"gpg_sig_b64">>, ReqMap),
 
-        ?LOG_INFO("CSR request for fingerprint: ~s", [GpgFp]),
+        ?info("CSR request for fingerprint: ~s", [GpgFp]),
 
         %% Check rate limit per GPG fingerprint
         case cryptic_ca_rate_limiter:check_limit(GpgFp, csr, 1) of
             {ok, _Remaining} ->
                 csr_impl(Req2, State, CsrPem, GpgFp, GpgSigB64);
             {error, rate_limited, RetryAfter} ->
-                ?LOG_WARNING(
+                ?warning(
                     "Rate limit exceeded for CSR from ~s, retry after ~p seconds",
                     [GpgFp, RetryAfter]
                 ),
@@ -329,7 +329,7 @@ handle_csr(Req, State) ->
         end
     catch
         Error:CatchReason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Error processing CSR: ~p:~p~nStack: ~p",
                 [Error, CatchReason, Stack]
             ),
@@ -360,7 +360,7 @@ csr_impl(Req, State, CsrPem, GpgFp, GpgSigB64) ->
                     %% TODO: Implement certificate issuance (Phase 3)
                     %% For now, return a placeholder response
 
-                    ?LOG_INFO("CSR signature verified for ~s", [GpgFp]),
+                    ?info("CSR signature verified for ~s", [GpgFp]),
 
                     %% Placeholder: Certificate would be issued here
                     Now = erlang:system_time(second),
@@ -446,7 +446,7 @@ handle_get_route(Path, Req, State) ->
 -spec handle_status(binary(), cowboy_req:req(), map()) ->
     {binary(), cowboy_req:req(), map()}.
 handle_status(GpgFp, Req, State) ->
-    ?LOG_INFO("Status check for fingerprint: ~s", [GpgFp]),
+    ?info("Status check for fingerprint: ~s", [GpgFp]),
 
     %% Extract IP for rate limiting
     IpAddr = get_ip_address(Req),
@@ -456,7 +456,7 @@ handle_status(GpgFp, Req, State) ->
         {ok, _Remaining} ->
             status_impl(GpgFp, Req, State);
         {error, rate_limited, RetryAfter} ->
-            ?LOG_WARNING(
+            ?warning(
                 "Rate limit exceeded for status check from IP ~s, retry after ~p seconds",
                 [IpAddr, RetryAfter]
             ),
@@ -498,7 +498,7 @@ status_impl(GpgFp, Req, State) ->
         end
     catch
         Error:CatchReason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Error checking status: ~p:~p~nStack: ~p",
                 [Error, CatchReason, Stack]
             ),

@@ -15,7 +15,7 @@
     extract_public_key/1
 ]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 
 -type gpg_fingerprint() :: binary().
 -type gpg_public_key() :: binary().
@@ -60,7 +60,7 @@
 %%     {error, invalid_signature} ->
 %%         {error, tampered_invite};
 %%     {error, Reason} ->
-%%         ?LOG_ERROR("Signature verification failed: ~p", [Reason]),
+%%         ?error("Signature verification failed: ~p", [Reason]),
 %%         {error, verification_failed}
 %% end.
 %% '''
@@ -77,15 +77,15 @@ verify_signature(SignedData, PublicKey) ->
         %% Use erl_gpg_api to verify the signature
         case erl_gpg_api:verify(SignedData, PublicKey) of
             {ok, Plaintext} ->
-                ?LOG_DEBUG("GPG signature verified successfully"),
+                ?debug("GPG signature verified successfully", []),
                 {ok, Plaintext};
             {error, Reason} = Error ->
-                ?LOG_WARNING("GPG signature verification failed: ~p", [Reason]),
+                ?warning("GPG signature verification failed: ~p", [Reason]),
                 Error
         end
     catch
         ErrorType:ErrorReason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Exception during GPG verification: ~p:~p~nStack: ~p",
                 [ErrorType, ErrorReason, Stack]
             ),
@@ -129,7 +129,7 @@ verify_signature(SignedData, PublicKey) ->
 %%     {error, invalid_key_format} ->
 %%         {error, malformed_public_key};
 %%     {error, Reason} ->
-%%         ?LOG_ERROR("Fingerprint computation failed: ~p", [Reason]),
+%%         ?error("Fingerprint computation failed: ~p", [Reason]),
 %%         {error, cannot_compute_fingerprint}
 %% end.
 %% '''
@@ -145,15 +145,15 @@ compute_fingerprint(PublicKey) ->
         %% Use erl_gpg_api to compute fingerprint
         case erl_gpg_api:compute_fingerprint(PublicKey, "") of
             {ok, Fingerprint} ->
-                ?LOG_DEBUG("Computed GPG fingerprint: ~s", [Fingerprint]),
+                ?debug("Computed GPG fingerprint: ~s", [Fingerprint]),
                 {ok, Fingerprint};
             {error, Reason} = Error ->
-                ?LOG_ERROR("Failed to compute GPG fingerprint: ~p", [Reason]),
+                ?error("Failed to compute GPG fingerprint: ~p", [Reason]),
                 Error
         end
     catch
         ErrorType:ErrorReason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Exception during fingerprint computation: ~p:~p~nStack: ~p",
                 [ErrorType, ErrorReason, Stack]
             ),
@@ -207,7 +207,7 @@ compute_fingerprint(PublicKey) ->
 %%     {error, invalid_key_data} ->
 %%         {error, <<"Please provide a valid GPG public key">>};
 %%     {error, Reason} ->
-%%         ?LOG_ERROR("Key validation failed: ~p", [Reason]),
+%%         ?error("Key validation failed: ~p", [Reason]),
 %%         {error, <<"Key validation failed">>}
 %% end.
 %% '''
@@ -224,16 +224,16 @@ extract_public_key(KeyBlock) ->
         %% get_key_info validates the key by importing and reading it
         case erl_gpg_api:get_key_info(KeyBlock, "") of
             {ok, _KeyInfo} ->
-                ?LOG_DEBUG("Validated and extracted primary public key"),
+                ?debug("Validated and extracted primary public key", []),
                 %% Return the original key block
                 {ok, KeyBlock};
             {error, Reason} = Error ->
-                ?LOG_ERROR("Failed to extract public key: ~p", [Reason]),
+                ?error("Failed to extract public key: ~p", [Reason]),
                 Error
         end
     catch
         ErrorType:ErrorReason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Exception during key extraction: ~p:~p~nStack: ~p",
                 [ErrorType, ErrorReason, Stack]
             ),

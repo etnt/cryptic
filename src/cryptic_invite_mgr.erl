@@ -20,7 +20,7 @@
     cleanup_expired_invites/1
 ]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 
 -type db_ref() :: pid().
 -type invite_id() :: binary().
@@ -126,7 +126,7 @@ create_invite(DbRef, InviterFp, ExpiryHours, Meta) ->
 
     case cryptic_ca_store:insert_invite(DbRef, Invite) of
         ok ->
-            ?LOG_INFO(
+            ?info(
                 "Created invite ~s by ~s, expires at ~p",
                 [InviteId, InviterFp, ExpiresAt]
             ),
@@ -144,7 +144,7 @@ create_invite(DbRef, InviterFp, ExpiryHours, Meta) ->
 
             {ok, InviteId};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to create invite: ~p", [Reason]),
+            ?error("Failed to create invite: ~p", [Reason]),
             Error
     end.
 
@@ -198,11 +198,11 @@ validate_invite(DbRef, InviteId) ->
             %% Check if already consumed
             if
                 Invite#invite.consumed =:= 1 ->
-                    ?LOG_WARNING("Invite ~s already consumed", [InviteId]),
+                    ?warning("Invite ~s already consumed", [InviteId]),
                     {error, already_consumed};
                 %% Check if expired
                 Invite#invite.expires_at < Now ->
-                    ?LOG_WARNING(
+                    ?warning(
                         "Invite ~s expired at ~p",
                         [InviteId, Invite#invite.expires_at]
                     ),
@@ -212,10 +212,10 @@ validate_invite(DbRef, InviteId) ->
                     {ok, Invite#invite.inviter_fp}
             end;
         {error, not_found} ->
-            ?LOG_WARNING("Invite ~s not found", [InviteId]),
+            ?warning("Invite ~s not found", [InviteId]),
             {error, not_found};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to validate invite ~s: ~p", [InviteId, Reason]),
+            ?error("Failed to validate invite ~s: ~p", [InviteId, Reason]),
             Error
     end.
 
@@ -271,7 +271,7 @@ consume_invite(DbRef, InviteId, ConsumerFp) ->
         {ok, _InviterFp} ->
             case cryptic_ca_store:consume_invite(DbRef, InviteId, ConsumerFp) of
                 ok ->
-                    ?LOG_INFO("Invite ~s consumed by ~s", [InviteId, ConsumerFp]),
+                    ?info("Invite ~s consumed by ~s", [InviteId, ConsumerFp]),
 
                     %% Audit log
                     AuditLog = #audit_log{
@@ -285,7 +285,7 @@ consume_invite(DbRef, InviteId, ConsumerFp) ->
                     cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
                     ok;
                 {error, ConsumeReason} = ConsumeError ->
-                    ?LOG_ERROR("Failed to consume invite ~s: ~p", [
+                    ?error("Failed to consume invite ~s: ~p", [
                         InviteId, ConsumeReason
                     ]),
                     ConsumeError
@@ -408,7 +408,7 @@ list_user_invites(DbRef, InviterFp) ->
 revoke_invite(DbRef, InviteId) ->
     case cryptic_ca_store:revoke_invite(DbRef, InviteId) of
         ok ->
-            ?LOG_INFO("Invite ~s revoked", [InviteId]),
+            ?info("Invite ~s revoked", [InviteId]),
 
             %% Audit log
             AuditLog = #audit_log{
@@ -422,7 +422,7 @@ revoke_invite(DbRef, InviteId) ->
             cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to revoke invite ~s: ~p", [InviteId, Reason]),
+            ?error("Failed to revoke invite ~s: ~p", [InviteId, Reason]),
             Error
     end.
 
@@ -470,10 +470,10 @@ revoke_invite(DbRef, InviteId) ->
 cleanup_expired_invites(DbRef) ->
     case cryptic_ca_store:delete_expired_invites(DbRef) of
         {ok, Count} ->
-            ?LOG_INFO("Deleted ~p expired invites", [Count]),
+            ?info("Deleted ~p expired invites", [Count]),
             {ok, Count};
         {error, CleanupReason} = CleanupError ->
-            ?LOG_ERROR("Failed to cleanup expired invites: ~p", [CleanupReason]),
+            ?error("Failed to cleanup expired invites: ~p", [CleanupReason]),
             CleanupError
     end.
 

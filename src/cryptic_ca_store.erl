@@ -45,7 +45,7 @@
     get_audit_logs/3
 ]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 
 %% esqlite3 connection reference
 -type db_ref() :: tuple().
@@ -60,7 +60,7 @@
 %% @doc Initialize database connection and create tables if needed
 -spec init(file:filename()) -> {ok, db_ref()} | {error, term()}.
 init(DbFile) ->
-    ?LOG_INFO("Initializing CA storage at ~s", [DbFile]),
+    ?info("Initializing CA storage at ~s", [DbFile]),
 
     %% Ensure directory exists
     DbDir = filename:dirname(DbFile),
@@ -68,7 +68,7 @@ init(DbFile) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} ->
-            ?LOG_ERROR("Failed to create DB directory ~s: ~p", [DbDir, Reason]),
+            ?error("Failed to create DB directory ~s: ~p", [DbDir, Reason]),
             exit({error, {dir_creation_failed, Reason}})
     end,
 
@@ -83,15 +83,15 @@ init(DbFile) ->
             %% Create tables
             case create_tables(Conn) of
                 ok ->
-                    ?LOG_INFO("CA storage initialized successfully"),
+                    ?info("CA storage initialized successfully", []),
                     {ok, Conn};
                 {error, CreateReason} = CreateError ->
-                    ?LOG_ERROR("Failed to create tables: ~p", [CreateReason]),
+                    ?error("Failed to create tables: ~p", [CreateReason]),
                     esqlite3:close(Conn),
                     CreateError
             end;
         {error, OpenReason} = OpenError ->
-            ?LOG_ERROR("Failed to open database ~s: ~p", [DbFile, OpenReason]),
+            ?error("Failed to open database ~s: ~p", [DbFile, OpenReason]),
             OpenError
     end.
 
@@ -174,7 +174,7 @@ create_tables(Conn) ->
         ok
     catch
         ErrorType:ErrorReason:_Stack ->
-            ?LOG_ERROR("Failed to create tables: ~p:~p", [
+            ?error("Failed to create tables: ~p:~p", [
                 ErrorType, ErrorReason
             ]),
             {error, {table_creation_failed, ErrorReason}}
@@ -226,7 +226,7 @@ insert_invite(Conn, #invite{} = Invite) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to insert invite ~s: ~p", [
+            ?error("Failed to insert invite ~s: ~p", [
                 Invite#invite.invite_id, Reason
             ]),
             Error
@@ -287,7 +287,7 @@ get_invite(Conn, InviteId) ->
         Result when Result =:= [] orelse Result =:= ok ->
             {error, not_found};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to get invite ~s: ~p", [InviteId, Reason]),
+            ?error("Failed to get invite ~s: ~p", [InviteId, Reason]),
             Error
     end.
 
@@ -324,7 +324,7 @@ consume_invite(Conn, InviteId, ConsumerFp) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to consume invite ~s: ~p", [InviteId, Reason]),
+            ?error("Failed to consume invite ~s: ~p", [InviteId, Reason]),
             Error
     end.
 
@@ -375,7 +375,7 @@ list_invites_by_inviter(Conn, InviterFp) ->
             ),
             {ok, Invites};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to list invites for ~s: ~p", [InviterFp, Reason]),
+            ?error("Failed to list invites for ~s: ~p", [InviterFp, Reason]),
             Error
     end.
 
@@ -403,7 +403,7 @@ revoke_invite(Conn, InviteId) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to revoke invite ~s: ~p", [InviteId, Reason]),
+            ?error("Failed to revoke invite ~s: ~p", [InviteId, Reason]),
             Error
     end.
 
@@ -432,7 +432,7 @@ delete_expired_invites(Conn) ->
         Result when Result =:= [] orelse Result =:= ok ->
             {ok, esqlite3:changes(Conn)};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to delete expired invites: ~p", [Reason]),
+            ?error("Failed to delete expired invites: ~p", [Reason]),
             Error
     end.
 
@@ -490,7 +490,7 @@ insert_gpg_identity(Conn, #gpg_identity{} = Identity) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to insert GPG identity ~s: ~p", [
+            ?error("Failed to insert GPG identity ~s: ~p", [
                 Identity#gpg_identity.gpg_fp, Reason
             ]),
             Error
@@ -537,7 +537,7 @@ get_gpg_identity(Conn, GpgFp) ->
         Result when Result =:= [] orelse Result =:= ok ->
             {error, not_found};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to get GPG identity ~s: ~p", [GpgFp, Reason]),
+            ?error("Failed to get GPG identity ~s: ~p", [GpgFp, Reason]),
             Error
     end.
 
@@ -565,7 +565,7 @@ update_last_seen(Conn, GpgFp) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to update last_seen for ~s: ~p", [GpgFp, Reason]),
+            ?error("Failed to update last_seen for ~s: ~p", [GpgFp, Reason]),
             Error
     end.
 
@@ -619,7 +619,7 @@ list_gpg_identities(Conn) ->
             ),
             {ok, Identities};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to list GPG identities: ~p", [Reason]),
+            ?error("Failed to list GPG identities: ~p", [Reason]),
             Error
     end.
 
@@ -672,7 +672,7 @@ insert_audit_log(Conn, #audit_log{} = Log) ->
         Result when Result =:= [] orelse Result =:= ok ->
             ok;
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to insert audit log: ~p", [Reason]),
+            ?error("Failed to insert audit log: ~p", [Reason]),
             Error
     end.
 
@@ -730,6 +730,6 @@ get_audit_logs(Conn, FromTimestamp, ToTimestamp) ->
             ),
             {ok, Logs};
         {error, Reason} = Error ->
-            ?LOG_ERROR("Failed to get audit logs: ~p", [Reason]),
+            ?error("Failed to get audit logs: ~p", [Reason]),
             Error
     end.

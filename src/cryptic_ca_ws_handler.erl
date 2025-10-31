@@ -26,7 +26,7 @@
 %% Export for testing
 -export([handle_command/2]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 -include("../include/cryptic_ca.hrl").
 
 -record(state, {
@@ -48,7 +48,7 @@
 %% @param _Opts Handler options (unused)
 %% @returns {cowboy_websocket, Req, State} to upgrade to WebSocket
 init(Req, _Opts) ->
-    ?LOG_DEBUG("Initializing CA WebSocket handler"),
+    ?debug("Initializing CA WebSocket handler", []),
 
     %% Get database reference from application environment
     {ok, DbRef} = application:get_env(cryptic, ca_db_ref),
@@ -71,7 +71,7 @@ init(Req, _Opts) ->
 %% @param State Handler state
 %% @returns {ok, State} on successful initialization
 websocket_init(State) ->
-    ?LOG_INFO("CA WebSocket connection established"),
+    ?info("CA WebSocket connection established", []),
 
     %% TODO: Extract GPG fingerprint from mTLS cert subject CN
     %% For now, mark as not fully authenticated until bootstrap or verification
@@ -86,7 +86,7 @@ websocket_init(State) ->
 %% @param State Handler state
 %% @returns {reply, Frame, State} | {ok, State}
 websocket_handle({text, Msg}, State) ->
-    ?LOG_DEBUG("Received WebSocket message: ~p", [Msg]),
+    ?debug("Received WebSocket message: ~p", [Msg]),
 
     try
         %% Decode JSON message
@@ -94,7 +94,7 @@ websocket_handle({text, Msg}, State) ->
         handle_command(MsgMap, State)
     catch
         Error:Reason:Stack ->
-            ?LOG_ERROR(
+            ?error(
                 "Error handling WebSocket message: ~p:~p~nStack: ~p",
                 [Error, Reason, Stack]
             ),
@@ -129,7 +129,7 @@ websocket_info(_Info, State) ->
 %% @param _State Handler state (unused)
 %% @returns ok
 terminate(_Reason, _Req, _State) ->
-    ?LOG_INFO("CA WebSocket connection terminated"),
+    ?info("CA WebSocket connection terminated", []),
     ok.
 
 %%====================================================================
@@ -194,7 +194,7 @@ handle_invite_create(Msg, #state{gpg_fp = InviterFp, db_ref = DbRef} = State) ->
     ExpiryHours = maps:get(<<"expiry_hours">>, Msg, 24),
     Meta = maps:get(<<"meta">>, Msg, #{}),
 
-    ?LOG_INFO("Creating invite for inviter ~s, expiry: ~p hours", [
+    ?info("Creating invite for inviter ~s, expiry: ~p hours", [
         InviterFp, ExpiryHours
     ]),
 
@@ -203,7 +203,7 @@ handle_invite_create(Msg, #state{gpg_fp = InviterFp, db_ref = DbRef} = State) ->
         {ok, _Remaining} ->
             create_invite_impl(DbRef, InviterFp, ExpiryHours, Meta, State);
         {error, rate_limited, RetryAfter} ->
-            ?LOG_WARNING(
+            ?warning(
                 "Rate limit exceeded for inviter ~s, retry after ~p seconds",
                 [InviterFp, RetryAfter]
             ),
@@ -229,10 +229,10 @@ create_invite_impl(DbRef, InviterFp, ExpiryHours, Meta, State) ->
                 expires_at => Invite#invite.expires_at
             }),
 
-            ?LOG_INFO("Invite created successfully: ~s", [InviteId]),
+            ?info("Invite created successfully: ~s", [InviteId]),
             {reply, {text, Response}, State};
         {error, Reason} ->
-            ?LOG_ERROR("Failed to create invite: ~p", [Reason]),
+            ?error("Failed to create invite: ~p", [Reason]),
             ErrorResp = jsx:encode(#{
                 error => <<"invite_creation_failed">>,
                 message => iolist_to_binary(io_lib:format("~p", [Reason]))
@@ -278,7 +278,7 @@ handle_invite_list(_Msg, #state{gpg_fp = InviterFp, db_ref = DbRef} = State) ->
         {ok, _Remaining} ->
             list_invites_impl(DbRef, InviterFp, State);
         {error, rate_limited, RetryAfter} ->
-            ?LOG_WARNING(
+            ?warning(
                 "Rate limit exceeded for invite_list ~s, retry after ~p seconds",
                 [InviterFp, RetryAfter]
             ),
@@ -334,7 +334,7 @@ handle_invite_revoke(
         {ok, _Remaining} ->
             revoke_invite_impl(DbRef, InviteId, State);
         {error, rate_limited, RetryAfter} ->
-            ?LOG_WARNING(
+            ?warning(
                 "Rate limit exceeded for invite_revoke ~s, retry after ~p seconds",
                 [GpgFp, RetryAfter]
             ),
@@ -396,7 +396,7 @@ revoke_invite_impl(DbRef, InviteId, State) ->
 handle_gpg_register_bootstrap(
     #{<<"gpg_pub">> := GpgPub}, #state{db_ref = DbRef} = State
 ) ->
-    ?LOG_INFO("Bootstrap GPG registration request"),
+    ?info("Bootstrap GPG registration request", []),
 
     %% Validate and extract GPG public key
     case cryptic_ca_gpg:extract_public_key(GpgPub) of
@@ -418,7 +418,7 @@ handle_gpg_register_bootstrap(
                                 registered_at => Now
                             }),
 
-                            ?LOG_INFO(
+                            ?info(
                                 "GPG bootstrap registration successful: ~s", [
                                     GpgFp
                                 ]
@@ -431,7 +431,7 @@ handle_gpg_register_bootstrap(
                             },
                             {reply, {text, Response}, NewState};
                         {error, Reason} ->
-                            ?LOG_ERROR("GPG registration failed: ~p", [Reason]),
+                            ?error("GPG registration failed: ~p", [Reason]),
                             ErrorResp = jsx:encode(#{
                                 error => <<"registration_failed">>,
                                 message => iolist_to_binary(

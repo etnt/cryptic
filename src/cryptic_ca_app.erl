@@ -13,7 +13,7 @@
 -export([start/2, stop/1]).
 -export([init_ca/0, get_ca_db/0]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 
 %%====================================================================
 %% Application Callbacks
@@ -27,15 +27,15 @@
 %% @param StartArgs Start arguments
 %% @returns {ok, Pid} | {error, Reason}
 start(_StartType, _StartArgs) ->
-    ?LOG_INFO("Starting Cryptic CA application"),
+    ?info("Starting Cryptic CA application", []),
 
     %% Initialize CA database
     case init_ca() of
         {ok, DbRef} ->
-            ?LOG_INFO("CA database initialized: ~p", [DbRef]),
+            ?info("CA database initialized: ~p", [DbRef]),
             {ok, self()};
         {error, Reason} ->
-            ?LOG_ERROR("Failed to initialize CA database: ~p", [Reason]),
+            ?error("Failed to initialize CA database: ~p", [Reason]),
             {error, Reason}
     end.
 
@@ -46,14 +46,14 @@ start(_StartType, _StartArgs) ->
 %% @param State Application state
 %% @returns ok
 stop(_State) ->
-    ?LOG_INFO("Stopping Cryptic CA application"),
+    ?info("Stopping Cryptic CA application", []),
 
     %% Close CA database if open
     case application:get_env(cryptic, ca_db_ref) of
         {ok, DbRef} ->
             cryptic_ca_store:close(DbRef),
             application:unset_env(cryptic, ca_db_ref),
-            ?LOG_INFO("CA database closed");
+            ?info("CA database closed", []);
         undefined ->
             ok
     end,
@@ -87,7 +87,7 @@ init_ca() ->
     %% Get database file path from config
     DbFile = get_ca_db_file(),
 
-    ?LOG_INFO("Initializing CA database: ~s", [DbFile]),
+    ?info("Initializing CA database: ~s", [DbFile]),
 
     %% Ensure directory exists
     DbDir = filename:dirname(DbFile),
@@ -95,7 +95,7 @@ init_ca() ->
         ok ->
             ok;
         {error, Reason} ->
-            ?LOG_ERROR("Failed to create CA database directory ~s: ~p", [
+            ?error("Failed to create CA database directory ~s: ~p", [
                 DbDir, Reason
             ]),
             throw({error, {db_dir_creation_failed, Reason}})
@@ -108,7 +108,7 @@ init_ca() ->
             application:set_env(cryptic, ca_db_ref, DbRef),
             {ok, DbRef};
         {error, InitReason} ->
-            ?LOG_ERROR("Failed to initialize CA database: ~p", [InitReason]),
+            ?error("Failed to initialize CA database: ~p", [InitReason]),
             {error, InitReason}
     end.
 

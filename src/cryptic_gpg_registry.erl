@@ -22,7 +22,7 @@
     update_last_seen/2
 ]).
 
--include_lib("kernel/include/logger.hrl").
+-include("cryptic_server.hrl").
 
 -type db_ref() :: pid().
 -type gpg_fingerprint() :: binary().
@@ -86,7 +86,7 @@ register_gpg_identity(DbRef, GpgFp, GpgPubArmor, InviterFp, InviteId) ->
 
     case cryptic_ca_store:insert_gpg_identity(DbRef, Identity) of
         ok ->
-            ?LOG_INFO("Registered GPG identity ~s via invite ~s", [
+            ?info("Registered GPG identity ~s via invite ~s", [
                 GpgFp, InviteId
             ]),
 
@@ -104,7 +104,7 @@ register_gpg_identity(DbRef, GpgFp, GpgPubArmor, InviterFp, InviteId) ->
             cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
             ok;
         {error, RegistrationReason} = RegistrationError ->
-            ?LOG_ERROR("Failed to register GPG identity ~s: ~p", [
+            ?error("Failed to register GPG identity ~s: ~p", [
                 GpgFp, RegistrationReason
             ]),
             RegistrationError
@@ -163,7 +163,7 @@ register_bootstrap_identity(DbRef, GpgFp, GpgPubArmor) ->
 
     case cryptic_ca_store:insert_gpg_identity(DbRef, Identity) of
         ok ->
-            ?LOG_INFO("Registered bootstrap GPG identity ~s", [GpgFp]),
+            ?info("Registered bootstrap GPG identity ~s", [GpgFp]),
 
             %% Log audit trail
             AuditLog = #audit_log{
@@ -179,7 +179,7 @@ register_bootstrap_identity(DbRef, GpgFp, GpgPubArmor) ->
             cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
             ok;
         {error, BootstrapReason} = BootstrapError ->
-            ?LOG_ERROR(
+            ?error(
                 "Failed to register bootstrap GPG identity ~s: ~p",
                 [GpgFp, BootstrapReason]
             ),
@@ -405,7 +405,7 @@ revoke_identity(DbRef, GpgFp) ->
                 <<"UPDATE gpg_identities SET status = 'revoked' WHERE gpg_fp = ?">>,
             case esqlite3:q(DbRef, Sql, [GpgFp]) of
                 [] ->
-                    ?LOG_INFO("Revoked GPG identity ~s", [GpgFp]),
+                    ?info("Revoked GPG identity ~s", [GpgFp]),
 
                     %% Log audit trail
                     Now = erlang:system_time(second),
@@ -423,7 +423,7 @@ revoke_identity(DbRef, GpgFp) ->
                     cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
                     ok;
                 {error, RevokeReason} = RevokeError ->
-                    ?LOG_ERROR(
+                    ?error(
                         "Failed to revoke GPG identity ~s: ~p",
                         [GpgFp, RevokeReason]
                     ),
