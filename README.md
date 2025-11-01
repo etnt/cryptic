@@ -23,13 +23,16 @@ demonstrating modern cryptographic protocols for secure message exchange.
 * Implements the [X3DH](https://signal.org/docs/specifications/x3dh/) and
   the [Double-Ratchet](https://signal.org/docs/specifications/doubleratchet/)
   cryptographic protocols.
+* Admin-mediated GPG-based onboarding where users prove ownership with
+  GPG-signed CSRs to get certificates.
 
 **Cryptic** consists of:
 
 * A server that route messages between users, and holds on to encrypted messages
   until they can be delivered to the receiver.
-* A terminal client.
-* A NCurses terminal UI.
+* A terminal console client.
+* Local Sqlite3 database that stores historic messages (encrypted).
+* A wizard script to facilitate onboarding of new users.
 * Modular structure to make the core engines (X3DH & Double-Ratchet) available
   to be used in other contexts/applications.
 

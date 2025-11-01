@@ -120,6 +120,7 @@
     username,
     server_host,
     server_port = 8443,
+    ws_path = "/ws",  % WebSocket endpoint path: "/ws" for chat, "/ca/ws" for admin
     conn_pid,
     stream_ref,
     cert_file,
@@ -765,7 +766,8 @@ connect_websocket(State) ->
                         "TLS connection established, upgrading to WebSocket~n",
                         []
                     ),
-                    StreamRef = gun:ws_upgrade(ConnPid, "/ws"),
+                    %% Connect to WebSocket endpoint (configurable: /ws for chat, /ca/ws for admin)
+                    StreamRef = gun:ws_upgrade(ConnPid, State#state.ws_path),
                     NewState = State#state{
                         conn_pid = ConnPid,
                         stream_ref = StreamRef
@@ -792,15 +794,54 @@ connect_websocket(State) ->
 %% @param State Current client state
 %% @returns `{noreply, State}'
 dispatch_to_engine(ValidatedMessage, State) ->
-    case State#state.engine_pid of
-        undefined ->
-            ?warning("No Engine PID set, cannot dispatch message: ~p~n", [
-                ValidatedMessage
-            ]);
-        EnginePid ->
-            ?dbg("Dispatching message to Engine: ~p~n", [ValidatedMessage]),
-            %% Send the validated message to the Engine using standardized format
-            EnginePid ! {websocket_message, ValidatedMessage}
+    MessageType = maps:get(<<"type">>, ValidatedMessage, undefined),
+    
+    %% CA response messages should go to the console (ui_pid), not the engine
+    %% The engine handles chat/ratchet messages, console handles CA operations
+    IsCAResponse = case MessageType of
+        %% Legacy invite responses
+        <<"invite_create_response">> -> true;
+        <<"invite_list_response">> -> true;
+        <<"invite_revoke_response">> -> true;
+        <<"invite_show_response">> -> true;
+        %% Admin user management responses
+        <<"register_user_response">> -> true;
+        <<"list_users_response">> -> true;
+        <<"get_user_info_response">> -> true;
+        <<"suspend_user_response">> -> true;
+        <<"revoke_user_response">> -> true;
+        <<"reactivate_user_response">> -> true;
+        %% Certificate management responses
+        <<"list_certificates_response">> -> true;
+        <<"revoke_certificate_response">> -> true;
+        <<"csr_response">> -> true;
+        _ -> false
+    end,
+    
+    case IsCAResponse of
+        true ->
+            %% Send CA responses to console (ui_pid)
+            case State#state.ui_pid of
+                undefined ->
+                    ?warning("No UI PID set, cannot dispatch CA message: ~p~n", [
+                        ValidatedMessage
+                    ]);
+                UIPid ->
+                    ?dbg("Dispatching CA response to Console: ~p~n", [ValidatedMessage]),
+                    UIPid ! {ca_response, ValidatedMessage}
+            end;
+        false ->
+            %% Send chat/engine messages to engine
+            case State#state.engine_pid of
+                undefined ->
+                    ?warning("No Engine PID set, cannot dispatch message: ~p~n", [
+                        ValidatedMessage
+                    ]);
+                EnginePid ->
+                    ?dbg("Dispatching message to Engine: ~p~n", [ValidatedMessage]),
+                    %% Send the validated message to the Engine using standardized format
+                    EnginePid ! {websocket_message, ValidatedMessage}
+            end
     end,
     {noreply, State}.
 

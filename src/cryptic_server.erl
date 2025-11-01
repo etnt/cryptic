@@ -278,6 +278,8 @@
 ]).
 
 -include("cryptic_server.hrl").
+-include("cryptic_ca.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 -define(SERVER, ?MODULE).
 
@@ -321,14 +323,8 @@ init([]) ->
 %% @param CfgMap Current configuration map
 %% @returns {noreply, State, {continue, continue}} to proceed with startup
 handle_continue(start_server, CfgMap) ->
-    %% Setup event handlers for Cryptic events with server configuration
-    cryptic_event_manager:setup_event_handlers(#{
-        log_type => server,
-        log_dir => "logs"
-    }),
-    %% Allow time for event manager setup
-    sleep(10),
-
+    %% Event handlers are already set up by cryptic_ca_init
+    %% No need to set up again here
     continue(CfgMap).
 
 %% @doc Internal sleep function
@@ -384,7 +380,6 @@ continue(CfgMap) ->
                     {ok, Port} -> Port;
                     undefined -> 8443
                 end,
-            ?info("Starting WebSocket mTLS server on port ~p~n", [WSPort]),
             start_websocket_mtls(#{port => WSPort});
         false ->
             ?info("WebSocket mTLS server disabled~n", [])
@@ -600,6 +595,9 @@ start_websocket_mtls(Config) ->
             {"/ca/ws", cryptic_ca_ws_handler, []},
 
             %% CA REST API for public operations
+            {"/ca/v1/ca-cert", cryptic_ca_rest_handler, #{
+                operation => ca_cert
+            }},
             {"/ca/v1/register-gpg", cryptic_ca_rest_handler, #{
                 operation => register_gpg
             }},
@@ -614,9 +612,13 @@ start_websocket_mtls(Config) ->
     ]),
 
     %% TLS options with client certificate verification
+    %% Note: We use verify_peer but set fail_if_no_peer_cert to false to allow
+    %% public CA endpoints (/ca/v1/csr) to work without mTLS for initial cert requests.
+    %% Protected endpoints (WebSocket) will verify certificates in their handlers.
     TLSOptions = [
         {verify, verify_peer},
-        {fail_if_no_peer_cert, true},
+        {verify_fun, {fun verify_peer/4, []}},
+        {fail_if_no_peer_cert, false},  % Allow connections without client certs for /ca/v1/csr
         {log_level, info},
         {versions, ['tlsv1.2']},
         {cacertfile, CACertFile},
@@ -647,3 +649,166 @@ start_websocket_mtls(Config) ->
 
     ?info("Cryptic WebSocket server with mTLS started on port ~p~n", [Port]),
     {ok, started}.
+
+
+verify_peer(_OtpCert, _DerCert, {bad_cert, _} = Reason, _UserState) ->
+    ?debug("VERIFY_PEER: bad_cert - ~p", [Reason]),
+    {fail, Reason};
+
+verify_peer(_OtpCert, _DerCert, {extension, Extension}, UserState) ->
+    %% Check if this is the Subject Alternative Name extension with GPG fingerprint
+    case Extension of
+        {'Extension', {2,5,29,17}, _Critical, SANValues} ->
+            %% This is a SAN extension, check for GPG fingerprint
+            case extract_gpg_from_san(SANValues) of
+                {ok, GpgFp} ->
+                    ?debug("VERIFY_PEER: Found GPG fingerprint in SAN: ~s", [GpgFp]),
+                    %% Verify the GPG fingerprint is registered and certificate is valid
+                    case verify_gpg_and_cert(GpgFp, _OtpCert) of
+                        {ok, active} ->
+                            ?debug("VERIFY_PEER: GPG fingerprint ~s is registered with active cert", [GpgFp]),
+                            {valid, UserState};
+                        {error, unregistered} ->
+                            ?warning("VERIFY_PEER: GPG fingerprint ~s is NOT registered - rejecting", [GpgFp]),
+                            {fail, {bad_cert, unregistered_gpg_fingerprint}};
+                        {error, suspended} ->
+                            ?warning("VERIFY_PEER: User ~s is suspended - rejecting", [GpgFp]),
+                            {fail, {bad_cert, user_suspended}};
+                        {error, revoked} ->
+                            ?warning("VERIFY_PEER: User ~s is revoked - rejecting", [GpgFp]),
+                            {fail, {bad_cert, user_revoked}};
+                        {error, cert_revoked} ->
+                            ?warning("VERIFY_PEER: Certificate for ~s is revoked - rejecting", [GpgFp]),
+                            {fail, {bad_cert, certificate_revoked}};
+                        {error, cert_expired} ->
+                            ?warning("VERIFY_PEER: Certificate for ~s is expired - rejecting", [GpgFp]),
+                            {fail, {bad_cert, certificate_expired}};
+                        {error, Reason} ->
+                            ?error("VERIFY_PEER: Error verifying GPG fingerprint ~s: ~p", [GpgFp, Reason]),
+                            %% On error, reject to be safe
+                            {fail, {bad_cert, gpg_verification_error}}
+                    end;
+                {error, _Reason} ->
+                    ?debug("VERIFY_PEER: No GPG fingerprint in SAN extension", []),
+                    {unknown, UserState}
+            end;
+        _OtherExtension ->
+            ?debug("VERIFY_PEER: Unknown extension - ~p", [Extension]),
+            {unknown, UserState}
+    end;
+
+verify_peer(_OtpCert, _DerCert, valid = Reason, UserState) ->
+    ?debug("VERIFY_PEER: valid - ~p", [Reason]),
+    {valid, UserState};
+
+verify_peer(_OtpCert, _DerCert, valid_peer = Reason, UserState) ->
+    ?debug("VERIFY_PEER: valid_peer - ~p", [Reason]),
+    {valid, UserState};
+
+verify_peer(_OtpCert, _DerCert, Reason, UserState) ->
+    ?debug("VERIFY_PEER: Unknown reason - ~p", [Reason]),
+    {unknown, UserState}.
+
+%% @doc Extract GPG fingerprint from Subject Alternative Name values
+-spec extract_gpg_from_san(list()) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_san(SANValues) ->
+    %% Look for DNS name matching pattern: <fingerprint>.gpg.cryptic.local
+    case lists:foldl(
+        fun
+            ({dNSName, DNSName}, Acc) ->
+                case binary:split(list_to_binary(DNSName), <<".">>) of
+                    [GpgFp, <<"gpg">>, <<"cryptic">>, <<"local">>] 
+                        when byte_size(GpgFp) =:= 40 ->
+                        %% Found it! GPG fingerprint is 40 hex characters
+                        {ok, GpgFp};
+                    _ ->
+                        Acc
+                end;
+            (_, Acc) ->
+                Acc
+        end,
+        {error, not_found},
+        SANValues
+    ) of
+        {ok, _} = Result -> Result;
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Verify GPG fingerprint is registered and certificate is valid.
+%%
+%% Checks both user status and certificate status:
+%% - User must be 'active' (not suspended/revoked)
+%% - Certificate must be 'active' (not expired/revoked)
+-spec verify_gpg_and_cert(binary(), term()) -> 
+    {ok, active} | {error, unregistered | suspended | revoked | cert_revoked | cert_expired | term()}.
+verify_gpg_and_cert(GpgFp, OtpCert) ->
+    try
+        %% Look up the database reference from the ETS table
+        case ets:lookup(cryptic_ca_storage, db_ref) of
+            [{db_ref, DbRef}] ->
+                %% Step 1: Check if the GPG fingerprint is registered
+                case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+                    {ok, Identity} ->
+                        %% Step 2: Check user status
+                        case Identity#gpg_identity.status of
+                            <<"active">> ->
+                                %% Step 3: Extract serial from certificate and check cert status
+                                Serial = extract_serial_from_otp_cert(OtpCert),
+                                case cryptic_ca_store:get_certificate(DbRef, Serial) of
+                                    {ok, Cert} ->
+                                        %% Check certificate status
+                                        case Cert#certificate.status of
+                                            <<"active">> ->
+                                                {ok, active};
+                                            <<"revoked">> ->
+                                                {error, cert_revoked};
+                                            <<"expired">> ->
+                                                {error, cert_expired};
+                                            _Other ->
+                                                {error, {unknown_cert_status, _Other}}
+                                        end;
+                                    {error, not_found} ->
+                                        %% Certificate not in database - this shouldn't happen
+                                        %% but we'll allow it for backward compatibility
+                                        ?warning("Certificate ~s not found in database for user ~s", 
+                                                [Serial, GpgFp]),
+                                        {ok, active};
+                                    {error, CertError} ->
+                                        {error, {cert_lookup_failed, CertError}}
+                                end;
+                            <<"suspended">> ->
+                                {error, suspended};
+                            <<"revoked">> ->
+                                {error, revoked};
+                            _Other ->
+                                {error, {unknown_status, _Other}}
+                        end;
+                    {error, not_found} -> 
+                        {error, unregistered};
+                    {error, _Reason} = Error ->
+                        Error
+                end;
+            [] ->
+                %% ETS table not found or empty - CA not initialized yet
+                {error, ca_not_initialized}
+        end
+    catch
+        error:badarg ->
+            %% ETS table doesn't exist
+            {error, ca_storage_not_available};
+        ErrorClass:ErrorReason ->
+            {error, {ErrorClass, ErrorReason}}
+    end.
+
+%% @doc Extract serial number from OTP certificate structure.
+-spec extract_serial_from_otp_cert(term()) -> binary().
+extract_serial_from_otp_cert(OtpCert) ->
+    try
+        TbsCert = OtpCert#'OTPCertificate'.tbsCertificate,
+        Serial = TbsCert#'OTPTBSCertificate'.serialNumber,
+        integer_to_binary(Serial, 16)
+    catch
+        _:Error ->
+            ?error("Failed to extract serial from OTP cert: ~p", [Error]),
+            <<"unknown">>
+    end.

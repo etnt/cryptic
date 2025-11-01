@@ -535,38 +535,496 @@ SignedCert = public_key:pkix_sign(Cert, CAKey)  % PRODUCTION SAFE
 
 ### Phase 4: Client Tools & UX (Week 4-5)
 
-**Objective**: Build cryptic_console integration for invite management
+**Objective**: Build client tooling for onboarding and certificate management
+
+**Key Design Decision**: Split tooling based on authentication state:
+- **Pre-authentication** (no cert yet): External bash script for registration and initial cert request
+- **Post-authentication** (has cert): Console commands within `cryptic_console` for management
+
+#### Tool Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Client-Side Tooling                                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  External Script (cryptic-onboard)                                  │
+│  ├─ register <invite_file>      # POST /ca/v1/register-gpg          │
+│  ├─ request                      # POST /ca/v1/csr                  │
+│  └─ info <cert_file>             # Display cert details (OpenSSL)   │
+│                                                                     │
+│  Console Commands (cryptic_console) - requires mTLS                 │
+│  ├─ invite create                # WebSocket to server              │
+│  ├─ invite list                  # WebSocket to server              │
+│  ├─ invite show <id>             # WebSocket to server              │
+│  ├─ invite revoke <id>           # WebSocket to server              │
+│  ├─ cert status                  # Check local cert + query server  │
+│  └─ cert renew                   # Request new cert via WebSocket   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1. External Onboarding Script (`bin/cryptic-onboard`)
+
+This bash script handles the initial registration and certificate request workflow for **new users who don't have certificates yet**.
+
+**Why bash script?**
+- ✅ No mTLS required (uses public REST API)
+- ✅ Simple dependency (just `curl`, `openssl`, `gpg`)
+- ✅ Can be run before cryptic_console access
+- ✅ Easy to share and audit
+- ✅ Works on any Unix-like system
+
+##### Script Commands
+
+**`cryptic-onboard register <invite_file>`** - Register GPG key with CA
+
+```bash
+#!/bin/bash
+# Usage: cryptic-onboard register ~/Downloads/alice-invite.txt
+
+# 1. Read invite token from file
+INVITE_TOKEN=$(cat "$1")
+
+# 2. Export GPG public key (auto-detect or prompt)
+GPG_KEY_EMAIL="bob@example.com"  # From user or GPG default
+GPG_PUBKEY=$(gpg --armor --export "$GPG_KEY_EMAIL")
+
+# 3. Call REST API
+curl -X POST https://ca.cryptic.example.org/ca/v1/register-gpg \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"invite_token\": \"$INVITE_TOKEN\",
+    \"gpg_pub\": \"$GPG_PUBKEY\"
+  }"
+
+# 4. Save GPG fingerprint to ~/.cryptic/config.json
+# Output: "✓ Registration successful! GPG FP: ABC123..."
+```
+
+**Output**:
+```bash
+$ cryptic-onboard register alice-invite.txt
+
+Cryptic Registration
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[1/3] Reading invite token...                               ✓
+[2/3] Exporting GPG public key (bob@example.com)...         ✓
+[3/3] Submitting to CA...                                   ✓
+
+✓ Registration successful!
+
+GPG Fingerprint: ABC123DEF456...
+Status:          verified_via_invite
+Registered:      2025-11-01 16:00:00 UTC
+
+Configuration saved to ~/.cryptic/config.json
+
+Next step: Request your first certificate
+  cryptic-onboard request
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**`cryptic-onboard request <username> [server_url]`** - Request TLS certificate
+
+```bash
+#!/bin/bash
+# Usage: cryptic-onboard request alice
+#        cryptic-onboard request alice wss://relay.cryptic.example.org:8443
+
+USERNAME="$1"
+if [ -z "$USERNAME" ]; then
+    echo "Error: Username required"
+    echo "Usage: cryptic-onboard request <username> [server_url]"
+    exit 1
+fi
+
+# Parse server URL to extract host and port
+CA_URL="${2:-wss://relay.cryptic.example.org:8443}"
+SERVER_HOST=$(echo "$CA_URL" | sed -E 's|^wss?://([^:/]+).*|\1|')
+SERVER_PORT=$(echo "$CA_URL" | sed -E 's|^wss?://[^:]+:([0-9]+).*|\1|')
+SERVER_PORT="${SERVER_PORT:-8443}"  # Default to 8443 if not specified
+
+# Create user and server-specific directory structure
+CERT_DIR="${HOME}/.cryptic/${USERNAME}/${SERVER_HOST}_${SERVER_PORT}"
+CERT_SUBDIR="${CERT_DIR}/certificates"
+KEY_SUBDIR="${CERT_DIR}/private"
+mkdir -p "$CERT_SUBDIR" "$KEY_SUBDIR"
+
+GPG_FP=$(jq -r '.gpg_fingerprint' ~/.cryptic/config.json)
+
+# 1. Generate TLS key pair (or reuse existing)
+KEY_FILE="${KEY_SUBDIR}/client.key"
+if [ ! -f "$KEY_FILE" ]; then
+    openssl ecparam -genkey -name secp384r1 -out "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+fi
+
+# 2. Create CSR
+CSR_FILE="${CERT_DIR}/client.csr"
+openssl req -new -key "$KEY_FILE" \
+  -subj "/CN=${GPG_FP}@${SERVER_HOST}" \
+  -out "$CSR_FILE"
+
+# 3. Sign CSR with GPG key
+CSR_DATA=$(cat "$CSR_FILE")
+GPG_SIG=$(echo "$CSR_DATA" | gpg --armor --detach-sign)
+
+# 4. Submit to CA (convert wss:// to https:// for REST API)
+CA_REST_URL="https://${SERVER_HOST}:${SERVER_PORT}"
+CERT_FILE="${CERT_SUBDIR}/client.pem"
+
+curl -X POST "${CA_REST_URL}/ca/v1/csr" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"csr_pem\": \"$CSR_DATA\",
+    \"gpg_fp\": \"$GPG_FP\",
+    \"gpg_sig_b64\": \"$(echo "$GPG_SIG" | base64)\"
+  }" | jq -r '.cert_pem' > "$CERT_FILE"
+
+# 5. Display success
+echo "✓ Certificate issued! Saved to ${CERT_FILE}"
+echo "  Private key: ${KEY_FILE}"
+```
+
+**Output**:
+```bash
+$ cryptic-onboard request bob wss://relay.cryptic.example.org:8443
+
+Certificate Request
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[1/4] Generating TLS key pair (ECDSA secp384r1)...          ✓
+[2/4] Creating Certificate Signing Request (CSR)...         ✓
+[3/4] Signing CSR with GPG key (bob@example.com)...         ✓
+      [GPG password prompt]
+[4/4] Submitting to CA...                                   ✓
+
+✓ Certificate issued successfully!
+
+Certificate Details:
+  Serial:    1234567890
+  Subject:   CN=ABC123DEF456@relay.cryptic.example.org
+  Issuer:    CN=Cryptic CA
+  Valid:     2025-11-01 16:15:00 → 2025-11-08 16:15:00 (7 days)
+  
+  Files:
+    Certificate: ~/.cryptic/bob/relay.cryptic.example.org_8443/certificates/client.pem
+    Private Key: ~/.cryptic/bob/relay.cryptic.example.org_8443/private/client.key
+
+Directory structure:
+  ~/.cryptic/bob/relay.cryptic.example.org_8443/
+    ├── certificates/
+    │   └── client.pem
+    └── private/
+        └── client.key
+
+You can now connect to Cryptic using the console:
+  cryptic-console --cert ~/.cryptic/bob/relay.cryptic.example.org_8443/certificates/client.pem \
+                  --key ~/.cryptic/bob/relay.cryptic.example.org_8443/private/client.key \
+                  connect wss://relay.cryptic.example.org:8443
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**`cryptic-onboard info [username] [cert_file|server_url]`** - Display certificate information
+
+```bash
+#!/bin/bash
+# Usage: cryptic-onboard info alice [cert_file]
+#        cryptic-onboard info alice wss://relay.cryptic.example.org:8443
+#        cryptic-onboard info alice    # List all certs for alice
+#        cryptic-onboard info           # List all users and their certs
+# Uses OpenSSL to display certificate details
+
+USERNAME="$1"
+
+if [ -z "$USERNAME" ]; then
+    # No username: list all users
+    echo "Available users:"
+    find ~/.cryptic -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read user_dir; do
+        username=$(basename "$user_dir")
+        echo "  $username"
+        find "$user_dir" -name "client.pem" -type f 2>/dev/null | while read cert; do
+            server_dir=$(dirname $(dirname "$cert"))
+            server_name=$(basename "$server_dir")
+            echo "    └─ $server_name"
+        done
+    done
+    exit 0
+fi
+
+if [ -f "$2" ]; then
+    # Second argument is a file path
+    CERT_FILE="$2"
+elif [ -n "$2" ]; then
+    # Second argument is a server URL, extract host:port
+    SERVER_HOST=$(echo "$2" | sed -E 's|^wss?://([^:/]+).*|\1|')
+    SERVER_PORT=$(echo "$2" | sed -E 's|^wss?://[^:]+:([0-9]+).*|\1|')
+    SERVER_PORT="${SERVER_PORT:-8443}"
+    CERT_FILE="${HOME}/.cryptic/${USERNAME}/${SERVER_HOST}_${SERVER_PORT}/certificates/client.pem"
+else
+    # No second argument: list all certs for this user
+    echo "Available certificates for $USERNAME:"
+    find ~/.cryptic/$USERNAME -name "client.pem" -type f 2>/dev/null | while read cert; do
+        server_dir=$(dirname $(dirname "$cert"))
+        server_name=$(basename "$server_dir")
+        echo "  $server_name"
+    done
+    exit 0
+fi
+
+if [ ! -f "$CERT_FILE" ]; then
+    echo "Error: Certificate not found: $CERT_FILE"
+    exit 1
+fi
+
+openssl x509 -in "$CERT_FILE" -noout -text -subject -issuer -dates -serial | \
+  awk '...'  # Format nicely
+```
+
+**Output**:
+```bash
+# Show certificate for specific user and server
+$ cryptic-onboard info bob wss://relay.cryptic.example.org:8443
+
+Certificate Information
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+User:             bob
+Server:           relay.cryptic.example.org:8443
+Subject:          CN=ABC123DEF456@relay.cryptic.example.org
+Issuer:           CN=Cryptic CA
+Serial:           1234567890
+
+Validity:
+  Not Before:     2025-11-01 16:15:00 UTC
+  Not After:      2025-11-08 16:15:00 UTC
+  Remaining:      6d 23h 45m
+
+Public Key:
+  Algorithm:      ECDSA
+  Curve:          secp384r1 (P-384)
+  Size:           384 bits
+
+Files:
+  Certificate:    ~/.cryptic/bob/relay.cryptic.example.org_8443/certificates/client.pem
+  Private Key:    ~/.cryptic/bob/relay.cryptic.example.org_8443/private/client.key
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# List all certificates for a user
+$ cryptic-onboard info bob
+
+Available certificates for bob:
+  relay.cryptic.example.org_8443
+  backup.cryptic.example.org_9443
+  federated.example.com_8443
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# List all users and their certificates
+$ cryptic-onboard info
+
+Available users:
+  alice
+    └─ relay.cryptic.example.org_8443
+    └─ backup.cryptic.example.org_9443
+  bob
+    └─ relay.cryptic.example.org_8443
+    └─ federated.example.com_8443
+  charlie
+    └─ relay.cryptic.example.org_8443
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+#### 2. Console Commands (cryptic_console) - Authenticated Users
+
+These commands are for **users who already have valid certificates** and can connect to the server via mTLS.
+
+##### Invite Commands (Inviter Workflow)
+
+**`invite create [OPTIONS]`** - Create invitation token (via WebSocket)
+
+```erlang
+% Console command in cryptic_console (authenticated via mTLS)
+cryptic> invite create --expires 24h --note "Welcome Bob"
+```
+
+**Implementation**: Sends WebSocket message to server, displays GPG-signed token
+
+**`invite list [OPTIONS]`** - List your invitations
+
+```erlang
+cryptic> invite list
+cryptic> invite list --status active
+```
+
+**`invite show <invite_id>`** - Show invite details
+
+```erlang
+cryptic> invite show inv-8f3b12a4
+```
+
+**`invite revoke <invite_id>`** - Revoke unused invitation
+
+```erlang
+cryptic> invite revoke inv-8f3b12a4
+```
+
+##### Certificate Commands (Certificate Management)
+
+**`cert status`** - Check current certificate status
+
+```erlang
+% Shows local cert info + queries server for status
+cryptic> cert status
+```
+
+**Output**:
+```
+Certificate Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Status:        Valid ✓
+Serial:        1234567890
+Expires:       2025-11-08 16:15:00 UTC (6d 8h remaining)
+Auto-renewal:  Enabled (scheduled in 3d 4h)
+
+GPG Identity:
+  Fingerprint: ABC123DEF456...
+  Status:      verified_via_invite
+  Email:       bob@example.com
+
+Local Files:
+  Certificate: ~/.cryptic/certs/client-cert.pem
+  Private Key: ~/.cryptic/certs/client-key.pem
+  
+⚠️  Certificate expires in 6 days. Auto-renewal scheduled.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**`cert renew [OPTIONS]`** - Manually renew certificate
+
+```erlang
+% Request new cert via WebSocket (authenticated connection)
+cryptic> cert renew
+cryptic> cert renew --force        % Renew even if not close to expiry
+cryptic> cert renew --new-key      % Generate new TLS key (re-key)
+```
+
+**Implementation**:
+1. Generate new CSR (reuse existing key or generate new one)
+2. Sign CSR with GPG key (local operation)
+3. Send renewal request via WebSocket to server
+4. Server issues new certificate
+5. Save new certificate locally
+6. Update auto-renewal schedule
+
+**Output**:
+```
+Certificate Renewal
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[1/4] Creating new CSR (reusing existing key)...            ✓
+[2/4] Signing CSR with GPG key...                           ✓
+      [GPG password prompt]
+[3/4] Requesting new certificate from server...             ✓
+[4/4] Updating local certificate...                         ✓
+
+✓ Certificate renewed successfully!
+
+Old expiry: 2025-11-08 16:15:00 UTC
+New expiry: 2025-11-15 16:15:00 UTC (7 days from now)
+Serial:     1234567891
+
+Next auto-renewal scheduled in 3.5 days.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
 
 #### Tasks
 
-1. **Console Commands** (cryptic_console integration)
-   ```erlang
-   :invite create --expires 24h
-   :invite list
-   :invite revoke <invite_id>
-   :cert request
-   :cert status
-   :cert renew
-   ```
-   - [ ] WebSocket message construction for console commands
-   - [ ] GPG integration for CSR signing
-   - [ ] Auto-renewal daemon (checks at 50% cert lifetime)
-   - [ ] TLS client certificate management
+1. **External Onboarding Script** (`bin/cryptic-onboard`)
+   - [ ] `register <invite_file>` - Call POST /ca/v1/register-gpg
+   - [ ] `request` - Generate TLS key, create CSR, sign with GPG, call POST /ca/v1/csr
+   - [ ] `info [cert_file]` - Display certificate information using OpenSSL
+   - [ ] Bash script with `curl`, `openssl`, `gpg` dependencies
+   - [ ] Configuration file support (`~/.cryptic/config.json`)
+   - [ ] Error handling and user-friendly output
 
-2. **Client Library** (for programmatic use)
+2. **Console Commands Implementation** (cryptic_console - requires mTLS)
+   - [ ] `invite create` - WebSocket message construction, display GPG-signed token
+   - [ ] `invite list` - WebSocket query, formatted output
+   - [ ] `invite show` - Detailed invite display
+   - [ ] `invite revoke` - WebSocket revocation request
+   - [ ] `cert status` - Local certificate inspection + server query
+   - [ ] `cert renew` - Generate CSR, sign with GPG, WebSocket renewal request
+
+3. **Client Library** (Erlang - for console commands)
    ```erlang
    cryptic_ca_client.erl     % Client-side helper functions
    ```
-   - [ ] GPG key export/import helpers
-   - [ ] CSR generation and signing
-   - [ ] Automatic certificate renewal logic
-   - [ ] Certificate status checking
+   - [ ] GPG signature creation (`sign_with_gpg/2`)
+   - [ ] CSR generation (`generate_csr/2`)
+   - [ ] Certificate status checking (`get_cert_status/1`)
+   - [ ] Local certificate storage (`save_cert/2`, `load_cert/1`)
+   - [ ] Auto-renewal daemon logic (`check_renewal_needed/1`)
 
-3. **Documentation**
-   - [ ] User guide for onboarding
-   - [ ] Admin guide for CA operations
-   - [ ] API documentation
-   - [ ] Troubleshooting guide
+4. **WebSocket Protocol Extensions** (for console commands)
+   - [ ] `cert_renew` message type (authenticated via mTLS)
+   - [ ] `cert_status_query` message type
+   - [ ] Response handlers for renewal workflow
+
+5. **Auto-Renewal Daemon** (background process in cryptic_console)
+   - [ ] Monitor certificate expiry (check every hour)
+   - [ ] Trigger renewal at 50% lifetime (3.5 days for 7-day cert)
+   - [ ] Execute renewal workflow automatically
+   - [ ] Graceful handling of renewal failures (retry logic)
+   - [ ] Notify user of successful/failed renewals
+   - [ ] Configurable renewal threshold (default 50%)
+
+6. **Documentation**
+   - [ ] User guide: Complete onboarding walkthrough
+     * Alice creates invite in console
+     * Bob uses `cryptic-onboard` script for registration and cert request
+     * Bob connects to console with certificate
+   - [ ] Script README: Installation, usage, dependencies
+   - [ ] Command reference: All `invite` and `cert` commands with examples
+   - [ ] Admin guide: Bootstrap first user, CA operations
+   - [ ] Troubleshooting: Common issues (GPG not found, renewal failures, etc.)
+
+#### User Experience Flow
+
+**New User Onboarding (Bob)**:
+```bash
+# 1. Bob receives invite token from Alice (file: alice-invite.txt)
+
+# 2. Register with the CA
+bob$ cryptic-cli cert register alice-invite.txt
+✓ Registration successful! GPG fingerprint: ABC123...
+
+# 3. Request first certificate
+bob$ cryptic-cli cert request
+✓ Certificate issued! Valid for 7 days.
+
+# 4. Connect to Cryptic
+bob$ cryptic-cli connect wss://cryptic.example.org:8443
+✓ Connected via mTLS!
+
+# 5. Auto-renewal happens automatically in 3.5 days
+# (or manual: cryptic-cli cert renew)
+```
+
+**Existing User Inviting (Alice)**:
+```bash
+# 1. Create invite for Bob
+alice$ cryptic-cli invite create --note "Welcome Bob"
+✓ Invite created: inv-8f3b12a4
+
+# 2. Share token with Bob (copy from output, send via Signal/email)
+
+# 3. Monitor invite status
+alice$ cryptic-cli invite list
+inv-8f3b12a4    Active    ...
+
+# 4. Later: check if Bob used it
+alice$ cryptic-cli invite show inv-8f3b12a4
+Status: Consumed
+Consumed By: ABC123... (Bob's GPG FP)
+```
 
 #### Deliverables
 

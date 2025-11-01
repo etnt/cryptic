@@ -375,8 +375,8 @@ Alice (inviter)                  Bob (invitee)                    CA
       |                                |                           |
       | 1. Generate token.json         |                           |
       |    and sign with GPG           |                           |
-      |---------------------------------→                          |
-      |    Send token.json.asc          |                           |
+      |--------------------------------→                           |
+      |    Send token.json.asc         |                           |
       |                                |                           |
       |                                | 2. Prepare gpg_pub.asc    |
       |                                |    POST /register-gpg     |

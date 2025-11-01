@@ -13,7 +13,8 @@
     verify_signature/2,
     verify_detached_signature/3,
     compute_fingerprint/1,
-    extract_public_key/1
+    extract_public_key/1,
+    extract_email_from_key/1
 ]).
 
 -include("cryptic_server.hrl").
@@ -134,7 +135,7 @@ verify_signature(SignedData, PublicKey) ->
 verify_detached_signature(Data, DetachedSignature, PublicKey) ->
     try
         %% First import the public key temporarily
-        case erl_gpg_api:import(PublicKey, "") of
+        case erl_gpg_api:import_key(PublicKey, "") of
             {ok, _ImportResult} ->
                 %% Now verify the detached signature
                 case erl_gpg_api:verify_detached(Data, DetachedSignature, "") of
@@ -306,6 +307,118 @@ extract_public_key(KeyBlock) ->
             {error, {key_extraction_exception, ErrorReason}}
     end.
 
+%% @doc Extract email address from GPG public key user ID.
+%%
+%% Parses the GPG public key to extract the email address from the first
+%% user ID. GPG user IDs typically follow the format "Name &lt;email@example.com>".
+%%
+%% == Use Cases ==
+%% <ul>
+%%   <li>Extract email for certificate SAN extension</li>
+%%   <li>Map GPG fingerprints to human-readable usernames</li>
+%%   <li>Enable messaging between users by name</li>
+%% </ul>
+%%
+%% == Example ==
+%% ```
+%% %% Extract email during certificate issuance
+%% case cryptic_ca_gpg:extract_email_from_key(GpgPubKey) of
+%%     {ok, Email} ->
+%%         %% Use email in certificate SAN
+%%         build_client_cert(Subject, PubKey, GpgFp, Email, ValidityDays);
+%%     {error, no_email_found} ->
+%%         %% Fall back to GPG fingerprint only
+%%         build_client_cert(Subject, PubKey, GpgFp, undefined, ValidityDays)
+%% end.
+%% '''
+%%
+%% @param KeyBlock The GPG public key in ASCII-armored format
+%% @returns `{ok, Email}' where Email is a binary like &lt;&lt;"bob@smith.org">>,
+%%          or `{error, no_email_found}' if no valid email in user IDs
+-spec extract_email_from_key(binary()) -> {ok, binary()} | {error, term()}.
+extract_email_from_key(KeyBlock) ->
+    try
+        case erl_gpg_api:get_key_info(KeyBlock, "") of
+            {ok, KeyInfo} ->
+                ?debug("GPG key info: ~p", [KeyInfo]),
+                %% Extract user_ids from key info
+                UserIDs = maps:get(user_ids, KeyInfo, []),
+                ?debug("GPG user IDs: ~p", [UserIDs]),
+                case extract_email_from_uids(UserIDs) of
+                    {ok, Email} ->
+                        ?debug("Extracted email from GPG key: ~s", [Email]),
+                        {ok, Email};
+                    {error, _} = Error ->
+                        ?warning("No email found in GPG key user IDs: ~p", [UserIDs]),
+                        Error
+                end;
+            {error, Reason} = Error ->
+                ?error("Failed to get key info for email extraction: ~p", [Reason]),
+                Error
+        end
+    catch
+        ErrorType:ErrorReason:Stack ->
+            ?error(
+                "Exception during email extraction: ~p:~p~nStack: ~p",
+                [ErrorType, ErrorReason, Stack]
+            ),
+            {error, {email_extraction_exception, ErrorReason}}
+    end.
+
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+%% @private
+%% @doc Extract email address from GPG user ID list.
+%%
+%% Parses user IDs in the format "Name &lt;email@example.com>" or "email@example.com"
+%% and extracts the email address from the first user ID that contains one.
+%%
+%% @param UserIDs List of user ID binaries from GPG key
+%% @returns `{ok, Email}' or `{error, no_email_found}'
+-spec extract_email_from_uids([binary()]) -> {ok, binary()} | {error, no_email_found}.
+extract_email_from_uids([]) ->
+    {error, no_email_found};
+extract_email_from_uids([UID | Rest]) ->
+    case extract_email_from_uid(UID) of
+        {ok, Email} -> {ok, Email};
+        {error, _} -> extract_email_from_uids(Rest)
+    end.
+
+%% @private
+%% @doc Extract email from a single user ID string.
+%%
+%% Handles formats:
+%% - "Name &lt;email@example.com>" → "email@example.com"
+%% - "email@example.com" → "email@example.com"
+%% - "Name (comment) &lt;email@example.com>" → "email@example.com"
+%%
+%% @param UID User ID binary
+%% @returns `{ok, Email}' or `{error, no_email_found}'
+-spec extract_email_from_uid(binary()) -> {ok, binary()} | {error, no_email_found}.
+extract_email_from_uid(UID) when is_binary(UID) ->
+    %% Try to extract email from "<email>" format first
+    case binary:split(UID, [<<"<">>, <<">">>], [global]) of
+        [_, Email, _] ->
+            %% Found email between < and >
+            {ok, string:trim(Email)};
+        _ ->
+            %% No angle brackets, check if the whole UID is an email
+            case is_email(UID) of
+                true -> {ok, string:trim(UID)};
+                false -> {error, no_email_found}
+            end
+    end.
+
+%% @private
+%% @doc Simple email validation - checks for @ sign.
+%%
+%% @param Binary Potential email address
+%% @returns true if looks like an email, false otherwise
+-spec is_email(binary()) -> boolean().
+is_email(Binary) when is_binary(Binary) ->
+    case binary:match(Binary, <<"@">>) of
+        {_, _} -> true;
+        nomatch -> false
+    end.
