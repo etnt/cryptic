@@ -405,6 +405,13 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
         {'DOWN', MonitorRef, process, InputPid, _Reason} ->
             %% Input process died (we killed it), restart command loop
             command_loop(State);
+        {ca_response, Response} ->
+            %% CA operation response arrived while waiting for input
+            exit(InputPid, kill),
+            %% Display the CA response
+            display_ca_response(Response),
+            %% Continue waiting - the DOWN message will trigger restart
+            wait_for_input_or_messages(InputPid, MonitorRef, State);
         {system_message, Message} ->
             %% A message arrived while waiting for input
             %% Note: We can't retrieve the actual input buffer from the blocked process
@@ -1228,6 +1235,10 @@ display_system_message(Message) ->
     io:format("~s", [""]),
     %% Longer delay to ensure terminal has processed all ANSI sequences
     timer:sleep(100).
+
+display_ca_response(Response) ->
+    %% Delegate to cryptic_shell for proper formatting
+    cryptic_shell:print_ca_response(Response).
 
 notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
     F = fun() ->

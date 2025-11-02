@@ -147,13 +147,16 @@ EOF
 cd CA
 make clean  # Clean old certs if they exist
 make all    # Generate CA root certificate
+cd ..
 
-# Generate client certificate for admin
-make client USERNAME=admin
+# Generate and install admin's client certificate
+./scripts/bootstrap_cert.sh admin localhost 8443
 
-# This creates:
-#   CA/client_keys/admin-key.pem    (private key)
-#   CA/client_keys/admin-cert.pem   (certificate)
+# This creates certificates in:
+#   $HOME/.cryptic/admin/localhost_8443/certificates/admin.crt
+#   $HOME/.cryptic/admin/localhost_8443/certificates/admin.key
+#   $HOME/.cryptic/admin/localhost_8443/certificates/admin.pem
+#   $HOME/.cryptic/admin/localhost_8443/certificates/ca.crt
 
 # 3. Bootstrap admin's GPG registration
 cd ..
@@ -164,8 +167,8 @@ cd ..
 
 # 5. Connect as admin and verify you can create invites
 ./scripts/cryptic_console --username admin \
-  --cert CA/client_keys/admin-cert.pem \
-  --key CA/client_keys/admin-key.pem
+  --cert ~/.cryptic/admin/localhost/certificates/admin.crt \
+  --key ~/.cryptic/admin/localhost/certificates/admin.key
 
 # In the console:
 # > invite create --expiry 24 --note "Test invite"

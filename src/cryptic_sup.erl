@@ -52,6 +52,15 @@ init([]) ->
           type => worker,
           modules => [cryptic_ca_serial]},
 
+    %% CA rate limiter
+    CaRateLimiter =
+        #{id => cryptic_ca_rate_limiter,
+          start => {cryptic_ca_rate_limiter, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_ca_rate_limiter]},
+
     %% Start the HTTP server as a child process (must start after CA init)
     CrypticServer =
         #{id => cryptic_server,
@@ -61,7 +70,7 @@ init([]) ->
           type => worker,
           modules => [cryptic_server]},
 
-    ChildSpecs = [EventManager, CaInit, CaSerialManager, CrypticServer],
+    ChildSpecs = [EventManager, CaInit, CaSerialManager, CaRateLimiter, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

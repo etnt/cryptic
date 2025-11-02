@@ -258,6 +258,7 @@ create_invite_impl(DbRef, InviterFp, ExpiryHours, Meta, State) ->
             {ok, Invite} = cryptic_ca_store:get_invite(DbRef, InviteId),
 
             Response = jsx:encode(#{
+                type => <<"invite_create_response">>,
                 status => <<"success">>,
                 invite_id => InviteId,
                 expires_at => Invite#invite.expires_at
@@ -268,6 +269,7 @@ create_invite_impl(DbRef, InviterFp, ExpiryHours, Meta, State) ->
         {error, Reason} ->
             ?error("Failed to create invite: ~p", [Reason]),
             ErrorResp = jsx:encode(#{
+                type => <<"invite_create_response">>,
                 error => <<"invite_creation_failed">>,
                 message => iolist_to_binary(io_lib:format("~p", [Reason]))
             }),
@@ -329,12 +331,14 @@ list_invites_impl(DbRef, InviterFp, State) ->
     case cryptic_invite_mgr:list_user_invites(DbRef, InviterFp) of
         {ok, Invites} ->
             Response = jsx:encode(#{
+                type => <<"invite_list_response">>,
                 status => <<"success">>,
                 invites => Invites
             }),
             {reply, {text, Response}, State};
         {error, Reason} ->
             ErrorResp = jsx:encode(#{
+                type => <<"invite_list_response">>,
                 error => <<"list_failed">>,
                 message => iolist_to_binary(io_lib:format("~p", [Reason]))
             }),
@@ -391,12 +395,14 @@ revoke_invite_impl(DbRef, InviteId, State) ->
     case cryptic_invite_mgr:revoke_invite(DbRef, InviteId) of
         ok ->
             Response = jsx:encode(#{
+                type => <<"invite_revoke_response">>,
                 status => <<"success">>,
                 invite_id => InviteId
             }),
             {reply, {text, Response}, State};
         {error, Reason} ->
             ErrorResp = jsx:encode(#{
+                type => <<"invite_revoke_response">>,
                 error => <<"revoke_failed">>,
                 message => iolist_to_binary(io_lib:format("~p", [Reason]))
             }),
@@ -458,12 +464,14 @@ handle_invite_show(
                                 meta => Invite#invite.meta
                             },
                             Response = jsx:encode(#{
+                                type => <<"invite_show_response">>,
                                 status => <<"success">>,
                                 invite => InviteMap
                             }),
                             {reply, {text, Response}, State};
                         _ ->
                             ErrorResp = jsx:encode(#{
+                                type => <<"invite_show_response">>,
                                 error => <<"unauthorized">>,
                                 message => <<"You can only view your own invites">>
                             }),
@@ -471,12 +479,14 @@ handle_invite_show(
                     end;
                 {error, not_found} ->
                     ErrorResp = jsx:encode(#{
+                        type => <<"invite_show_response">>,
                         error => <<"not_found">>,
                         message => <<"Invite not found">>
                     }),
                     {reply, {text, ErrorResp}, State};
                 {error, Reason} ->
                     ErrorResp = jsx:encode(#{
+                        type => <<"invite_show_response">>,
                         error => <<"show_failed">>,
                         message => iolist_to_binary(io_lib:format("~p", [Reason]))
                     }),

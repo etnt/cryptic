@@ -396,7 +396,7 @@ cmd_info() {
     if [ -z "$target" ]; then
         # No target: list all certs for this user
         echo "Available certificates for $username:"
-        find "$user_dir" -name "client.pem" -type f 2>/dev/null | while read cert; do
+        find "$user_dir" -name "${username}.pem" -type f 2>/dev/null | while read cert; do
             local server_dir=$(dirname $(dirname "$cert"))
             local server_name=$(basename "$server_dir")
             echo "  $server_name"
@@ -411,7 +411,7 @@ cmd_info() {
     else
         # Parse as server URL
         parse_server_url "$target"
-        cert_file="${user_dir}/${SERVER_HOST}_${SERVER_PORT}/certificates/client.pem"
+        cert_file="${user_dir}/${SERVER_HOST}_${SERVER_PORT}/certificates/${username}.pem"
     fi
 
     if [ ! -f "$cert_file" ]; then

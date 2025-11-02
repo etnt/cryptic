@@ -109,6 +109,7 @@
     print_help/0,
     print_help/1,
     print_console_status/1,
+    print_ca_response/1,
     make_prompt/0,
     make_prompt/1,
     calculate_wrapped_lines/2,
@@ -1029,6 +1030,125 @@ print_info(Message) ->
 -spec print_highlight(string()) -> ok.
 print_highlight(Message) ->
     io:format("~s\r\n", [?FG_WHITE_BG_BLUE(?BOLD("[***] " ++ Message))]).
+
+%% @doc Print CA operation response
+-spec print_ca_response(map()) -> ok.
+print_ca_response(Response) ->
+    Type = maps:get(<<"type">>, Response, <<"unknown">>),
+    
+    case Type of
+        <<"invite_create_response">> ->
+            print_invite_create_response(Response);
+        <<"invite_list_response">> ->
+            print_invite_list_response(Response);
+        <<"invite_revoke_response">> ->
+            print_invite_revoke_response(Response);
+        <<"invite_show_response">> ->
+            print_invite_show_response(Response);
+        _ ->
+            %% Generic CA response display
+            print_info(io_lib:format("CA Response: ~p", [Response]))
+    end.
+
+%% @private Print invite creation response
+print_invite_create_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            InviteId = maps:get(<<"invite_id">>, Response, <<"unknown">>),
+            ExpiresAt = maps:get(<<"expires_at">>, Response, 0),
+            DateTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+            print_success("Invite created successfully"),
+            io:format("  Invite ID: ~s\r\n", [InviteId]),
+            io:format("  Expires:   ~s\r\n", [DateTime]);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to create invite: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print invite list response
+print_invite_list_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Invites = maps:get(<<"invites">>, Response, []),
+            print_success(io_lib:format("Found ~p invite(s)", [length(Invites)])),
+            lists:foreach(fun(Invite) ->
+                InviteId = maps:get(<<"invite_id">>, Invite, <<"unknown">>),
+                ExpiresAt = maps:get(<<"expires_at">>, Invite, 0),
+                Consumed = maps:get(<<"consumed">>, Invite, false),
+                Expired = maps:get(<<"expired">>, Invite, false),
+                Meta = maps:get(<<"meta">>, Invite, #{}),
+                Note = maps:get(<<"note">>, Meta, <<"">>),
+                
+                Status = if
+                    Consumed -> "CONSUMED";
+                    Expired -> "EXPIRED";
+                    true -> "ACTIVE"
+                end,
+                
+                DateTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+                
+                %% Print invite details
+                io:format("  ~s\r\n", [InviteId]),
+                io:format("    Status:  ~s\r\n", [Status]),
+                io:format("    Expires: ~s\r\n", [DateTime]),
+                case Note of
+                    <<>> -> ok;
+                    _ -> io:format("    Note:    ~s\r\n", [Note])
+                end,
+                io:format("\r\n")
+            end, Invites);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to list invites: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print invite revoke response
+print_invite_revoke_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            InviteId = maps:get(<<"invite_id">>, Response, <<"unknown">>),
+            print_success(io_lib:format("Invite revoked: ~s", [InviteId]));
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to revoke invite: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print invite show response
+print_invite_show_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Invite = maps:get(<<"invite">>, Response, #{}),
+            InviteId = maps:get(<<"invite_id">>, Invite, <<"unknown">>),
+            ExpiresAt = maps:get(<<"expires_at">>, Invite, 0),
+            Consumed = maps:get(<<"consumed">>, Invite, false),
+            Expired = maps:get(<<"expired">>, Invite, false),
+            Meta = maps:get(<<"meta">>, Invite, #{}),
+            Note = maps:get(<<"note">>, Meta, <<"">>),
+            
+            Status = if
+                Consumed -> "CONSUMED";
+                Expired -> "EXPIRED";
+                true -> "ACTIVE"
+            end,
+            
+            DateTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+            
+            print_success("Invite details:"),
+            io:format("  ID:      ~s\r\n", [InviteId]),
+            io:format("  Status:  ~s\r\n", [Status]),
+            io:format("  Expires: ~s\r\n", [DateTime]),
+            case Note of
+                <<>> -> ok;
+                _ -> io:format("  Note:    ~s\r\n", [Note])
+            end;
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to show invite: ~s - ~s", [Error, Msg]))
+    end.
 
 %% @doc Print engine status on alternate screen
 %% Takes a status map and displays it in a formatted view on the alternate screen buffer.
