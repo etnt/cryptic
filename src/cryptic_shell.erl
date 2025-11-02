@@ -1252,6 +1252,10 @@ print_help(Topic) ->
             print_history_help();
         "db" ->
             print_db_help();
+        "invite" ->
+            print_invite_help();
+        "cert" ->
+            print_cert_help();
         "line_edit" ->
             print_line_edit_help();
         _ ->
@@ -1310,6 +1314,16 @@ print_general_help() ->
             ?FG_MAGENTA("(:h <query>)") ++ "\r\n"
     ),
     io:format(
+        ?FG_GREEN("  invite") ++ " " ++ ?FG_YELLOW("[create|list|show|revoke]") ++
+            " - Manage invitations " ++
+            ?FG_MAGENTA("(:ic,:il,:ir)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert") ++ " " ++ ?FG_YELLOW("[status|renew]") ++
+            "       - Manage certificates " ++
+            ?FG_MAGENTA("(:cs,:cr)") ++ "\r\n"
+    ),
+    io:format(
         ?FG_GREEN("  db") ++ " " ++ ?FG_YELLOW("[enable|disable|status]") ++
             " - Control message storage\r\n"
     ),
@@ -1345,6 +1359,14 @@ print_general_help() ->
     io:format(
         ?FG_GREEN("  help history") ++
             "                - Message history queries\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help invite") ++
+            "                 - Invitation management\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help cert") ++
+            "                   - Certificate management\r\n"
     ),
     io:format(
         ?FG_GREEN("  help db") ++
@@ -1701,6 +1723,215 @@ print_line_edit_help() ->
     io:format(
         ?FG_GREEN("  Ctrl+N") ++ " or " ++ ?FG_GREEN("Down Arrow") ++
             "     - Next command\r\n"
+    ).
+
+%% @doc Print invite-specific help
+print_invite_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              INVITE COMMAND HELP                              "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  Invite commands allow you to create invitation tokens for\r\n"
+    ),
+    io:format(
+        "  onboarding new users to the Cryptic server. Invites are\r\n"
+    ),
+    io:format(
+        "  GPG-signed tokens that can be shared via email, QR code, etc.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  invite") ++ " or " ++ ?FG_MAGENTA(":il") ++
+            "              - List all your invitations\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  invite create") ++ " " ++ ?FG_YELLOW("[options]") ++
+            " - Create new invitation " ++ ?FG_MAGENTA("(:ic)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  invite show") ++ " " ++ ?FG_YELLOW("<invite_id>") ++
+            " - Show invitation details\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  invite revoke") ++ " " ++ ?FG_YELLOW("<invite_id>") ++
+            " - Revoke invitation " ++ ?FG_MAGENTA("(:ir)") ++ "\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Create Options:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  --expires") ++ " " ++ ?FG_GREEN("<hours>") ++
+            "          # Expiry time (default: 24h)\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  --note") ++ " " ++ ?FG_GREEN("<message>") ++
+            "            # Note about the invite\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Usage Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  invite create --expires 48h --note Welcome Bob") ++
+            "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :ic") ++
+            "                           # Quick create with defaults\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  invite list") ++
+            "                    # List all invitations\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  invite show inv-8f3b12a4") ++
+            "       # Show details\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :ir inv-8f3b12a4") ++
+            "               # Revoke invitation\r\n"
+    ).
+
+%% @doc Print cert-specific help
+print_cert_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CERT COMMAND HELP                                "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  Certificate commands allow you to check and renew your TLS\r\n"
+    ),
+    io:format(
+        "  client certificate used for mTLS authentication with the server.\r\n"
+    ),
+    io:format(
+        "  Certificates are short-lived (7 days default) and can be renewed.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert") ++ " or " ++ ?FG_MAGENTA(":cs") ++
+            "                - Show certificate status\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert status") ++ " or " ++ ?FG_MAGENTA(":cs") ++
+            "        - Show certificate status\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert renew") ++ " " ++ ?FG_YELLOW("[options]") ++
+            "   - Renew certificate " ++ ?FG_MAGENTA("(:cr)") ++ "\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Renew Options:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  --force") ++
+            "                      # Renew even if not near expiry\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  --new-key") ++
+            "                    # Generate new TLS key (re-key)\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Usage Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  cert status") ++
+            "                    # Check certificate expiry\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :cs") ++
+            "                            # Quick status check\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  cert renew") ++
+            "                     # Renew with existing key\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  cert renew --new-key") ++
+            "           # Renew and generate new key\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :cr") ++
+            "                            # Quick renew\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Auto-Renewal:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        "  Certificates are automatically renewed at 50%% lifetime\r\n"
+    ),
+    io:format(
+        "  (typically 3.5 days for 7-day certificates). You can also\r\n"
+    ),
+    io:format(
+        "  manually renew using the commands above.\r\n"
     ).
 
 %% @doc Display console status information on alternate screen

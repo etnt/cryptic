@@ -1,0 +1,532 @@
+#!/bin/bash
+#
+# cryptic-onboard - External onboarding script for Cryptic
+#
+# This script handles initial registration and certificate requests for new
+# users who don't have certificates yet. It uses public REST APIs and doesn't
+# require mTLS.
+#
+# Usage:
+#   cryptic-onboard register <invite_file>
+#   cryptic-onboard request <username> [server_url]
+#   cryptic-onboard info [username] [cert_file|server_url]
+#
+# Dependencies: curl, openssl, gpg, jq
+#
+# Author: Cryptic Team
+# Date: 2025-11-01
+
+set -e  # Exit on error
+
+# Configuration
+CONFIG_DIR="${HOME}/.cryptic"
+CONFIG_FILE="${CONFIG_DIR}/config.json"
+DEFAULT_SERVER="https://relay.cryptic.example.org:8443"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions
+error() {
+    echo -e "${RED}Error: $1${NC}" >&2
+    exit 1
+}
+
+success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+info() {
+    echo -e "${BLUE}$1${NC}"
+}
+
+warn() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+check_dependencies() {
+    local missing_deps=()
+
+    for cmd in curl openssl gpg jq; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_deps+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        error "Missing required dependencies: ${missing_deps[*]}\nPlease install them and try again."
+    fi
+}
+
+parse_server_url() {
+    local url="$1"
+
+    # Extract host
+    SERVER_HOST=$(echo "$url" | sed -E 's|^https?://([^:/]+).*|\1|')
+
+    # Extract port (default to 8443 if not specified)
+    SERVER_PORT=$(echo "$url" | sed -E 's|^https?://[^:]+:([0-9]+).*|\1|')
+    if [ -z "$SERVER_PORT" ] || [ "$SERVER_PORT" = "$url" ]; then
+        SERVER_PORT="8443"
+    fi
+
+    if [ -z "$SERVER_HOST" ]; then
+        error "Invalid server URL: $url"
+    fi
+}
+
+draw_box() {
+    local text="$1"
+    local width=70
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "$text"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+#
+# Command: register <invite_file>
+# Registers GPG key with CA using invitation token
+#
+cmd_register() {
+    local invite_file="$1"
+
+    if [ -z "$invite_file" ]; then
+        error "Usage: cryptic-onboard register <invite_file>"
+    fi
+
+    if [ ! -f "$invite_file" ]; then
+        error "Invite file not found: $invite_file"
+    fi
+
+    draw_box "Cryptic Registration"
+
+    # Step 1: Read invite token
+    info "[1/4] Reading invite token..."
+    INVITE_TOKEN=$(cat "$invite_file")
+    if [ -z "$INVITE_TOKEN" ]; then
+        error "Invite file is empty"
+    fi
+    success "Invite token loaded"
+
+    # Step 2: Get GPG key email
+    info "[2/4] Finding GPG key..."
+
+    # Try to find a GPG key
+    GPG_KEYS=$(gpg --list-secret-keys --with-colons | grep "^uid" | cut -d: -f10 | head -5)
+
+    if [ -z "$GPG_KEYS" ]; then
+        error "No GPG keys found. Please generate a GPG key first:\n  gpg --gen-key"
+    fi
+
+    # If only one key, use it; otherwise prompt
+    KEY_COUNT=$(echo "$GPG_KEYS" | wc -l)
+    if [ "$KEY_COUNT" -eq 1 ]; then
+        GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | head -1)
+        info "Using GPG key: $GPG_KEY_EMAIL"
+    else
+        echo "Available GPG keys:"
+        echo "$GPG_KEYS" | nl
+        read -p "Select key number [1]: " key_num
+        key_num=${key_num:-1}
+        GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | sed -n "${key_num}p")
+    fi
+
+    success "Selected GPG key: $GPG_KEY_EMAIL"
+
+    # Step 3: Export GPG public key
+    info "[3/4] Exporting GPG public key..."
+    GPG_PUBKEY=$(gpg --armor --export "$GPG_KEY_EMAIL" 2>/dev/null)
+    if [ -z "$GPG_PUBKEY" ]; then
+        error "Failed to export GPG public key for: $GPG_KEY_EMAIL"
+    fi
+    success "GPG public key exported"
+
+    # Extract server URL from invite token (from 'aud' field in the clearsigned JSON)
+    # The invite token is a GPG clearsigned message with JSON payload
+    info "Extracting server URL from invite token..."
+
+    # Try to extract the JSON payload from the clearsigned message
+    TOKEN_JSON=$(echo "$INVITE_TOKEN" | sed -n '/^-----BEGIN PGP SIGNED MESSAGE-----/,/^-----BEGIN PGP SIGNATURE-----/p' | \
+                 grep -v '^-----' | grep -v '^Hash:' | grep -v '^$' | tr -d '\n')
+
+    # Extract 'aud' field (CA server URL) from the JSON
+    CA_SERVER=$(echo "$TOKEN_JSON" | jq -r '.aud // empty' 2>/dev/null)
+
+    if [ -z "$CA_SERVER" ]; then
+        # Fallback: prompt user if we couldn't extract it
+        warn "Could not extract server URL from invite token"
+        read -p "CA server URL [$DEFAULT_SERVER]: " CA_SERVER
+        CA_SERVER=${CA_SERVER:-$DEFAULT_SERVER}
+    else
+        # Add https:// prefix if not present
+        if [[ ! "$CA_SERVER" =~ ^https?:// ]]; then
+            CA_SERVER="https://${CA_SERVER}"
+        fi
+        success "Server URL: $CA_SERVER"
+    fi
+
+    parse_server_url "$CA_SERVER"
+    CA_REST_URL="https://${SERVER_HOST}:${SERVER_PORT}"
+
+    # Step 4: Call REST API
+    info "[4/4] Submitting to CA at $CA_REST_URL..."
+
+    # Create JSON payload
+    JSON_PAYLOAD=$(jq -n \
+        --arg token "$INVITE_TOKEN" \
+        --arg pubkey "$GPG_PUBKEY" \
+        '{invite_token: $token, gpg_pub: $pubkey}')
+
+    # Make API call
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/register-gpg" \
+        -H "Content-Type: application/json" \
+        -d "$JSON_PAYLOAD" 2>/dev/null || echo "000")
+
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+    BODY=$(echo "$RESPONSE" | head -n -1)
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        error "Registration failed (HTTP $HTTP_CODE)\n$BODY"
+    fi
+
+    success "Registration successful!"
+    echo ""
+
+    # Parse response
+    GPG_FP=$(echo "$BODY" | jq -r '.gpg_fp // empty')
+    STATUS=$(echo "$BODY" | jq -r '.status // empty')
+    REGISTERED_AT=$(echo "$BODY" | jq -r '.issued_at // empty')
+
+    echo "GPG Fingerprint: $GPG_FP"
+    echo "Status:          $STATUS"
+    echo "Registered:      $REGISTERED_AT"
+    echo ""
+
+    # Save config
+    mkdir -p "$CONFIG_DIR"
+    jq -n \
+        --arg fp "$GPG_FP" \
+        --arg email "$GPG_KEY_EMAIL" \
+        --arg server "$CA_SERVER" \
+        '{gpg_fingerprint: $fp, gpg_email: $email, default_server: $server}' \
+        > "$CONFIG_FILE"
+
+    success "Configuration saved to $CONFIG_FILE"
+    echo ""
+    info "Next step: Request your first certificate"
+    echo "  cryptic-onboard request <username> [$CA_SERVER]"
+
+    draw_box ""
+}
+
+#
+# Command: request <username> [server_url]
+# Requests TLS certificate from CA
+#
+cmd_request() {
+    local username="$1"
+    local server_url="$2"
+
+    if [ -z "$username" ]; then
+        error "Usage: cryptic-onboard request <username> [server_url]"
+    fi
+
+    # Load config
+    if [ ! -f "$CONFIG_FILE" ]; then
+        error "Not registered. Please run 'cryptic-onboard register' first."
+    fi
+
+    GPG_FP=$(jq -r '.gpg_fingerprint // empty' "$CONFIG_FILE")
+    GPG_EMAIL=$(jq -r '.gpg_email // empty' "$CONFIG_FILE")
+
+    if [ -z "$GPG_FP" ]; then
+        error "Invalid config file. Please register again."
+    fi
+
+    # Use provided server or default from config
+    if [ -z "$server_url" ]; then
+        server_url=$(jq -r '.default_server // empty' "$CONFIG_FILE")
+        if [ -z "$server_url" ]; then
+            server_url="$DEFAULT_SERVER"
+        fi
+    fi
+
+    parse_server_url "$server_url"
+
+    draw_box "Certificate Request"
+
+    # Create directory structure
+    CERT_DIR="${CONFIG_DIR}/${username}/${SERVER_HOST}_${SERVER_PORT}"
+    CERT_SUBDIR="${CERT_DIR}/certificates"
+    KEY_SUBDIR="${CERT_DIR}/private"
+    mkdir -p "$CERT_SUBDIR" "$KEY_SUBDIR"
+
+    KEY_FILE="${KEY_SUBDIR}/client.key"
+    CSR_FILE="${CERT_DIR}/client.csr"
+    CERT_FILE="${CERT_SUBDIR}/client.pem"
+
+    # Step 1: Generate TLS key pair
+    info "[1/4] Generating TLS key pair (ECDSA secp384r1)..."
+    if [ ! -f "$KEY_FILE" ]; then
+        openssl ecparam -genkey -name secp384r1 -out "$KEY_FILE" 2>/dev/null
+        chmod 600 "$KEY_FILE"
+        success "TLS key pair generated"
+    else
+        success "Using existing TLS key"
+    fi
+
+    # Step 2: Create CSR
+    info "[2/4] Creating Certificate Signing Request (CSR)..."
+    openssl req -new -key "$KEY_FILE" \
+        -subj "/CN=${GPG_FP}@${SERVER_HOST}" \
+        -out "$CSR_FILE" 2>/dev/null
+    success "CSR created"
+
+    # Step 3: Sign CSR with GPG key
+    info "[3/4] Signing CSR with GPG key ($GPG_EMAIL)..."
+    CSR_DATA=$(cat "$CSR_FILE")
+    GPG_SIG=$(echo "$CSR_DATA" | gpg --armor --detach-sign 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        error "Failed to sign CSR with GPG key"
+    fi
+    success "CSR signed with GPG"
+
+    # Step 4: Submit to CA
+    info "[4/4] Submitting to CA..."
+    CA_REST_URL="https://${SERVER_HOST}:${SERVER_PORT}"
+
+    # Create JSON payload
+    GPG_SIG_B64=$(echo "$GPG_SIG" | base64)
+    JSON_PAYLOAD=$(jq -n \
+        --arg csr "$CSR_DATA" \
+        --arg fp "$GPG_FP" \
+        --arg sig "$GPG_SIG_B64" \
+        '{csr_pem: $csr, gpg_fp: $fp, gpg_sig_b64: $sig}')
+
+    # Make API call
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/csr" \
+        -H "Content-Type: application/json" \
+        -d "$JSON_PAYLOAD" 2>/dev/null || echo "000")
+
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+    BODY=$(echo "$RESPONSE" | head -n -1)
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        error "Certificate request failed (HTTP $HTTP_CODE)\n$BODY"
+    fi
+
+    # Save certificate
+    CERT_PEM=$(echo "$BODY" | jq -r '.cert_pem // empty')
+    if [ -z "$CERT_PEM" ]; then
+        error "No certificate in response"
+    fi
+
+    echo "$CERT_PEM" > "$CERT_FILE"
+    success "Certificate issued successfully!"
+    echo ""
+
+    # Parse certificate info
+    SERIAL=$(openssl x509 -in "$CERT_FILE" -noout -serial 2>/dev/null | cut -d= -f2)
+    SUBJECT=$(openssl x509 -in "$CERT_FILE" -noout -subject 2>/dev/null | cut -d= -f2-)
+    NOT_BEFORE=$(openssl x509 -in "$CERT_FILE" -noout -startdate 2>/dev/null | cut -d= -f2)
+    NOT_AFTER=$(openssl x509 -in "$CERT_FILE" -noout -enddate 2>/dev/null | cut -d= -f2)
+
+    echo "Certificate Details:"
+    echo "  Serial:    $SERIAL"
+    echo "  Subject:   $SUBJECT"
+    echo "  Issuer:    CN=Cryptic CA"
+    echo "  Valid:     $NOT_BEFORE → $NOT_AFTER (7 days)"
+    echo ""
+    echo "  Files:"
+    echo "    Certificate: $CERT_FILE"
+    echo "    Private Key: $KEY_FILE"
+    echo ""
+    echo "Directory structure:"
+    echo "  ${CERT_DIR}/"
+    echo "    ├── certificates/"
+    echo "    │   └── client.pem"
+    echo "    └── private/"
+    echo "        └── client.key"
+    echo ""
+    info "You can now connect to Cryptic using the console:"
+    echo "  cryptic-console --cert $CERT_FILE \\"
+    echo "                  --key $KEY_FILE \\"
+    echo "                  connect wss://${SERVER_HOST}:${SERVER_PORT}"
+
+    draw_box ""
+}
+
+#
+# Command: info [username] [cert_file|server_url]
+# Display certificate information
+#
+cmd_info() {
+    local username="$1"
+    local target="$2"
+
+    if [ -z "$username" ]; then
+        # No username: list all users
+        echo "Available users:"
+        if [ -d "$CONFIG_DIR" ]; then
+            find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read user_dir; do
+                local user=$(basename "$user_dir")
+                if [ "$user" != "config.json" ]; then
+                    echo "  $user"
+                    find "$user_dir" -name "client.pem" -type f 2>/dev/null | while read cert; do
+                        local server_dir=$(dirname $(dirname "$cert"))
+                        local server_name=$(basename "$server_dir")
+                        echo "    └─ $server_name"
+                    done
+                fi
+            done
+        fi
+        return 0
+    fi
+
+    local user_dir="${CONFIG_DIR}/${username}"
+
+    if [ ! -d "$user_dir" ]; then
+        error "User not found: $username"
+    fi
+
+    if [ -z "$target" ]; then
+        # No target: list all certs for this user
+        echo "Available certificates for $username:"
+        find "$user_dir" -name "client.pem" -type f 2>/dev/null | while read cert; do
+            local server_dir=$(dirname $(dirname "$cert"))
+            local server_name=$(basename "$server_dir")
+            echo "  $server_name"
+        done
+        return 0
+    fi
+
+    # Determine certificate file
+    local cert_file=""
+    if [ -f "$target" ]; then
+        cert_file="$target"
+    else
+        # Parse as server URL
+        parse_server_url "$target"
+        cert_file="${user_dir}/${SERVER_HOST}_${SERVER_PORT}/certificates/client.pem"
+    fi
+
+    if [ ! -f "$cert_file" ]; then
+        error "Certificate not found: $cert_file"
+    fi
+
+    draw_box "Certificate Information"
+
+    echo "User:             $username"
+    if [ -n "$SERVER_HOST" ]; then
+        echo "Server:           ${SERVER_HOST}:${SERVER_PORT}"
+    fi
+
+    # Extract certificate details
+    SUBJECT=$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null | sed 's/subject=//')
+    ISSUER=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null | sed 's/issuer=//')
+    SERIAL=$(openssl x509 -in "$cert_file" -noout -serial 2>/dev/null | sed 's/serial=//')
+    NOT_BEFORE=$(openssl x509 -in "$cert_file" -noout -startdate 2>/dev/null | sed 's/notBefore=//')
+    NOT_AFTER=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | sed 's/notAfter=//')
+
+    # Calculate remaining time
+    EXPIRES_TS=$(date -j -f "%b %d %T %Y %Z" "$NOT_AFTER" "+%s" 2>/dev/null || echo "0")
+    NOW_TS=$(date "+%s")
+    REMAINING_SEC=$((EXPIRES_TS - NOW_TS))
+
+    if [ $REMAINING_SEC -gt 0 ]; then
+        DAYS=$((REMAINING_SEC / 86400))
+        HOURS=$(( (REMAINING_SEC % 86400) / 3600 ))
+        REMAINING="${DAYS}d ${HOURS}h"
+    else
+        REMAINING="EXPIRED"
+    fi
+
+    echo "Subject:          $SUBJECT"
+    echo "Issuer:           $ISSUER"
+    echo "Serial:           $SERIAL"
+    echo ""
+    echo "Validity:"
+    echo "  Not Before:     $NOT_BEFORE"
+    echo "  Not After:      $NOT_AFTER"
+    echo "  Remaining:      $REMAINING"
+    echo ""
+
+    # Public key info
+    PUBKEY_TYPE=$(openssl x509 -in "$cert_file" -noout -text 2>/dev/null | grep "Public Key Algorithm" | sed 's/.*: //')
+    echo "Public Key:"
+    echo "  Algorithm:      $PUBKEY_TYPE"
+
+    if echo "$PUBKEY_TYPE" | grep -q "EC"; then
+        CURVE=$(openssl x509 -in "$cert_file" -noout -text 2>/dev/null | grep "ASN1 OID" | sed 's/.*: //')
+        echo "  Curve:          $CURVE"
+    fi
+    echo ""
+
+    # File paths
+    cert_dir=$(dirname $(dirname "$cert_file"))
+    key_file="${cert_dir}/private/client.key"
+
+    echo "Files:"
+    echo "  Certificate:    $cert_file"
+    if [ -f "$key_file" ]; then
+        echo "  Private Key:    $key_file"
+    fi
+
+    draw_box ""
+}
+
+#
+# Main command dispatcher
+#
+main() {
+    check_dependencies
+
+    local command="$1"
+    shift
+
+    case "$command" in
+        register)
+            cmd_register "$@"
+            ;;
+        request)
+            cmd_request "$@"
+            ;;
+        info)
+            cmd_info "$@"
+            ;;
+        help|--help|-h)
+            cat <<EOF
+Usage: cryptic-onboard <command> [options]
+
+Commands:
+  register <invite_file>              Register GPG key with CA using invite
+  request <username> [server_url]     Request TLS certificate
+  info [username] [cert_file|server]  Display certificate information
+
+Examples:
+  # Register with invite
+  cryptic-onboard register ~/Downloads/alice-invite.txt
+
+  # Request certificate for user 'bob'
+  cryptic-onboard request bob https://relay.cryptic.example.org:8443
+
+  # Show certificate info
+  cryptic-onboard info bob https://relay.cryptic.example.org:8443
+  cryptic-onboard info bob  # List all certs for bob
+  cryptic-onboard info      # List all users
+
+Dependencies: curl, openssl, gpg, jq
+
+EOF
+            ;;
+        *)
+            error "Unknown command: $command\n\nUse 'cryptic-onboard help' for usage information."
+            ;;
+    esac
+}
+
+main "$@"

@@ -49,7 +49,12 @@
 
     %% Audit operations
     insert_audit_log/2,
-    get_audit_logs/3
+    get_audit_logs/3,
+
+    %% Database inspection (for debugging)
+    list_tables/1,
+    describe_table/2,
+    inspect_db/0
 ]).
 
 -include("cryptic_server.hrl").
@@ -849,4 +854,118 @@ get_audit_logs(Conn, FromTimestamp, ToTimestamp) ->
         {error, Reason} = Error ->
             ?error("Failed to get audit logs: ~p", [Reason]),
             Error
+    end.
+
+%%====================================================================
+%% Database Inspection Functions (for debugging)
+%%====================================================================
+
+%% @doc List all tables in the database.
+%%
+%% Returns the names of all tables in the SQLite database, which is useful
+%% for interactive debugging and understanding the database schema.
+%%
+%% == Example ==
+%% ```
+%% %% From the Erlang shell:
+%% DbRef = cryptic_ca_init:get_db_ref().
+%% {ok, Tables} = cryptic_ca_store:list_tables(DbRef).
+%% io:format("Tables: ~p~n", [Tables]).
+%% '''
+%%
+%% @param Conn Database connection reference
+%% @returns `{ok, [TableName]}' where TableName is a binary, or `{error, Reason}'
+-spec list_tables(db_ref()) -> {ok, [binary()]} | {error, term()}.
+list_tables(Conn) ->
+    SQL = <<"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name">>,
+    case esqlite3:q(Conn, SQL) of
+        Rows when is_list(Rows) ->
+            Tables = [Name || [Name] <- Rows],
+            {ok, Tables};
+        {error, Reason} = Error ->
+            ?error("Failed to list tables: ~p", [Reason]),
+            Error
+    end.
+
+%% @doc Show the CREATE TABLE statement for a specific table.
+%%
+%% Returns the SQL schema definition for the specified table, useful for
+%% understanding table structure, columns, and constraints.
+%%
+%% == Example ==
+%% ```
+%% DbRef = cryptic_ca_init:get_db_ref().
+%% {ok, Schema} = cryptic_ca_store:describe_table(DbRef, <<"invites">>).
+%% io:format("~s~n", [Schema]).
+%% '''
+%%
+%% @param Conn Database connection reference
+%% @param TableName Name of the table (as a binary)
+%% @returns `{ok, CreateStatement}' where CreateStatement is a binary, or `{error, Reason}'
+-spec describe_table(db_ref(), binary()) -> {ok, binary()} | {error, term()}.
+describe_table(Conn, TableName) ->
+    SQL = <<"SELECT sql FROM sqlite_master WHERE type='table' AND name = ?1">>,
+    case esqlite3:q(Conn, SQL, [TableName]) of
+        [[CreateSQL]] ->
+            {ok, CreateSQL};
+        [] ->
+            {error, {table_not_found, TableName}};
+        {error, Reason} = Error ->
+            ?error("Failed to describe table ~s: ~p", [TableName, Reason]),
+            Error
+    end.
+
+%% @doc Inspect the database and print a summary to stdout.
+%%
+%% This is a convenience function for quick database inspection from the
+%% Erlang shell. It retrieves the database reference, lists all tables,
+%% and shows the schema and row count for each table.
+%%
+%% Note: This function uses cryptic_ca_init:get_db_ref() to get the database
+%% reference, so the CA init service must be running.
+%%
+%% == Example ==
+%% ```
+%% %% From the Erlang shell (after server is running):
+%% cryptic_ca_store:inspect_db().
+%% '''
+%%
+%% @returns `ok' on success, or `{error, Reason}' on failure
+-spec inspect_db() -> ok | {error, term()}.
+inspect_db() ->
+    case cryptic_ca_init:get_db_ref() of
+        {ok, Conn} ->
+            io:format("~n=== CA Database Inspection ===~n~n", []),
+            case list_tables(Conn) of
+                {ok, Tables} ->
+                    io:format("Tables (~p total):~n", [length(Tables)]),
+                    lists:foreach(
+                        fun(TableName) ->
+                            %% Show table name and row count
+                            CountSQL = iolist_to_binary([<<"SELECT COUNT(*) FROM ">>, TableName]),
+                            Count = case esqlite3:q(Conn, CountSQL) of
+                                [[N]] -> N;
+                                _ -> unknown
+                            end,
+                            io:format("~n  - ~s (~p rows)~n", [TableName, Count]),
+                            
+                            %% Show schema
+                            case describe_table(Conn, TableName) of
+                                {ok, Schema} ->
+                                    io:format("    Schema: ~s~n", [Schema]);
+                                {error, SchemaErr} ->
+                                    io:format("    Error getting schema: ~p~n", [SchemaErr])
+                            end
+                        end,
+                        Tables
+                    ),
+                    io:format("~n=== End of Database Inspection ===~n~n", []),
+                    ok;
+                {error, Reason} ->
+                    io:format("Error listing tables: ~p~n", [Reason]),
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            io:format("Error getting database reference: ~p~n", [Reason]),
+            {error, Reason}
     end.

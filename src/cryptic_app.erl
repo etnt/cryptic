@@ -12,28 +12,16 @@
 %% @doc Start the cryptic application
 %%
 %% This callback is invoked when the application is started.
-%% Starts the supervisor which will then start the HTTP server.
-%% Also initializes the CA subsystem.
+%% Starts the supervisor which will then start all child processes
+%% including the event manager, CA initializer, and HTTP server.
 %%
 %% @param StartType The type of start requested
 %% @param StartArgs The start arguments
 %% @returns {ok, Pid} | {error, Reason}
 start(_StartType, _StartArgs) ->
-    %% Initialize CA database
-    case cryptic_ca_app:init_ca() of
-        {ok, _DbRef} ->
-            error_logger:info_msg("CA subsystem initialized successfully"),
-            ok;
-        {error, Reason} ->
-            error_logger:error_msg("Failed to initialize CA subsystem: ~p", [
-                Reason
-            ]),
-            %% Continue anyway - CA features will be unavailable
-            ok
-    end,
-
     %% Dependencies are automatically started by OTP based on the 'applications' list
     %% in cryptic.app.src, so we don't need to start them manually here
+    %% CA initialization is now handled by the supervisor via cryptic_ca_init
     cryptic_sup:start_link().
 
 %% @doc Stop the cryptic application

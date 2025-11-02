@@ -321,14 +321,8 @@ init([]) ->
 %% @param CfgMap Current configuration map
 %% @returns {noreply, State, {continue, continue}} to proceed with startup
 handle_continue(start_server, CfgMap) ->
-    %% Setup event handlers for Cryptic events with server configuration
-    cryptic_event_manager:setup_event_handlers(#{
-        log_type => server,
-        log_dir => "logs"
-    }),
-    %% Allow time for event manager setup
-    sleep(10),
-
+    %% Event handlers are already set up by cryptic_ca_init
+    %% No need to set up again here
     continue(CfgMap).
 
 %% @doc Internal sleep function
@@ -384,7 +378,6 @@ continue(CfgMap) ->
                     {ok, Port} -> Port;
                     undefined -> 8443
                 end,
-            ?info("Starting WebSocket mTLS server on port ~p~n", [WSPort]),
             start_websocket_mtls(#{port => WSPort});
         false ->
             ?info("WebSocket mTLS server disabled~n", [])
