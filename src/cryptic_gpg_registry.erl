@@ -77,11 +77,14 @@ register_gpg_identity(DbRef, GpgFp, GpgPubArmor, InviterFp, InviteId) ->
     Identity = #gpg_identity{
         gpg_fp = GpgFp,
         gpg_pub_armor = GpgPubArmor,
-        status = <<"verified_via_invite">>,
-        inviter_fp = InviterFp,
+        status = <<"active">>,
+        registered_by = InviterFp,
         registered_at = Now,
         last_seen = Now,
-        invite_id = InviteId
+        metadata = jsx:encode(#{
+            <<"source">> => <<"invite">>,
+            <<"invite_id">> => InviteId
+        })
     },
 
     case cryptic_ca_store:insert_gpg_identity(DbRef, Identity) of
@@ -154,11 +157,13 @@ register_bootstrap_identity(DbRef, GpgFp, GpgPubArmor) ->
     Identity = #gpg_identity{
         gpg_fp = GpgFp,
         gpg_pub_armor = GpgPubArmor,
-        status = <<"verified_bootstrap">>,
-        inviter_fp = undefined,
+        status = <<"active">>,
+        registered_by = undefined,  % Bootstrap has no admin
         registered_at = Now,
         last_seen = Now,
-        invite_id = undefined
+        metadata = jsx:encode(#{
+            <<"source">> => <<"bootstrap">>
+        })
     },
 
     case cryptic_ca_store:insert_gpg_identity(DbRef, Identity) of
@@ -409,11 +414,22 @@ revoke_identity(DbRef, GpgFp) ->
 
                     %% Log audit trail
                     Now = erlang:system_time(second),
+                    
+                    %% Extract invite_id from metadata if present
+                    InviteId = case Identity#gpg_identity.metadata of
+                        undefined -> undefined;
+                        Meta ->
+                            case jsx:decode(Meta, [return_maps]) of
+                                #{<<"invite_id">> := IId} -> IId;
+                                _ -> undefined
+                            end
+                    end,
+                    
                     AuditLog = #audit_log{
                         timestamp = Now,
                         event_type = <<"gpg_revoke">>,
                         gpg_fp = GpgFp,
-                        invite_id = Identity#gpg_identity.invite_id,
+                        invite_id = InviteId,
                         details = jsx:encode(#{
                             <<"previous_status">> =>
                                 Identity#gpg_identity.status

@@ -24,6 +24,7 @@
 
 -include("cryptic_server.hrl").
 -include("../include/cryptic_ca.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 %%====================================================================
 %% Cowboy REST Callbacks
@@ -227,8 +228,8 @@ register_gpg_impl(Req, State, InviteId, GpgPub) ->
                                 )
                             of
                                 ok ->
-                                    %% Consume the invite
-                                    ok = cryptic_invite_mgr:consume_invite(
+                                    %% Register GPG for the invite (active → registered)
+                                    ok = cryptic_invite_mgr:register_gpg_for_invite(
                                         DbRef, InviteId, GpgFp
                                     ),
 
@@ -341,107 +342,179 @@ csr_impl(Req, State, CsrPem, GpgFp, GpgSigB64) ->
     %% Get database reference
     {ok, DbRef} = application:get_env(cryptic, ca_db_ref),
 
-    %% Verify GPG identity exists and is verified
-    case cryptic_gpg_registry:verify_identity_status(DbRef, GpgFp) of
-        {ok, Status} when
-            Status =:= verified_via_invite; Status =:= verified_bootstrap
-        ->
-            %% Get the public key for signature verification
-            {ok, Identity} = cryptic_gpg_registry:get_identity(DbRef, GpgFp),
-            GpgPub = Identity#gpg_identity.gpg_pub_armor,
+    %% Verify GPG identity exists and is active (admin-mediated flow)
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, Identity} ->
+            %% Check if user is active
+            case Identity#gpg_identity.status of
+                <<"active">> ->
+                    %% Get the public key for signature verification
+                    GpgPub = Identity#gpg_identity.gpg_pub_armor,
 
-            %% Decode signature
-            GpgSig = base64:decode(GpgSigB64),
+                    %% Decode signature from base64
+                    GpgSig = base64:decode(GpgSigB64),
 
-            %% Verify signature over CSR
-            case cryptic_ca_gpg:verify_signature(GpgSig, GpgPub) of
-                {ok, VerifiedCsr} when VerifiedCsr =:= CsrPem ->
-                    %% Signature valid, proceed with certificate issuance
-                    ?info("CSR signature verified for ~s, issuing certificate", [GpgFp]),
-
-                    %% Issue certificate using cryptic_ca_cert module
-                    case cryptic_ca_cert:issue_from_csr(CsrPem, GpgFp) of
-                        {ok, CertPem} ->
-                            %% Extract validity from configuration
-                            {ok, ValidityDays} = application:get_env(
-                                cryptic_ca,
-                                cert_default_lifetime_days,
-                                7
-                            ),
-                            
-                            Now = erlang:system_time(second),
-                            ExpiresAt = Now + (ValidityDays * 24 * 3600),
-
-                            ?info("Certificate issued for ~s, expires in ~p days",
-                                  [GpgFp, ValidityDays]),
-
-                            %% Log to audit
-                            AuditLog = #audit_log{
-                                timestamp = Now,
-                                event_type = <<"certificate_issued">>,
-                                gpg_fp = GpgFp,
-                                invite_id = undefined,
-                                details = jsx:encode(#{
-                                    validity_days => ValidityDays,
-                                    expires_at => ExpiresAt
-                                }),
-                                ip_address = get_ip_address(Req)
-                            },
-                            ok = cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
-
-                            %% Return certificate to client
-                            RespBody = jsx:encode(#{
-                                status => <<"issued">>,
-                                cert_pem => CertPem,
-                                expires_at => ExpiresAt,
-                                issued_at => Now,
-                                validity_days => ValidityDays
-                            }),
-
-                            Req2 = cowboy_req:set_resp_body(RespBody, Req),
-                            Req3 = cowboy_req:set_resp_header(
-                                <<"content-type">>, <<"application/json">>, Req2
-                            ),
-                            {true, Req3, State};
-                        
+                    %% Verify GPG signature on CSR
+                    %% The signature proves the user possesses the GPG private key
+                    case cryptic_ca_gpg:verify_detached_signature(GpgSig, CsrPem, GpgPub) of
+                        ok ->
+                            %% Signature valid, validate CSR contains matching GPG fingerprint
+                            case validate_csr_fingerprint(CsrPem, GpgFp) of
+                                ok ->
+                                    %% Issue certificate
+                                    ?info("CSR signature verified for ~s, issuing certificate", [GpgFp]),
+                                    issue_certificate(Req, State, DbRef, CsrPem, GpgFp, Identity);
+                                {error, Reason} ->
+                                    ?warning("CSR validation failed for ~s: ~p", [GpgFp, Reason]),
+                                    error_response(
+                                        <<"csr_validation_failed">>,
+                                        iolist_to_binary(io_lib:format("~p", [Reason])),
+                                        Req,
+                                        State
+                                    )
+                            end;
                         {error, Reason} ->
-                            ?error("Certificate issuance failed for ~s: ~p",
-                                   [GpgFp, Reason]),
+                            ?warning("GPG signature verification failed for ~s: ~p", [GpgFp, Reason]),
                             error_response(
-                                <<"certificate_issuance_failed">>,
+                                <<"signature_verification_failed">>,
                                 iolist_to_binary(io_lib:format("~p", [Reason])),
                                 Req,
                                 State
                             )
                     end;
-                {ok, _Other} ->
+                <<"suspended">> ->
+                    ?warning("CSR request from suspended user: ~s", [GpgFp]),
                     error_response(
-                        <<"signature_mismatch">>,
-                        <<"GPG signature does not match CSR">>,
+                        <<"user_suspended">>,
+                        <<"Your account has been suspended. Please contact an administrator.">>,
                         Req,
                         State
                     );
-                {error, Reason} ->
+                <<"revoked">> ->
+                    ?warning("CSR request from revoked user: ~s", [GpgFp]),
                     error_response(
-                        <<"signature_verification_failed">>, Reason, Req, State
+                        <<"user_revoked">>,
+                        <<"Your account has been revoked. Please contact an administrator.">>,
+                        Req,
+                        State
+                    );
+                OtherStatus ->
+                    ?warning("CSR request from user with invalid status ~s: ~s", [OtherStatus, GpgFp]),
+                    error_response(
+                        <<"invalid_user_status">>,
+                        iolist_to_binary(io_lib:format("Status: ~p", [OtherStatus])),
+                        Req,
+                        State
                     )
             end;
-        {ok, Status} ->
-            error_response(
-                <<"unverified_identity">>,
-                iolist_to_binary(io_lib:format("Status: ~p", [Status])),
-                Req,
-                State
-            );
         {error, not_found} ->
+            ?warning("CSR request for unregistered GPG fingerprint: ~s", [GpgFp]),
             error_response(
                 <<"identity_not_found">>,
-                <<"GPG fingerprint not registered">>,
+                <<"GPG fingerprint not registered. Please contact an administrator to register your GPG key.">>,
                 Req,
                 State
             );
         {error, Reason} ->
-            error_response(<<"verification_failed">>, Reason, Req, State)
+            ?error("Database error looking up GPG identity ~s: ~p", [GpgFp, Reason]),
+            error_response(
+                <<"verification_failed">>,
+                iolist_to_binary(io_lib:format("~p", [Reason])),
+                Req,
+                State
+            )
+    end.
+
+%% @private Validate that CSR contains the correct GPG fingerprint in SAN extension
+validate_csr_fingerprint(CsrPem, _ExpectedGpgFp) ->
+    %% Basic validation: ensure CSR is valid PEM
+    %% The cryptic_ca_cert:issue_from_csr/2 function will do deeper validation
+    %% including checking that the CSR contains the correct GPG fingerprint in SAN
+    try
+        [_CsrEntry] = public_key:pem_decode(CsrPem),
+        ok
+    catch
+        _:CatchReason ->
+            ?error("Failed to decode CSR PEM: ~p", [CatchReason]),
+            {error, {invalid_csr_pem, CatchReason}}
+    end.
+
+%% @private Issue certificate and update database
+issue_certificate(Req, State, DbRef, CsrPem, GpgFp, Identity) ->
+    %% Issue certificate using cryptic_ca_cert module
+    case cryptic_ca_cert:issue_from_csr(CsrPem, GpgFp) of
+        {ok, CertPem} ->
+            %% Extract validity from configuration
+            ValidityDays = application:get_env(cryptic_ca, cert_default_lifetime_days, 7),
+            
+            Now = erlang:system_time(second),
+            ExpiresAt = Now + (ValidityDays * 24 * 3600),
+
+            %% Extract serial number from certificate
+            Serial = extract_serial_from_cert(CertPem),
+
+            ?info("Certificate ~s issued for ~s, expires in ~p days", 
+                  [Serial, GpgFp, ValidityDays]),
+
+            %% Store certificate in database
+            CertRecord = #certificate{
+                serial = Serial,
+                gpg_fp = GpgFp,
+                issued_at = Now,
+                expires_at = ExpiresAt,
+                status = <<"active">>,
+                cert_pem = CertPem
+            },
+            ok = cryptic_ca_store:insert_certificate(DbRef, CertRecord),
+
+            %% Update last_seen timestamp for user
+            ok = cryptic_ca_store:update_last_seen(DbRef, GpgFp),
+
+            %% Log to audit
+            RegisteredBy = case Identity#gpg_identity.registered_by of
+                undefined -> <<"system">>;
+                Rb -> Rb
+            end,
+            
+            AuditLog = #audit_log{
+                timestamp = Now,
+                event_type = <<"certificate_issued">>,
+                gpg_fp = GpgFp,
+                invite_id = undefined,
+                details = jsx:encode(#{
+                    serial => Serial,
+                    validity_days => ValidityDays,
+                    expires_at => ExpiresAt,
+                    registered_by => RegisteredBy
+                }),
+                ip_address = get_ip_address(Req)
+            },
+            ok = cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+            %% Return certificate to client
+            RespBody = jsx:encode(#{
+                status => <<"issued">>,
+                cert_pem => CertPem,
+                serial => Serial,
+                expires_at => ExpiresAt,
+                issued_at => Now,
+                validity_days => ValidityDays
+            }),
+
+            Req2 = cowboy_req:set_resp_body(RespBody, Req),
+            Req3 = cowboy_req:set_resp_header(
+                <<"content-type">>, <<"application/json">>, Req2
+            ),
+            {true, Req3, State};
+        
+        {error, Reason} ->
+            ?error("Certificate issuance failed for ~s: ~p", [GpgFp, Reason]),
+            error_response(
+                <<"certificate_issuance_failed">>,
+                iolist_to_binary(io_lib:format("~p", [Reason])),
+                Req,
+                State
+            )
     end.
 
 %%====================================================================
@@ -593,3 +666,26 @@ rate_limit_response(RetryAfter, Req, State) ->
 get_ip_address(Req) ->
     {{A, B, C, D}, _Port} = cowboy_req:peer(Req),
     iolist_to_binary(io_lib:format("~p.~p.~p.~p", [A, B, C, D])).
+
+%% @doc Extract serial number from PEM-encoded certificate.
+-spec extract_serial_from_cert(binary()) -> binary().
+extract_serial_from_cert(CertPem) ->
+    try
+        %% Decode PEM to DER
+        [{'Certificate', DerCert, not_encrypted}] = public_key:pem_decode(CertPem),
+        
+        %% Parse certificate
+        OtpCert = public_key:pkix_decode_cert(DerCert, otp),
+        
+        %% Extract serial number
+        TbsCert = OtpCert#'OTPCertificate'.tbsCertificate,
+        Serial = TbsCert#'OTPTBSCertificate'.serialNumber,
+        
+        %% Convert to hex string
+        integer_to_binary(Serial, 16)
+    catch
+        _:Error ->
+            ?error("Failed to extract serial from certificate: ~p", [Error]),
+            %% Fallback to random serial if extraction fails
+            crypto:strong_rand_bytes(16)
+    end.

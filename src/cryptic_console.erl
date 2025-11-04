@@ -503,13 +503,11 @@ parse_command(":hi") ->
     {history_cmd, {last_n, 10}};
 parse_command(":hi " ++ Args) ->
     parse_history_command(Args);
-%% Invite shortcut commands
-parse_command(":ic") ->
-    {invite_cmd, create, #{}};
-parse_command(":il") ->
-    {invite_cmd, list};
-parse_command(":ir " ++ InviteId) ->
-    {invite_cmd, revoke, string:trim(InviteId)};
+%% Admin shortcut commands
+parse_command(":ar " ++ Args) ->
+    parse_admin_register(Args);
+parse_command(":au") ->
+    {admin_cmd, list};
 %% Cert shortcut commands
 parse_command(":cs") ->
     {cert_cmd, status};
@@ -542,19 +540,25 @@ parse_command("history") ->
     {history_cmd, {last_n, 10}};
 parse_command("history " ++ Args) ->
     parse_history_command(Args);
-%% Invite commands
-parse_command("invite") ->
-    {invite_cmd, list};
-parse_command("invite create") ->
-    {invite_cmd, create, #{}};
-parse_command("invite create " ++ Options) ->
-    parse_invite_create_options(Options);
-parse_command("invite list") ->
-    {invite_cmd, list};
-parse_command("invite show " ++ InviteId) ->
-    {invite_cmd, show, string:trim(InviteId)};
-parse_command("invite revoke " ++ InviteId) ->
-    {invite_cmd, revoke, string:trim(InviteId)};
+%% Admin commands
+parse_command("admin") ->
+    {admin_cmd, list};
+parse_command("admin register " ++ Args) ->
+    parse_admin_register(Args);
+parse_command("admin list") ->
+    {admin_cmd, list};
+parse_command("admin status " ++ GpgFp) ->
+    {admin_cmd, status, string:trim(GpgFp)};
+parse_command("admin suspend " ++ GpgFp) ->
+    {admin_cmd, suspend, string:trim(GpgFp)};
+parse_command("admin revoke " ++ GpgFp) ->
+    {admin_cmd, revoke, string:trim(GpgFp)};
+parse_command("admin reactivate " ++ GpgFp) ->
+    {admin_cmd, reactivate, string:trim(GpgFp)};
+parse_command("admin certs " ++ GpgFp) ->
+    {admin_cmd, list_certs, string:trim(GpgFp)};
+parse_command("admin revoke-cert " ++ Serial) ->
+    {admin_cmd, revoke_cert, string:trim(Serial)};
 %% Cert commands
 parse_command("cert") ->
     {cert_cmd, status};
@@ -708,12 +712,27 @@ parse_history_command(Args) ->
 %%   "--expires 24h --note Welcome Bob"
 %%   "--note Welcome"
 %%   "" (empty, use defaults)
-parse_invite_create_options(OptionsStr) ->
-    Opts = parse_options(OptionsStr, #{
-        expires => "24h",
-        note => ""
-    }),
-    {invite_cmd, create, Opts}.
+%% @doc Parse admin register command
+%% Format: admin register <gpg_fp> <key_file> [--note "description"]
+parse_admin_register(ArgsStr) ->
+    Parts = string:tokens(ArgsStr, " "),
+    case Parts of
+        [GpgFp, KeyFile | Rest] ->
+            Opts = parse_admin_register_opts(Rest, #{}),
+            {admin_cmd, register, string:trim(GpgFp), string:trim(KeyFile), Opts};
+        _ ->
+            {error, "Usage: admin register <gpg_fp> <key_file> [--note \"description\"]"}
+    end.
+
+parse_admin_register_opts([], Acc) ->
+    Acc;
+parse_admin_register_opts(["--note" | Rest], Acc) ->
+    %% Note takes all remaining words as value
+    Note = string:join(Rest, " "),
+    Acc#{note => Note};
+parse_admin_register_opts([_Unknown | Rest], Acc) ->
+    %% Skip unknown options
+    parse_admin_register_opts(Rest, Acc).
 
 %% @doc Parse cert renew options
 %% Examples:
@@ -927,17 +946,29 @@ execute_command({history_cmd, {error, Msg}}, State) ->
 execute_command({history_cmd, Query}, State) ->
     execute_history_query(Query, State),
     State;
-execute_command({invite_cmd, create, Opts}, State) ->
-    execute_invite_create(Opts, State),
+execute_command({admin_cmd, register, GpgFp, KeyFile, Opts}, State) ->
+    execute_admin_register(GpgFp, KeyFile, Opts, State),
     State;
-execute_command({invite_cmd, list}, State) ->
-    execute_invite_list(State),
+execute_command({admin_cmd, list}, State) ->
+    execute_admin_list(State),
     State;
-execute_command({invite_cmd, show, InviteId}, State) ->
-    execute_invite_show(InviteId, State),
+execute_command({admin_cmd, status, GpgFp}, State) ->
+    execute_admin_status(GpgFp, State),
     State;
-execute_command({invite_cmd, revoke, InviteId}, State) ->
-    execute_invite_revoke(InviteId, State),
+execute_command({admin_cmd, suspend, GpgFp}, State) ->
+    execute_admin_suspend(GpgFp, State),
+    State;
+execute_command({admin_cmd, revoke, GpgFp}, State) ->
+    execute_admin_revoke(GpgFp, State),
+    State;
+execute_command({admin_cmd, reactivate, GpgFp}, State) ->
+    execute_admin_reactivate(GpgFp, State),
+    State;
+execute_command({admin_cmd, list_certs, GpgFp}, State) ->
+    execute_admin_list_certs(GpgFp, State),
+    State;
+execute_command({admin_cmd, revoke_cert, Serial}, State) ->
+    execute_admin_revoke_cert(Serial, State),
     State;
 execute_command({cert_cmd, status}, State) ->
     execute_cert_status(State),
@@ -1268,117 +1299,192 @@ notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
 %%%===================================================================
 
 %% @doc Execute invite create command
-execute_invite_create(Opts, State) ->
+%%====================================================================
+%% Admin Command Execution
+%%====================================================================
+
+%% @doc Execute admin register command
+execute_admin_register(GpgFp, KeyFile, _Opts, State) ->
     case State#console_state.ws_client_pid of
         undefined ->
             cryptic_shell:print_error("Not connected to server");
         WsPid ->
-            %% Parse expiry hours from options
-            ExpiryHours = 
-                case maps:get(expires, Opts, "24h") of
-                    Str when is_list(Str) ->
-                        case string:to_integer(string:trim(Str, trailing, "h")) of
-                            {Hours, _} when Hours > 0 -> Hours;
-                            _ -> 24  %% Default
-                        end;
-                    _ -> 24
-                end,
-            
-            Note = maps:get(note, Opts, ""),
-            
-            %% Build message using cryptic_messages module
-            MsgData = #{
-                expiry_hours => ExpiryHours,
-                meta => #{note => list_to_binary(Note)}
-            },
-            
-            case cryptic_messages:invite_create(MsgData) of
-                {ok, Msg} ->
-                    %% Send via WebSocket
+            %% Read the GPG public key file
+            case file:read_file(KeyFile) of
+                {ok, GpgPubKey} ->
+                    %% Send register_user command via WebSocket
+                    Msg = #{
+                        <<"type">> => <<"register_user">>,
+                        <<"gpg_fp">> => list_to_binary(GpgFp),
+                        <<"gpg_pub">> => GpgPubKey
+                    },
                     case cryptic_ws_client:send_message(WsPid, Msg) of
                         ok ->
-                            cryptic_shell:print_info("Invite creation request sent...");
+                            cryptic_shell:print_info("User registration request sent...");
                         {error, Reason} ->
                             cryptic_shell:print_error(
-                                "Failed to send invite create: " ++
+                                "Failed to register user: " ++
                                 lists:flatten(io_lib:format("~p", [Reason]))
                             )
                     end;
                 {error, Reason} ->
                     cryptic_shell:print_error(
-                        "Invalid invite create parameters: " ++
+                        "Failed to read key file: " ++
                         lists:flatten(io_lib:format("~p", [Reason]))
                     )
             end
     end.
 
-%% @doc Execute invite list command
-execute_invite_list(State) ->
+%% @doc Execute admin list command
+execute_admin_list(State) ->
     case State#console_state.ws_client_pid of
         undefined ->
             cryptic_shell:print_error("Not connected to server");
         WsPid ->
-            {ok, Msg} = cryptic_messages:invite_list(),
+            Msg = #{<<"type">> => <<"list_users">>},
             case cryptic_ws_client:send_message(WsPid, Msg) of
                 ok ->
-                    cryptic_shell:print_info("Fetching invite list...");
+                    cryptic_shell:print_info("Fetching user list...");
                 {error, Reason} ->
                     cryptic_shell:print_error(
-                        "Failed to list invites: " ++
+                        "Failed to list users: " ++
                         lists:flatten(io_lib:format("~p", [Reason]))
                     )
             end
     end.
 
-%% @doc Execute invite show command
-execute_invite_show(InviteId, State) ->
+%% @doc Execute admin status command
+execute_admin_status(GpgFp, State) ->
     case State#console_state.ws_client_pid of
         undefined ->
             cryptic_shell:print_error("Not connected to server");
         WsPid ->
-            case cryptic_messages:invite_show(#{invite_id => list_to_binary(InviteId)}) of
-                {ok, Msg} ->
-                    case cryptic_ws_client:send_message(WsPid, Msg) of
-                        ok ->
-                            cryptic_shell:print_info("Fetching invite details...");
-                        {error, Reason} ->
-                            cryptic_shell:print_error(
-                                "Failed to show invite: " ++
-                                lists:flatten(io_lib:format("~p", [Reason]))
-                            )
-                    end;
+            Msg = #{
+                <<"type">> => <<"get_user_info">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_info("Fetching user status...");
                 {error, Reason} ->
                     cryptic_shell:print_error(
-                        "Invalid invite show parameters: " ++
+                        "Failed to get user status: " ++
                         lists:flatten(io_lib:format("~p", [Reason]))
                     )
             end
     end.
 
-%% @doc Execute invite revoke command
-execute_invite_revoke(InviteId, State) ->
+%% @doc Execute admin suspend command
+execute_admin_suspend(GpgFp, State) ->
     case State#console_state.ws_client_pid of
         undefined ->
             cryptic_shell:print_error("Not connected to server");
         WsPid ->
-            case cryptic_messages:invite_revoke(#{invite_id => list_to_binary(InviteId)}) of
-                {ok, Msg} ->
-                    case cryptic_ws_client:send_message(WsPid, Msg) of
-                        ok ->
-                            cryptic_shell:print_success("Invite revocation request sent");
-                        {error, Reason} ->
-                            cryptic_shell:print_error(
-                                "Failed to revoke invite: " ++
-                                lists:flatten(io_lib:format("~p", [Reason]))
-                            )
-                    end;
+            Msg = #{
+                <<"type">> => <<"suspend_user">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("User suspend request sent");
                 {error, Reason} ->
                     cryptic_shell:print_error(
-                        "Invalid invite revoke parameters: " ++
+                        "Failed to suspend user: " ++
                         lists:flatten(io_lib:format("~p", [Reason]))
                     )
             end
     end.
+
+%% @doc Execute admin revoke command  
+execute_admin_revoke(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"revoke_user">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("User revoke request sent");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to revoke user: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin reactivate command
+execute_admin_reactivate(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"reactivate_user">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("User reactivate request sent");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to reactivate user: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin list certificates command
+execute_admin_list_certs(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"list_certificates">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_info("Fetching certificates...");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to list certificates: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin revoke certificate command
+execute_admin_revoke_cert(Serial, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            %% Prompt for reason
+            Reason = cryptic_shell:get_line("Revocation reason: "),
+            Msg = #{
+                <<"type">> => <<"revoke_certificate">>,
+                <<"serial">> => list_to_binary(Serial),
+                <<"reason">> => list_to_binary(Reason)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("Certificate revoke request sent");
+                {error, Error} ->
+                    cryptic_shell:print_error(
+                        "Failed to revoke certificate: " ++
+                        lists:flatten(io_lib:format("~p", [Error]))
+                    )
+            end
+    end.
+
+%%====================================================================
+%% Invite Command Execution (Legacy - Deprecated - Removed)
+%%====================================================================
 
 %%%===================================================================
 %%% Certificate Command Implementations

@@ -61,6 +61,15 @@ init([]) ->
           type => worker,
           modules => [cryptic_ca_rate_limiter]},
 
+    %% Certificate expiration monitor
+    CertMonitor =
+        #{id => cryptic_cert_monitor,
+          start => {cryptic_cert_monitor, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_cert_monitor]},
+
     %% Start the HTTP server as a child process (must start after CA init)
     CrypticServer =
         #{id => cryptic_server,
@@ -70,7 +79,7 @@ init([]) ->
           type => worker,
           modules => [cryptic_server]},
 
-    ChildSpecs = [EventManager, CaInit, CaSerialManager, CaRateLimiter, CrypticServer],
+    ChildSpecs = [EventManager, CaInit, CaSerialManager, CaRateLimiter, CertMonitor, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

@@ -1,14 +1,26 @@
-%% @doc WebSocket handler for CA invite operations from trusted clients (cryptic_console)
+%% @doc WebSocket handler for CA operations from trusted clients (cryptic_console)
 %%
 %% This module handles WebSocket connections from authenticated clients
-%% (cryptic_console) for invite management operations. Authentication is
+%% (cryptic_console) for CA management operations. Authentication is
 %% provided by the existing mTLS connection.
 %%
-%% Supported Commands:
+%% Admin User Management Commands:
+%% - register_user: Register a new user's GPG public key
+%% - list_users: List all registered users (with optional filter)
+%% - get_user_info: Get detailed info about a specific user
+%% - suspend_user: Temporarily suspend a user's access
+%% - revoke_user: Permanently revoke a user's access
+%% - reactivate_user: Reactivate a suspended user
+%%
+%% Legacy Invite Commands (deprecated):
 %% - invite_create: Create a new invite token
 %% - invite_list: List invites created by the authenticated user
 %% - invite_revoke: Revoke an unused invite
+%%
+%% Other Commands:
 %% - gpg_register_bootstrap: Register GPG key for existing mTLS user
+%% - cert_status_query: Query certificate status
+%% - cert_renew: Renew an expiring certificate
 %%
 %% @author Cryptic Development Team
 %% @version 1.0.0
@@ -214,6 +226,23 @@ handle_command(#{<<"type">> := <<"cert_renew">>} = Msg, State) ->
     handle_cert_renew(Msg, State);
 handle_command(#{<<"type">> := <<"gpg_register_bootstrap">>} = Msg, State) ->
     handle_gpg_register_bootstrap(Msg, State);
+%% Admin-mediated user management commands
+handle_command(#{<<"type">> := <<"register_user">>} = Msg, State) ->
+    handle_register_user(Msg, State);
+handle_command(#{<<"type">> := <<"list_users">>} = Msg, State) ->
+    handle_list_users(Msg, State);
+handle_command(#{<<"type">> := <<"get_user_info">>} = Msg, State) ->
+    handle_get_user_info(Msg, State);
+handle_command(#{<<"type">> := <<"suspend_user">>} = Msg, State) ->
+    handle_suspend_user(Msg, State);
+handle_command(#{<<"type">> := <<"revoke_user">>} = Msg, State) ->
+    handle_revoke_user(Msg, State);
+handle_command(#{<<"type">> := <<"reactivate_user">>} = Msg, State) ->
+    handle_reactivate_user(Msg, State);
+handle_command(#{<<"type">> := <<"revoke_certificate">>} = Msg, State) ->
+    handle_revoke_certificate(Msg, State);
+handle_command(#{<<"type">> := <<"list_certificates">>} = Msg, State) ->
+    handle_list_certificates(Msg, State);
 %% Legacy command format support (backward compatibility)
 handle_command(#{<<"command">> := <<"invite_create">>} = Msg, State) ->
     handle_invite_create(Msg, State);
@@ -227,7 +256,7 @@ handle_command(_Msg, State) ->
     ErrorResp = jsx:encode(#{
         error => <<"unknown_command">>,
         message =>
-            <<"Supported commands: invite_create, invite_list, invite_show, invite_revoke, cert_status_query, cert_renew, gpg_register_bootstrap">>
+            <<"Supported commands: register_user, list_users, get_user_info, suspend_user, revoke_user, reactivate_user, invite_create, invite_list, invite_show, invite_revoke, cert_status_query, cert_renew, gpg_register_bootstrap">>
     }),
     {reply, {text, ErrorResp}, State}.
 
@@ -506,7 +535,10 @@ handle_invite_show(
                                 invite_id => Invite#invite.invite_id,
                                 inviter_fp => Invite#invite.inviter_fp,
                                 expires_at => Invite#invite.expires_at,
-                                consumed => Invite#invite.consumed,
+                                status => Invite#invite.status,
+                                registered_at => Invite#invite.registered_at,
+                                registered_by_fp => Invite#invite.registered_by_fp,
+                                consumed_at => Invite#invite.consumed_at,
                                 expired => (Invite#invite.expires_at < Now),
                                 meta => Meta
                             },
@@ -801,6 +833,613 @@ handle_gpg_register_bootstrap(_Msg, State) ->
     ErrorResp = jsx:encode(#{
         error => <<"missing_gpg_pub">>,
         message => <<"gpg_pub is required">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%%====================================================================
+%% Admin User Management Commands
+%%====================================================================
+
+%% @doc Handle register_user command.
+%%
+%% Allows an admin to register a new user's GPG public key.
+%% This is the primary onboarding method in the admin-mediated flow.
+%%
+%% Request format:
+%% ```
+%% {
+%%   "type": "register_user",
+%%   "gpg_fp": "ABCD1234...",
+%%   "gpg_pub": "-----BEGIN PGP PUBLIC KEY BLOCK-----...",
+%%   "metadata": {
+%%     "name": "Bob Smith",
+%%     "team": "Engineering",
+%%     "notes": "New team member"
+%%   }
+%% }
+%% '''
+%%
+%% Response format:
+%% ```
+%% {
+%%   "status": "success",
+%%   "gpg_fp": "ABCD1234...",
+%%   "registered_at": 1730000000,
+%%   "registered_by": "ADMIN_FP"
+%% }
+%% '''
+-spec handle_register_user(map(), #state{}) ->
+    {reply, tuple(), #state{}}.
+handle_register_user(
+    #{<<"gpg_fp">> := GpgFp, <<"gpg_pub">> := GpgPub} = Msg,
+    #state{gpg_fp = AdminFp, db_ref = DbRef, authenticated = true} = State
+) ->
+    ?info("Admin ~s registering user ~s", [AdminFp, GpgFp]),
+
+    %% Extract optional metadata
+    Metadata = case maps:get(<<"metadata">>, Msg, undefined) of
+        undefined -> undefined;
+        Meta when is_map(Meta) -> jsx:encode(Meta);
+        Meta when is_binary(Meta) -> Meta
+    end,
+
+    %% Register the user
+    case cryptic_ca_store:register_user(DbRef, GpgFp, GpgPub, AdminFp, Metadata) of
+        ok ->
+            Now = erlang:system_time(second),
+            
+            %% Log audit event
+            AuditLog = #audit_log{
+                timestamp = Now,
+                event_type = <<"user_registered">>,
+                gpg_fp = GpgFp,
+                invite_id = undefined,
+                details = jsx:encode(#{
+                    registered_by => AdminFp,
+                    has_metadata => (Metadata =/= undefined)
+                }),
+                ip_address = undefined
+            },
+            cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+            SuccessResp = jsx:encode(#{
+                type => <<"register_user_response">>,
+                status => <<"success">>,
+                gpg_fp => GpgFp,
+                registered_at => Now,
+                registered_by => AdminFp
+            }),
+            {reply, {text, SuccessResp}, State};
+        {error, Reason} ->
+            ?error("Failed to register user ~s: ~p", [GpgFp, Reason]),
+            ErrorResp = jsx:encode(#{
+                type => <<"register_user_response">>,
+                status => <<"error">>,
+                error => <<"registration_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_register_user(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required fields: gpg_fp, gpg_pub">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%% @doc Handle list_users command.
+%%
+%% Lists all registered users (admin only).
+%%
+%% Request format:
+%% ```
+%% {
+%%   "type": "list_users",
+%%   "filter": "active"  // optional: "active", "suspended", "revoked", or omit for all
+%% }
+%% '''
+%%
+%% Response format:
+%% ```
+%% {
+%%   "status": "success",
+%%   "users": [
+%%     {
+%%       "gpg_fp": "ABCD1234...",
+%%       "status": "active",
+%%       "registered_by": "ADMIN_FP",
+%%       "registered_at": 1730000000,
+%%       "last_seen": 1730000100,
+%%       "metadata": {"name": "Bob Smith", "team": "Engineering"}
+%%     }
+%%   ]
+%% }
+%% '''
+-spec handle_list_users(map(), #state{}) ->
+    {reply, tuple(), #state{}}.
+handle_list_users(
+    Msg,
+    #state{db_ref = DbRef, authenticated = true} = State
+) ->
+    ?debug("Listing users", []),
+
+    case cryptic_ca_store:list_gpg_identities(DbRef) of
+        {ok, Identities} ->
+            %% Optional filter by status
+            FilteredIdentities = case maps:get(<<"filter">>, Msg, undefined) of
+                undefined -> Identities;
+                FilterStatus ->
+                    lists:filter(
+                        fun(#gpg_identity{status = S}) -> S =:= FilterStatus end,
+                        Identities
+                    )
+            end,
+
+            %% Convert to JSON-friendly format
+            Users = lists:map(
+                fun(#gpg_identity{
+                    gpg_fp = Fp,
+                    status = Status,
+                    registered_by = RegBy,
+                    registered_at = RegAt,
+                    last_seen = LastSeen,
+                    metadata = Meta
+                }) ->
+                    UserMap = #{
+                        gpg_fp => Fp,
+                        status => Status,
+                        registered_by => RegBy,
+                        registered_at => RegAt,
+                        last_seen => LastSeen
+                    },
+                    case Meta of
+                        undefined -> UserMap;
+                        _ ->
+                            try
+                                MetaMap = jsx:decode(Meta, [return_maps]),
+                                UserMap#{metadata => MetaMap}
+                            catch
+                                _:_ -> UserMap
+                            end
+                    end
+                end,
+                FilteredIdentities
+            ),
+
+            SuccessResp = jsx:encode(#{
+                type => <<"list_users_response">>,
+                status => <<"success">>,
+                count => length(Users),
+                users => Users
+            }),
+            {reply, {text, SuccessResp}, State};
+        {error, Reason} ->
+            ?error("Failed to list users: ~p", [Reason]),
+            ErrorResp = jsx:encode(#{
+                type => <<"list_users_response">>,
+                status => <<"error">>,
+                error => <<"list_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_list_users(_Msg, #state{authenticated = false} = State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"unauthorized">>,
+        message => <<"Authentication required">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%% @doc Handle get_user_info command.
+%%
+%% Get detailed information about a specific user.
+%%
+%% Request format:
+%% ```
+%% {
+%%   "type": "get_user_info",
+%%   "gpg_fp": "ABCD1234..."
+%% }
+%% '''
+-spec handle_get_user_info(map(), #state{}) ->
+    {reply, tuple(), #state{}}.
+handle_get_user_info(
+    #{<<"gpg_fp">> := GpgFp},
+    #state{db_ref = DbRef, authenticated = true} = State
+) ->
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, #gpg_identity{
+            status = Status,
+            registered_by = RegBy,
+            registered_at = RegAt,
+            last_seen = LastSeen,
+            metadata = Meta
+        }} ->
+            UserInfo = #{
+                gpg_fp => GpgFp,
+                status => Status,
+                registered_by => RegBy,
+                registered_at => RegAt,
+                last_seen => LastSeen
+            },
+            
+            UserInfoWithMeta = case Meta of
+                undefined -> UserInfo;
+                _ ->
+                    try
+                        MetaMap = jsx:decode(Meta, [return_maps]),
+                        UserInfo#{metadata => MetaMap}
+                    catch
+                        _:_ -> UserInfo
+                    end
+            end,
+
+            SuccessResp = jsx:encode(#{
+                type => <<"get_user_info_response">>,
+                status => <<"success">>,
+                user => UserInfoWithMeta
+            }),
+            {reply, {text, SuccessResp}, State};
+        {error, not_found} ->
+            ErrorResp = jsx:encode(#{
+                type => <<"get_user_info_response">>,
+                status => <<"error">>,
+                error => <<"user_not_found">>,
+                message => <<"GPG fingerprint not registered">>
+            }),
+            {reply, {text, ErrorResp}, State};
+        {error, Reason} ->
+            ?error("Failed to get user info for ~s: ~p", [GpgFp, Reason]),
+            ErrorResp = jsx:encode(#{
+                type => <<"get_user_info_response">>,
+                status => <<"error">>,
+                error => <<"query_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_get_user_info(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required field: gpg_fp">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%% @doc Handle suspend_user command.
+%%
+%% Temporarily suspend a user's access.
+%%
+%% Request format:
+%% ```
+%% {
+%%   "type": "suspend_user",
+%%   "gpg_fp": "ABCD1234...",
+%%   "reason": "Policy violation"
+%% }
+%% '''
+-spec handle_suspend_user(map(), #state{}) ->
+    {reply, tuple(), #state{}}.
+handle_suspend_user(
+    #{<<"gpg_fp">> := GpgFp} = Msg,
+    #state{gpg_fp = AdminFp, db_ref = DbRef, authenticated = true} = State
+) ->
+    Reason = maps:get(<<"reason">>, Msg, <<"No reason provided">>),
+    ?info("Admin ~s suspending user ~s: ~s", [AdminFp, GpgFp, Reason]),
+
+    case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"suspended">>) of
+        ok ->
+            Now = erlang:system_time(second),
+            
+            %% Log audit event
+            AuditLog = #audit_log{
+                timestamp = Now,
+                event_type = <<"user_suspended">>,
+                gpg_fp = GpgFp,
+                invite_id = undefined,
+                details = jsx:encode(#{
+                    suspended_by => AdminFp,
+                    reason => Reason
+                }),
+                ip_address = undefined
+            },
+            cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+            SuccessResp = jsx:encode(#{
+                type => <<"suspend_user_response">>,
+                status => <<"success">>,
+                gpg_fp => GpgFp,
+                new_status => <<"suspended">>,
+                suspended_by => AdminFp,
+                suspended_at => Now
+            }),
+            {reply, {text, SuccessResp}, State};
+        {error, Reason2} ->
+            ?error("Failed to suspend user ~s: ~p", [GpgFp, Reason2]),
+            ErrorResp = jsx:encode(#{
+                type => <<"suspend_user_response">>,
+                status => <<"error">>,
+                error => <<"suspension_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason2]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_suspend_user(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required field: gpg_fp">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%% @doc Handle revoke_user command.
+%%
+%% Permanently revoke a user's access (irreversible).
+%%
+%% Request format:
+%% ```
+%% {
+%%   "type": "revoke_user",
+%%   "gpg_fp": "ABCD1234...",
+%%   "reason": "Left company"
+%% }
+%% '''
+-spec handle_revoke_user(map(), #state{}) ->
+    {reply, tuple(), #state{}}.
+handle_revoke_user(
+    #{<<"gpg_fp">> := GpgFp} = Msg,
+    #state{gpg_fp = AdminFp, db_ref = DbRef, authenticated = true} = State
+) ->
+    Reason = maps:get(<<"reason">>, Msg, <<"No reason provided">>),
+    ?info("Admin ~s revoking user ~s: ~s", [AdminFp, GpgFp, Reason]),
+
+    case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"revoked">>) of
+        ok ->
+            Now = erlang:system_time(second),
+            
+            %% Log audit event
+            AuditLog = #audit_log{
+                timestamp = Now,
+                event_type = <<"user_revoked">>,
+                gpg_fp = GpgFp,
+                invite_id = undefined,
+                details = jsx:encode(#{
+                    revoked_by => AdminFp,
+                    reason => Reason
+                }),
+                ip_address = undefined
+            },
+            cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+            SuccessResp = jsx:encode(#{
+                type => <<"revoke_user_response">>,
+                status => <<"success">>,
+                gpg_fp => GpgFp,
+                new_status => <<"revoked">>,
+                revoked_by => AdminFp,
+                revoked_at => Now,
+                message => <<"User permanently revoked (irreversible)">>
+            }),
+            {reply, {text, SuccessResp}, State};
+        {error, Reason2} ->
+            ?error("Failed to revoke user ~s: ~p", [GpgFp, Reason2]),
+            ErrorResp = jsx:encode(#{
+                type => <<"revoke_user_response">>,
+                status => <<"error">>,
+                error => <<"revocation_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason2]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_revoke_user(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required field: gpg_fp">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%% @doc Handle reactivate_user command.
+%%
+%% Reactivate a suspended user (does not work for revoked users).
+%%
+%% Request format:
+%% ```
+%% {
+%%   "type": "reactivate_user",
+%%   "gpg_fp": "ABCD1234..."
+%% }
+%% '''
+-spec handle_reactivate_user(map(), #state{}) ->
+    {reply, tuple(), #state{}}.
+handle_reactivate_user(
+    #{<<"gpg_fp">> := GpgFp},
+    #state{gpg_fp = AdminFp, db_ref = DbRef, authenticated = true} = State
+) ->
+    ?info("Admin ~s reactivating user ~s", [AdminFp, GpgFp]),
+
+    %% First check current status
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, #gpg_identity{status = <<"revoked">>}} ->
+            ErrorResp = jsx:encode(#{
+                type => <<"reactivate_user_response">>,
+                status => <<"error">>,
+                error => <<"cannot_reactivate_revoked">>,
+                message => <<"Revoked users cannot be reactivated. Please register a new GPG key.">>
+            }),
+            {reply, {text, ErrorResp}, State};
+        {ok, #gpg_identity{status = <<"active">>}} ->
+            InfoResp = jsx:encode(#{
+                type => <<"reactivate_user_response">>,
+                status => <<"success">>,
+                gpg_fp => GpgFp,
+                message => <<"User already active">>
+            }),
+            {reply, {text, InfoResp}, State};
+        {ok, _Identity} ->
+            %% User is suspended, reactivate
+            case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"active">>) of
+                ok ->
+                    Now = erlang:system_time(second),
+                    
+                    %% Log audit event
+                    AuditLog = #audit_log{
+                        timestamp = Now,
+                        event_type = <<"user_reactivated">>,
+                        gpg_fp = GpgFp,
+                        invite_id = undefined,
+                        details = jsx:encode(#{
+                            reactivated_by => AdminFp
+                        }),
+                        ip_address = undefined
+                    },
+                    cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+                    SuccessResp = jsx:encode(#{
+                        type => <<"reactivate_user_response">>,
+                        status => <<"success">>,
+                        gpg_fp => GpgFp,
+                        new_status => <<"active">>,
+                        reactivated_by => AdminFp,
+                        reactivated_at => Now
+                    }),
+                    {reply, {text, SuccessResp}, State};
+                {error, Reason} ->
+                    ?error("Failed to reactivate user ~s: ~p", [GpgFp, Reason]),
+                    ErrorResp = jsx:encode(#{
+                        type => <<"reactivate_user_response">>,
+                        status => <<"error">>,
+                        error => <<"reactivation_failed">>,
+                        message => iolist_to_binary(io_lib:format("~p", [Reason]))
+                    }),
+                    {reply, {text, ErrorResp}, State}
+            end;
+        {error, not_found} ->
+            ErrorResp = jsx:encode(#{
+                type => <<"reactivate_user_response">>,
+                status => <<"error">>,
+                error => <<"user_not_found">>,
+                message => <<"GPG fingerprint not registered">>
+            }),
+            {reply, {text, ErrorResp}, State};
+        {error, Reason} ->
+            ?error("Failed to get user info for ~s: ~p", [GpgFp, Reason]),
+            ErrorResp = jsx:encode(#{
+                type => <<"reactivate_user_response">>,
+                status => <<"error">>,
+                error => <<"query_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_reactivate_user(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required field: gpg_fp">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%%--------------------------------------------------------------------
+%% @doc Handle revoke_certificate command - Admin revokes a specific certificate
+%% @end
+%%--------------------------------------------------------------------
+-spec handle_revoke_certificate(map(), #state{}) ->
+    {reply, {text, binary()}, #state{}}.
+handle_revoke_certificate(
+    #{
+        <<"serial">> := Serial,
+        <<"reason">> := Reason
+    } = _Msg,
+    #state{db_ref = DbRef, gpg_fp = AdminFp, authenticated = true} = State
+) ->
+    %% Revoke the certificate
+    case cryptic_ca_store:revoke_certificate(DbRef, Serial, AdminFp, Reason) of
+        ok ->
+            ?info("Admin ~s revoked certificate ~s: ~s", [AdminFp, Serial, Reason]),
+            
+            Resp = jsx:encode(#{
+                type => <<"revoke_certificate_response">>,
+                status => <<"success">>,
+                message => <<"Certificate revoked successfully">>,
+                serial => Serial,
+                reason => Reason
+            }),
+            {reply, {text, Resp}, State};
+        
+        {error, ErrorReason} ->
+            ?error("Failed to revoke certificate ~s: ~p", [Serial, ErrorReason]),
+            ErrorResp = jsx:encode(#{
+                type => <<"revoke_certificate_response">>,
+                status => <<"error">>,
+                error => <<"revoke_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_revoke_certificate(_Msg, #state{authenticated = false} = State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"unauthorized">>,
+        message => <<"Admin authentication required">>
+    }),
+    {reply, {text, ErrorResp}, State};
+handle_revoke_certificate(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required fields: serial, reason">>
+    }),
+    {reply, {text, ErrorResp}, State}.
+
+%%--------------------------------------------------------------------
+%% @doc Handle list_certificates command - List certificates for a user
+%% @end
+%%--------------------------------------------------------------------
+-spec handle_list_certificates(map(), #state{}) ->
+    {reply, {text, binary()}, #state{}}.
+handle_list_certificates(
+    #{<<"gpg_fp">> := GpgFp} = _Msg,
+    #state{db_ref = DbRef, authenticated = true} = State
+) ->
+    %% List all certificates for the user
+    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
+        {ok, Certs} ->
+            CertList = lists:map(fun(Cert) ->
+                #{
+                    serial => Cert#certificate.serial,
+                    issued_at => Cert#certificate.issued_at,
+                    expires_at => Cert#certificate.expires_at,
+                    status => Cert#certificate.status,
+                    revoked_at => Cert#certificate.revoked_at,
+                    revoked_by => Cert#certificate.revoked_by,
+                    revoked_reason => Cert#certificate.revoked_reason
+                }
+            end, Certs),
+            
+            Resp = jsx:encode(#{
+                type => <<"list_certificates_response">>,
+                status => <<"success">>,
+                gpg_fp => GpgFp,
+                certificates => CertList,
+                count => length(Certs)
+            }),
+            {reply, {text, Resp}, State};
+        
+        {error, ErrorReason} ->
+            ?error("Failed to list certificates for ~s: ~p", [GpgFp, ErrorReason]),
+            ErrorResp = jsx:encode(#{
+                type => <<"list_certificates_response">>,
+                status => <<"error">>,
+                error => <<"list_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
+            }),
+            {reply, {text, ErrorResp}, State}
+    end;
+handle_list_certificates(_Msg, #state{authenticated = false} = State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"unauthorized">>,
+        message => <<"Admin authentication required">>
+    }),
+    {reply, {text, ErrorResp}, State};
+handle_list_certificates(_Msg, State) ->
+    ErrorResp = jsx:encode(#{
+        error => <<"invalid_request">>,
+        message => <<"Required field: gpg_fp">>
     }),
     {reply, {text, ErrorResp}, State}.
 

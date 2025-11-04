@@ -278,6 +278,8 @@
 ]).
 
 -include("cryptic_server.hrl").
+-include("cryptic_ca.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 -define(SERVER, ?MODULE).
 
@@ -658,14 +660,26 @@ verify_peer(_OtpCert, _DerCert, {extension, Extension}, UserState) ->
             case extract_gpg_from_san(SANValues) of
                 {ok, GpgFp} ->
                     ?debug("VERIFY_PEER: Found GPG fingerprint in SAN: ~s", [GpgFp]),
-                    %% Verify the GPG fingerprint is registered in the database
-                    case verify_gpg_fingerprint(GpgFp) of
-                        true ->
-                            ?debug("VERIFY_PEER: GPG fingerprint ~s is registered", [GpgFp]),
+                    %% Verify the GPG fingerprint is registered and certificate is valid
+                    case verify_gpg_and_cert(GpgFp, _OtpCert) of
+                        {ok, active} ->
+                            ?debug("VERIFY_PEER: GPG fingerprint ~s is registered with active cert", [GpgFp]),
                             {valid, UserState};
-                        false ->
+                        {error, unregistered} ->
                             ?warning("VERIFY_PEER: GPG fingerprint ~s is NOT registered - rejecting", [GpgFp]),
                             {fail, {bad_cert, unregistered_gpg_fingerprint}};
+                        {error, suspended} ->
+                            ?warning("VERIFY_PEER: User ~s is suspended - rejecting", [GpgFp]),
+                            {fail, {bad_cert, user_suspended}};
+                        {error, revoked} ->
+                            ?warning("VERIFY_PEER: User ~s is revoked - rejecting", [GpgFp]),
+                            {fail, {bad_cert, user_revoked}};
+                        {error, cert_revoked} ->
+                            ?warning("VERIFY_PEER: Certificate for ~s is revoked - rejecting", [GpgFp]),
+                            {fail, {bad_cert, certificate_revoked}};
+                        {error, cert_expired} ->
+                            ?warning("VERIFY_PEER: Certificate for ~s is expired - rejecting", [GpgFp]),
+                            {fail, {bad_cert, certificate_expired}};
                         {error, Reason} ->
                             ?error("VERIFY_PEER: Error verifying GPG fingerprint ~s: ~p", [GpgFp, Reason]),
                             %% On error, reject to be safe
@@ -717,19 +731,57 @@ extract_gpg_from_san(SANValues) ->
         {error, _} = Error -> Error
     end.
 
-%% @doc Verify that a GPG fingerprint is registered in the CA database
--spec verify_gpg_fingerprint(binary()) -> boolean() | {error, term()}.
-verify_gpg_fingerprint(GpgFp) ->
+%% @doc Verify GPG fingerprint is registered and certificate is valid.
+%%
+%% Checks both user status and certificate status:
+%% - User must be 'active' (not suspended/revoked)
+%% - Certificate must be 'active' (not expired/revoked)
+-spec verify_gpg_and_cert(binary(), term()) -> 
+    {ok, active} | {error, unregistered | suspended | revoked | cert_revoked | cert_expired | term()}.
+verify_gpg_and_cert(GpgFp, OtpCert) ->
     try
         %% Look up the database reference from the ETS table
         case ets:lookup(cryptic_ca_storage, db_ref) of
             [{db_ref, DbRef}] ->
-                %% Check if the GPG fingerprint is registered
+                %% Step 1: Check if the GPG fingerprint is registered
                 case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
-                    {ok, _Identity} -> 
-                        true;
+                    {ok, Identity} ->
+                        %% Step 2: Check user status
+                        case Identity#gpg_identity.status of
+                            <<"active">> ->
+                                %% Step 3: Extract serial from certificate and check cert status
+                                Serial = extract_serial_from_otp_cert(OtpCert),
+                                case cryptic_ca_store:get_certificate(DbRef, Serial) of
+                                    {ok, Cert} ->
+                                        %% Check certificate status
+                                        case Cert#certificate.status of
+                                            <<"active">> ->
+                                                {ok, active};
+                                            <<"revoked">> ->
+                                                {error, cert_revoked};
+                                            <<"expired">> ->
+                                                {error, cert_expired};
+                                            _Other ->
+                                                {error, {unknown_cert_status, _Other}}
+                                        end;
+                                    {error, not_found} ->
+                                        %% Certificate not in database - this shouldn't happen
+                                        %% but we'll allow it for backward compatibility
+                                        ?warning("Certificate ~s not found in database for user ~s", 
+                                                [Serial, GpgFp]),
+                                        {ok, active};
+                                    {error, CertError} ->
+                                        {error, {cert_lookup_failed, CertError}}
+                                end;
+                            <<"suspended">> ->
+                                {error, suspended};
+                            <<"revoked">> ->
+                                {error, revoked};
+                            _Other ->
+                                {error, {unknown_status, _Other}}
+                        end;
                     {error, not_found} -> 
-                        false;
+                        {error, unregistered};
                     {error, _Reason} = Error ->
                         Error
                 end;
@@ -743,4 +795,17 @@ verify_gpg_fingerprint(GpgFp) ->
             {error, ca_storage_not_available};
         ErrorClass:ErrorReason ->
             {error, {ErrorClass, ErrorReason}}
+    end.
+
+%% @doc Extract serial number from OTP certificate structure.
+-spec extract_serial_from_otp_cert(term()) -> binary().
+extract_serial_from_otp_cert(OtpCert) ->
+    try
+        TbsCert = OtpCert#'OTPCertificate'.tbsCertificate,
+        Serial = TbsCert#'OTPTBSCertificate'.serialNumber,
+        integer_to_binary(Serial, 16)
+    catch
+        _:Error ->
+            ?error("Failed to extract serial from OTP cert: ~p", [Error]),
+            <<"unknown">>
     end.

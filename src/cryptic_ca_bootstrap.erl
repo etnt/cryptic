@@ -135,11 +135,12 @@ register_gpg_identity(DbRef, GpgFp, GpgPubArmored, FilePath) ->
     Identity = #gpg_identity{
         gpg_fp = GpgFp,
         gpg_pub_armor = GpgPubArmored,
-        status = <<"verified_bootstrap">>,
-        inviter_fp = undefined,
+        status = <<"active">>,
+        registered_by = undefined,  % Bootstrap user has no admin
         registered_at = erlang:system_time(second),
         last_seen = erlang:system_time(second),
-        invite_id = undefined
+        metadata = iolist_to_binary(["{\"source\":\"bootstrap\",\"file\":\"", 
+                                     filename:basename(FilePath), "\"}"])
     },
     
     case cryptic_ca_store:insert_gpg_identity(DbRef, Identity) of

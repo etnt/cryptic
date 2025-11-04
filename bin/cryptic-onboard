@@ -1,20 +1,21 @@
 #!/bin/bash
 #
-# cryptic-onboard - External onboarding script for Cryptic
+# cryptic-onboard - Interactive onboarding wizard for Cryptic
 #
-# This script handles initial registration and certificate requests for new
-# users who don't have certificates yet. It uses public REST APIs and doesn't
-# require mTLS.
+# This script provides an interactive wizard-style interface for the complete
+# Cryptic onboarding process, from GPG key generation to certificate requests.
 #
 # Usage:
-#   cryptic-onboard register <invite_file>
-#   cryptic-onboard request <username> [server_url]
-#   cryptic-onboard info [username] [cert_file|server_url]
+#   cryptic-onboard                         Interactive wizard (recommended)
+#   cryptic-onboard export-gpg              Export GPG public key for admin
+#   cryptic-onboard request [server_url]    Request certificate from CA
+#   cryptic-onboard info [cert_file]        Display certificate information
+#   cryptic-onboard generate-gpg            Generate new GPG key pair
 #
 # Dependencies: curl, openssl, gpg, jq
 #
 # Author: Cryptic Team
-# Date: 2025-11-01
+# Date: 2025-11-04
 
 set -e  # Exit on error
 
@@ -83,8 +84,10 @@ draw_box() {
     local text="$1"
     local width=70
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "$text"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [ -n "$text" ]; then
+        echo "$text"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
 }
 
 generate_gpg_key() {
@@ -138,35 +141,8 @@ EOF
     fi
 }
 
-#
-# Command: register <invite_file>
-# Registers GPG key with CA using invitation token
-#
-cmd_register() {
-    local invite_file="$1"
-
-    if [ -z "$invite_file" ]; then
-        error "Usage: cryptic-onboard register <invite_file>"
-    fi
-
-    if [ ! -f "$invite_file" ]; then
-        error "Invite file not found: $invite_file"
-    fi
-
-    draw_box "Cryptic Registration"
-
-    # Step 1: Read invite token
-    info "[1/4] Reading invite token..."
-    INVITE_TOKEN=$(cat "$invite_file")
-    if [ -z "$INVITE_TOKEN" ]; then
-        error "Invite file is empty"
-    fi
-    success "Invite token loaded"
-
-    # Step 2: Get GPG key email
-    info "[2/4] Finding GPG key..."
-
-    # Try to find a GPG key
+select_gpg_key() {
+    # Get list of GPG keys
     GPG_KEYS=$(gpg --list-secret-keys --with-colons | grep "^uid" | cut -d: -f10 | head -10)
 
     if [ -z "$GPG_KEYS" ]; then
@@ -177,20 +153,21 @@ cmd_register() {
         if [ "$gen_key" = "Y" ] || [ "$gen_key" = "y" ]; then
             generate_gpg_key
             # Use the email from the generated key
-            GPG_KEY_EMAIL="$GENERATED_GPG_EMAIL"
-            if [ -z "$GPG_KEY_EMAIL" ]; then
+            SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
+            if [ -z "$SELECTED_GPG_EMAIL" ]; then
                 error "GPG key generation failed or was cancelled"
             fi
         else
             error "Cannot proceed without a GPG key. Please generate one manually:\n  gpg --full-generate-key"
         fi
+        return
     fi
 
-    # If only one key, use it; otherwise prompt with option to generate new
-    KEY_COUNT=$(echo "$GPG_KEYS" | wc -l)
-    if [ "$KEY_COUNT" -eq 1 ] && [ -z "$GPG_KEY_EMAIL" ]; then
-        GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | head -1)
-        echo "Found GPG key: $GPG_KEY_EMAIL"
+    # If only one key, use it; otherwise prompt
+    KEY_COUNT=$(echo "$GPG_KEYS" | wc -l | tr -d ' ')
+    if [ "$KEY_COUNT" -eq 1 ]; then
+        SELECTED_GPG_EMAIL=$(echo "$GPG_KEYS" | head -1)
+        echo "Found GPG key: $SELECTED_GPG_EMAIL"
         read -p "Use this key? [Y/n]: " use_key
         use_key=${use_key:-Y}
         if [ "$use_key" != "Y" ] && [ "$use_key" != "y" ]; then
@@ -199,10 +176,9 @@ cmd_register() {
             gen_new=${gen_new:-Y}
             if [ "$gen_new" = "Y" ] || [ "$gen_new" = "y" ]; then
                 generate_gpg_key
-                # Use the email from the generated key
-                GPG_KEY_EMAIL="$GENERATED_GPG_EMAIL"
+                SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
             else
-                error "Registration cancelled"
+                error "Operation cancelled"
             fi
         fi
     else
@@ -215,141 +191,150 @@ cmd_register() {
         
         if [ "$key_num" -eq "$(($KEY_COUNT + 1))" ]; then
             generate_gpg_key
-            # Use the email from the generated key
-            GPG_KEY_EMAIL="$GENERATED_GPG_EMAIL"
+            SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
         else
-            GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | sed -n "${key_num}p")
+            SELECTED_GPG_EMAIL=$(echo "$GPG_KEYS" | sed -n "${key_num}p")
         fi
     fi
+}
 
-    success "Selected GPG key: $GPG_KEY_EMAIL"
-
-    # Step 3: Export GPG public key
-    info "[3/4] Exporting GPG public key..."
-    GPG_PUBKEY=$(gpg --armor --export "$GPG_KEY_EMAIL" 2>/dev/null)
-    if [ -z "$GPG_PUBKEY" ]; then
-        error "Failed to export GPG public key for: $GPG_KEY_EMAIL"
-    fi
-    success "GPG public key exported"
-
-    # Extract server URL from invite token (from 'aud' field in the clearsigned JSON)
-    # The invite token is a GPG clearsigned message with JSON payload
-    info "Extracting server URL from invite token..."
-
-    # Try to extract the JSON payload from the clearsigned message
-    TOKEN_JSON=$(echo "$INVITE_TOKEN" | sed -n '/^-----BEGIN PGP SIGNED MESSAGE-----/,/^-----BEGIN PGP SIGNATURE-----/p' | \
-                 grep -v '^-----' | grep -v '^Hash:' | grep -v '^$' | tr -d '\n')
-
-    # Extract 'aud' field (CA server URL) from the JSON
-    CA_SERVER=$(echo "$TOKEN_JSON" | jq -r '.aud // empty' 2>/dev/null)
-
-    if [ -z "$CA_SERVER" ]; then
-        # Fallback: prompt user if we couldn't extract it
-        warn "Could not extract server URL from invite token"
-        read -p "CA server URL [$DEFAULT_SERVER]: " CA_SERVER
-        CA_SERVER=${CA_SERVER:-$DEFAULT_SERVER}
-    else
-        # Add https:// prefix if not present
-        if [[ ! "$CA_SERVER" =~ ^https?:// ]]; then
-            CA_SERVER="https://${CA_SERVER}"
-        fi
-        success "Server URL: $CA_SERVER"
-    fi
-
-    parse_server_url "$CA_SERVER"
-    CA_REST_URL="https://${SERVER_HOST}:${SERVER_PORT}"
-
-    # Step 4: Call REST API
-    info "[4/4] Submitting to CA at $CA_REST_URL..."
-
-    # Create JSON payload
-    JSON_PAYLOAD=$(jq -n \
-        --arg token "$INVITE_TOKEN" \
-        --arg pubkey "$GPG_PUBKEY" \
-        '{invite_token: $token, gpg_pub: $pubkey}')
-
-    # Make API call
-    # Note: Using -k for self-signed certificates in development
-    # In production, you should use --cacert with the CA certificate
-    RESPONSE=$(curl -k -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/register-gpg" \
-        -H "Content-Type: application/json" \
-        -d "$JSON_PAYLOAD" 2>/dev/null || echo "000")
-
-    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-    BODY=$(echo "$RESPONSE" | head -n -1)
-
-    if [ "$HTTP_CODE" != "200" ]; then
-        error "Registration failed (HTTP $HTTP_CODE)\n$BODY"
-    fi
-
-    success "Registration successful!"
+#
+# Command: export-gpg
+# Export GPG public key for admin registration
+#
+cmd_export_gpg() {
+    draw_box "Cryptic Onboarding - Step 1: Export GPG Public Key"
     echo ""
-
-    # Parse response
-    GPG_FP=$(echo "$BODY" | jq -r '.gpg_fp // empty')
-    STATUS=$(echo "$BODY" | jq -r '.status // empty')
-    REGISTERED_AT=$(echo "$BODY" | jq -r '.issued_at // empty')
-
+    
+    info "This command helps you export your GPG public key so an admin"
+    info "can register you in the Cryptic system."
+    echo ""
+    
+    # Step 1: Select GPG key
+    select_gpg_key
+    
+    if [ -z "$SELECTED_GPG_EMAIL" ]; then
+        error "No GPG key selected"
+    fi
+    
+    success "Selected GPG key: $SELECTED_GPG_EMAIL"
+    echo ""
+    
+    # Step 2: Get GPG fingerprint
+    GPG_FP=$(gpg --with-colons --fingerprint "$SELECTED_GPG_EMAIL" 2>/dev/null | \
+             grep "^fpr" | head -1 | cut -d: -f10)
+    
+    if [ -z "$GPG_FP" ]; then
+        error "Failed to get GPG fingerprint"
+    fi
+    
     echo "GPG Fingerprint: $GPG_FP"
-    echo "Status:          $STATUS"
-    echo "Registered:      $REGISTERED_AT"
     echo ""
-
-    # Save config
+    
+    # Step 3: Export public key
+    info "Exporting GPG public key..."
+    GPG_PUBKEY=$(gpg --armor --export "$SELECTED_GPG_EMAIL" 2>/dev/null)
+    if [ -z "$GPG_PUBKEY" ]; then
+        error "Failed to export GPG public key"
+    fi
+    
+    # Save to file
+    OUTPUT_DIR="${CONFIG_DIR}/gpg-export"
+    mkdir -p "$OUTPUT_DIR"
+    OUTPUT_FILE="${OUTPUT_DIR}/gpg-public-${GPG_FP}.asc"
+    
+    echo "$GPG_PUBKEY" > "$OUTPUT_FILE"
+    success "GPG public key exported to: $OUTPUT_FILE"
+    echo ""
+    
+    # Save config for later use
     mkdir -p "$CONFIG_DIR"
     jq -n \
         --arg fp "$GPG_FP" \
-        --arg email "$GPG_KEY_EMAIL" \
-        --arg server "$CA_SERVER" \
-        '{gpg_fingerprint: $fp, gpg_email: $email, default_server: $server}' \
+        --arg email "$SELECTED_GPG_EMAIL" \
+        '{gpg_fingerprint: $fp, gpg_email: $email}' \
         > "$CONFIG_FILE"
-
-    success "Configuration saved to $CONFIG_FILE"
+    
+    draw_box ""
     echo ""
-    info "Next step: Request your first certificate"
-    echo "  cryptic-onboard request <username> [$CA_SERVER]"
-
+    info "Next steps:"
+    echo ""
+    echo "  1. Send your GPG public key to a Cryptic administrator:"
+    echo "     File: $OUTPUT_FILE"
+    echo ""
+    echo "  2. Include this information in your request:"
+    echo "     - Your full name"
+    echo "     - Your team/department"
+    echo "     - GPG Fingerprint: $GPG_FP"
+    echo ""
+    echo "  3. Once the admin registers your GPG key, run:"
+    echo "     cryptic-onboard request [server_url]"
+    echo ""
+    
     draw_box ""
 }
 
 #
-# Command: request <username> [server_url]
-# Requests TLS certificate from CA
+# Command: request [server_url]
+# Requests TLS certificate from CA (admin must have registered your GPG key first)
 #
 cmd_request() {
-    local username="$1"
-    local server_url="$2"
+    local server_url="$1"
 
-    if [ -z "$username" ]; then
-        error "Usage: cryptic-onboard request <username> [server_url]"
-    fi
+    draw_box "Cryptic Onboarding - Step 2: Request Certificate"
+    echo ""
 
     # Load config
     if [ ! -f "$CONFIG_FILE" ]; then
-        error "Not registered. Please run 'cryptic-onboard register' first."
+        warn "No configuration found. Run 'cryptic-onboard export-gpg' first."
+        echo ""
+        info "Continuing without saved configuration..."
+        select_gpg_key
+        
+        if [ -z "$SELECTED_GPG_EMAIL" ]; then
+            error "No GPG key selected"
+        fi
+        
+        GPG_EMAIL="$SELECTED_GPG_EMAIL"
+        
+        # Get fingerprint
+        GPG_FP=$(gpg --with-colons --fingerprint "$GPG_EMAIL" 2>/dev/null | \
+                 grep "^fpr" | head -1 | cut -d: -f10)
+        
+        if [ -z "$GPG_FP" ]; then
+            error "Failed to get GPG fingerprint"
+        fi
+    else
+        GPG_FP=$(jq -r '.gpg_fingerprint // empty' "$CONFIG_FILE")
+        GPG_EMAIL=$(jq -r '.gpg_email // empty' "$CONFIG_FILE")
+
+        if [ -z "$GPG_FP" ] || [ -z "$GPG_EMAIL" ]; then
+            error "Invalid config file. Please run 'cryptic-onboard export-gpg' again."
+        fi
+        
+        info "Using GPG key: $GPG_EMAIL"
+        info "Fingerprint: $GPG_FP"
     fi
 
-    GPG_FP=$(jq -r '.gpg_fingerprint // empty' "$CONFIG_FILE")
-    GPG_EMAIL=$(jq -r '.gpg_email // empty' "$CONFIG_FILE")
-
-    if [ -z "$GPG_FP" ]; then
-        error "Invalid config file. Please register again."
-    fi
-
-    # Use provided server or default from config
+    # Use provided server or default
     if [ -z "$server_url" ]; then
-        server_url=$(jq -r '.default_server // empty' "$CONFIG_FILE")
+        if [ -f "$CONFIG_FILE" ]; then
+            server_url=$(jq -r '.default_server // empty' "$CONFIG_FILE")
+        fi
         if [ -z "$server_url" ]; then
-            server_url="$DEFAULT_SERVER"
+            read -p "CA server URL [$DEFAULT_SERVER]: " server_url
+            server_url=${server_url:-$DEFAULT_SERVER}
         fi
     fi
 
     parse_server_url "$server_url"
-
-    draw_box "Certificate Request"
+    
+    echo ""
+    info "Server: ${SERVER_HOST}:${SERVER_PORT}"
+    echo ""
 
     # Create directory structure
-    CERT_DIR="${CONFIG_DIR}/${username}/${SERVER_HOST}_${SERVER_PORT}"
+    CERT_DIR="${CONFIG_DIR}/${SERVER_HOST}_${SERVER_PORT}"
     CERT_SUBDIR="${CERT_DIR}/certificates"
     KEY_SUBDIR="${CERT_DIR}/private"
     mkdir -p "$CERT_SUBDIR" "$KEY_SUBDIR"
@@ -368,19 +353,19 @@ cmd_request() {
         success "Using existing TLS key"
     fi
 
-    # Step 2: Create CSR
+    # Step 2: Create CSR with GPG fingerprint in CN
     info "[2/4] Creating Certificate Signing Request (CSR)..."
     openssl req -new -key "$KEY_FILE" \
-        -subj "/CN=${GPG_FP}@${SERVER_HOST}" \
+        -subj "/CN=${GPG_FP}.gpg.cryptic.local" \
         -out "$CSR_FILE" 2>/dev/null
     success "CSR created"
 
     # Step 3: Sign CSR with GPG key
-    info "[3/4] Signing CSR with GPG key ($GPG_EMAIL)..."
+    info "[3/4] Signing CSR with GPG key..."
     CSR_DATA=$(cat "$CSR_FILE")
-    GPG_SIG=$(echo "$CSR_DATA" | gpg --armor --detach-sign 2>/dev/null)
+    GPG_SIG=$(echo "$CSR_DATA" | gpg --armor --detach-sign --local-user "$GPG_EMAIL" 2>/dev/null)
     if [ $? -ne 0 ]; then
-        error "Failed to sign CSR with GPG key"
+        error "Failed to sign CSR with GPG key. Make sure you have the private key for $GPG_EMAIL"
     fi
     success "CSR signed with GPG"
 
@@ -389,7 +374,7 @@ cmd_request() {
     CA_REST_URL="https://${SERVER_HOST}:${SERVER_PORT}"
 
     # Create JSON payload
-    GPG_SIG_B64=$(echo "$GPG_SIG" | base64)
+    GPG_SIG_B64=$(echo "$GPG_SIG" | base64 | tr -d '\n')
     JSON_PAYLOAD=$(jq -n \
         --arg csr "$CSR_DATA" \
         --arg fp "$GPG_FP" \
@@ -407,7 +392,8 @@ cmd_request() {
     BODY=$(echo "$RESPONSE" | head -n -1)
 
     if [ "$HTTP_CODE" != "200" ]; then
-        error "Certificate request failed (HTTP $HTTP_CODE)\n$BODY"
+        echo ""
+        error "Certificate request failed (HTTP $HTTP_CODE)\n\nResponse: $BODY\n\nPossible reasons:\n  - Admin has not registered your GPG key yet\n  - Your account has been suspended or revoked\n  - Network/server issue\n\nPlease contact your Cryptic administrator."
     fi
 
     # Save certificate
@@ -425,94 +411,109 @@ cmd_request() {
     SUBJECT=$(openssl x509 -in "$CERT_FILE" -noout -subject 2>/dev/null | cut -d= -f2-)
     NOT_BEFORE=$(openssl x509 -in "$CERT_FILE" -noout -startdate 2>/dev/null | cut -d= -f2)
     NOT_AFTER=$(openssl x509 -in "$CERT_FILE" -noout -enddate 2>/dev/null | cut -d= -f2)
+    EXPIRES_AT=$(echo "$BODY" | jq -r '.expires_at // empty')
+    VALIDITY_DAYS=$(echo "$BODY" | jq -r '.validity_days // 7')
 
     echo "Certificate Details:"
-    echo "  Serial:    $SERIAL"
-    echo "  Subject:   $SUBJECT"
-    echo "  Issuer:    CN=Cryptic CA"
-    echo "  Valid:     $NOT_BEFORE → $NOT_AFTER (7 days)"
+    echo "  Serial:        $SERIAL"
+    echo "  Subject:       $SUBJECT"
+    echo "  Issuer:        CN=Cryptic CA"
+    echo "  Valid From:    $NOT_BEFORE"
+    echo "  Valid Until:   $NOT_AFTER"
+    echo "  Validity:      $VALIDITY_DAYS days"
     echo ""
-    echo "  Files:"
-    echo "    Certificate: $CERT_FILE"
-    echo "    Private Key: $KEY_FILE"
+    echo "Files:"
+    echo "  Certificate:   $CERT_FILE"
+    echo "  Private Key:   $KEY_FILE"
     echo ""
     echo "Directory structure:"
     echo "  ${CERT_DIR}/"
     echo "    ├── certificates/"
     echo "    │   └── client.pem"
-    echo "    └── private/"
-    echo "        └── client.key"
+    echo "    ├── private/"
+    echo "    │   └── client.key"
+    echo "    └── client.csr"
     echo ""
-    info "You can now connect to Cryptic using the console:"
-    echo "  cryptic-console --cert $CERT_FILE \\"
-    echo "                  --key $KEY_FILE \\"
-    echo "                  connect wss://${SERVER_HOST}:${SERVER_PORT}"
-
+    
+    # Save server URL to config for future use
+    if [ -f "$CONFIG_FILE" ]; then
+        # Update existing config
+        TEMP_FILE="${CONFIG_FILE}.tmp"
+        jq --arg server "$server_url" '.default_server = $server' "$CONFIG_FILE" > "$TEMP_FILE"
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+    else
+        # Create new config
+        mkdir -p "$CONFIG_DIR"
+        jq -n \
+            --arg fp "$GPG_FP" \
+            --arg email "$GPG_EMAIL" \
+            --arg server "$server_url" \
+            '{gpg_fingerprint: $fp, gpg_email: $email, default_server: $server}' \
+            > "$CONFIG_FILE"
+    fi
+    
+    draw_box ""
+    echo ""
+    info "Next steps:"
+    echo ""
+    echo "  1. Connect to Cryptic using your certificate:"
+    echo "     cryptic-console --cert $CERT_FILE \\"
+    echo "                     --key $KEY_FILE \\"
+    echo "                     connect wss://${SERVER_HOST}:${SERVER_PORT}"
+    echo ""
+    echo "  2. Your certificate expires in $VALIDITY_DAYS days. Renew before expiration:"
+    echo "     cryptic-onboard request"
+    echo ""
+    
     draw_box ""
 }
 
 #
-# Command: info [username] [cert_file|server_url]
+# Command: info [cert_file]
 # Display certificate information
 #
 cmd_info() {
-    local username="$1"
-    local target="$2"
+    local cert_file="$1"
 
-    if [ -z "$username" ]; then
-        # No username: list all users
-        echo "Available users:"
-        if [ -d "$CONFIG_DIR" ]; then
-            find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read user_dir; do
-                local user=$(basename "$user_dir")
-                if [ "$user" != "config.json" ]; then
-                    echo "  $user"
-                    find "$user_dir" -name "client.pem" -type f 2>/dev/null | while read cert; do
-                        local server_dir=$(dirname $(dirname "$cert"))
-                        local server_name=$(basename "$server_dir")
-                        echo "    └─ $server_name"
-                    done
-                fi
-            done
+    draw_box "Certificate Information"
+    echo ""
+
+    # If no cert file specified, try to find one
+    if [ -z "$cert_file" ]; then
+        # Look for certificates in config directory
+        FOUND_CERTS=$(find "$CONFIG_DIR" -name "client.pem" -type f 2>/dev/null)
+        
+        if [ -z "$FOUND_CERTS" ]; then
+            error "No certificates found in $CONFIG_DIR\n\nRun 'cryptic-onboard request' to get a certificate."
         fi
-        return 0
-    fi
-
-    local user_dir="${CONFIG_DIR}/${username}"
-
-    if [ ! -d "$user_dir" ]; then
-        error "User not found: $username"
-    fi
-
-    if [ -z "$target" ]; then
-        # No target: list all certs for this user
-        echo "Available certificates for $username:"
-        find "$user_dir" -name "${username}.pem" -type f 2>/dev/null | while read cert; do
-            local server_dir=$(dirname $(dirname "$cert"))
-            local server_name=$(basename "$server_dir")
-            echo "  $server_name"
-        done
-        return 0
-    fi
-
-    # Determine certificate file
-    local cert_file=""
-    if [ -f "$target" ]; then
-        cert_file="$target"
-    else
-        # Parse as server URL
-        parse_server_url "$target"
-        cert_file="${user_dir}/${SERVER_HOST}_${SERVER_PORT}/certificates/${username}.pem"
+        
+        CERT_COUNT=$(echo "$FOUND_CERTS" | wc -l | tr -d ' ')
+        
+        if [ "$CERT_COUNT" -eq 1 ]; then
+            cert_file=$(echo "$FOUND_CERTS" | head -1)
+            info "Found certificate: $cert_file"
+            echo ""
+        else
+            echo "Found $CERT_COUNT certificates:"
+            echo "$FOUND_CERTS" | nl
+            echo ""
+            read -p "Select certificate number [1]: " cert_num
+            cert_num=${cert_num:-1}
+            cert_file=$(echo "$FOUND_CERTS" | sed -n "${cert_num}p")
+        fi
     fi
 
     if [ ! -f "$cert_file" ]; then
         error "Certificate not found: $cert_file"
     fi
 
-    draw_box "Certificate Information"
-
-    echo "User:             $username"
-    if [ -n "$SERVER_HOST" ]; then
+    # Extract server info from path if possible
+    CERT_DIR=$(dirname $(dirname "$cert_file"))
+    SERVER_INFO=$(basename "$CERT_DIR")
+    
+    if [[ "$SERVER_INFO" =~ ^(.+)_([0-9]+)$ ]]; then
+        SERVER_HOST="${BASH_REMATCH[1]}"
+        SERVER_PORT="${BASH_REMATCH[2]}"
         echo "Server:           ${SERVER_HOST}:${SERVER_PORT}"
     fi
 
@@ -524,7 +525,14 @@ cmd_info() {
     NOT_AFTER=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | sed 's/notAfter=//')
 
     # Calculate remaining time
-    EXPIRES_TS=$(date -j -f "%b %d %T %Y %Z" "$NOT_AFTER" "+%s" 2>/dev/null || echo "0")
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS date command
+        EXPIRES_TS=$(date -j -f "%b %d %T %Y %Z" "$NOT_AFTER" "+%s" 2>/dev/null || echo "0")
+    else
+        # Linux date command
+        EXPIRES_TS=$(date -d "$NOT_AFTER" "+%s" 2>/dev/null || echo "0")
+    fi
+    
     NOW_TS=$(date "+%s")
     REMAINING_SEC=$((EXPIRES_TS - NOW_TS))
 
@@ -532,8 +540,15 @@ cmd_info() {
         DAYS=$((REMAINING_SEC / 86400))
         HOURS=$(( (REMAINING_SEC % 86400) / 3600 ))
         REMAINING="${DAYS}d ${HOURS}h"
+        
+        if [ $DAYS -lt 2 ]; then
+            warn "Certificate expires soon! Renew with: cryptic-onboard request"
+            echo ""
+        fi
     else
         REMAINING="EXPIRED"
+        warn "Certificate has expired! Renew with: cryptic-onboard request"
+        echo ""
     fi
 
     echo "Subject:          $SUBJECT"
@@ -558,8 +573,7 @@ cmd_info() {
     echo ""
 
     # File paths
-    cert_dir=$(dirname $(dirname "$cert_file"))
-    key_file="${cert_dir}/private/client.key"
+    key_file="$(dirname $(dirname "$cert_file"))/private/client.key"
 
     echo "Files:"
     echo "  Certificate:    $cert_file"
@@ -571,17 +585,243 @@ cmd_info() {
 }
 
 #
+# Interactive wizard
+#
+show_wizard() {
+    clear
+    draw_box "
+   ╔═══════════════════════════════════════════════════════════════╗
+   ║           Welcome to Cryptic Onboarding Wizard               ║
+   ║                                                               ║
+   ║  This wizard will guide you through the complete process     ║
+   ║  of setting up your Cryptic secure messaging account.        ║
+   ╚═══════════════════════════════════════════════════════════════╝
+"
+    
+    echo ""
+    echo "What would you like to do?"
+    echo ""
+    echo "  1) Generate a new GPG key pair"
+    echo "  2) Export GPG public key for admin registration"
+    echo "  3) Request a TLS certificate from server"
+    echo "  4) Check certificate status and expiration"
+    echo "  5) Complete onboarding walkthrough (steps 1-3)"
+    echo "  6) Show help and documentation"
+    echo "  0) Exit"
+    echo ""
+    read -p "Enter your choice [0-6]: " choice
+    
+    case "$choice" in
+        1)
+            clear
+            draw_box "Generate New GPG Key Pair"
+            echo ""
+            info "This will create a new GPG key pair for use with Cryptic."
+            echo ""
+            generate_gpg_key
+            echo ""
+            success "GPG key generated successfully!"
+            echo ""
+            read -p "Press Enter to continue..."
+            show_wizard
+            ;;
+        2)
+            clear
+            draw_box "Export GPG Public Key"
+            echo ""
+            cmd_export_gpg
+            echo ""
+            info "Next steps:"
+            echo "  1. Send the exported file to your Cryptic administrator"
+            echo "  2. Wait for admin confirmation that your key is registered"
+            echo "  3. Come back and select option 3 to request a certificate"
+            echo ""
+            read -p "Press Enter to continue..."
+            show_wizard
+            ;;
+        3)
+            clear
+            draw_box "Request TLS Certificate"
+            echo ""
+            read -p "Enter server URL (or press Enter for default): " server_url
+            if [ -z "$server_url" ]; then
+                server_url="$DEFAULT_SERVER"
+            fi
+            echo ""
+            cmd_request "$server_url"
+            echo ""
+            read -p "Press Enter to continue..."
+            show_wizard
+            ;;
+        4)
+            clear
+            draw_box "Certificate Status"
+            echo ""
+            cmd_info
+            echo ""
+            read -p "Press Enter to continue..."
+            show_wizard
+            ;;
+        5)
+            clear
+            draw_box "Complete Onboarding Walkthrough"
+            echo ""
+            info "This will guide you through the complete onboarding process."
+            echo ""
+            
+            # Step 1: Check for GPG key
+            info "Step 1/3: Checking for GPG key..."
+            echo ""
+            
+            gpg_keys=$(gpg --list-secret-keys --keyid-format LONG 2>/dev/null | grep -c "^sec" || true)
+            
+            if [ "$gpg_keys" -eq 0 ]; then
+                warn "No GPG key found. Let's generate one."
+                echo ""
+                generate_gpg_key
+                echo ""
+                success "GPG key generated!"
+            else
+                success "Found existing GPG key(s)"
+            fi
+            echo ""
+            read -p "Press Enter to continue to step 2..."
+            
+            # Step 2: Export GPG key
+            clear
+            draw_box "Complete Onboarding Walkthrough - Step 2/3"
+            echo ""
+            info "Step 2/3: Exporting GPG public key for admin..."
+            echo ""
+            
+            cmd_export_gpg
+            
+            echo ""
+            warn "IMPORTANT: Before proceeding to step 3:"
+            echo "  1. Send the exported GPG public key file to your administrator"
+            echo "  2. Wait for confirmation that your key has been registered"
+            echo "  3. This usually takes a few minutes"
+            echo ""
+            read -p "Press Enter when admin has confirmed registration..."
+            
+            # Step 3: Request certificate
+            clear
+            draw_box "Complete Onboarding Walkthrough - Step 3/3"
+            echo ""
+            info "Step 3/3: Requesting TLS certificate..."
+            echo ""
+            
+            read -p "Enter server URL (or press Enter for default): " server_url
+            if [ -z "$server_url" ]; then
+                server_url="$DEFAULT_SERVER"
+            fi
+            echo ""
+            
+            cmd_request "$server_url"
+            
+            echo ""
+            draw_box ""
+            success "Onboarding complete! You're ready to connect to Cryptic!"
+            echo ""
+            info "To connect, use:"
+            echo "  cryptic-console connect wss://<server>:8443"
+            echo ""
+            read -p "Press Enter to return to main menu..."
+            show_wizard
+            ;;
+        6)
+            clear
+            show_help
+            echo ""
+            read -p "Press Enter to return to main menu..."
+            show_wizard
+            ;;
+        0)
+            echo ""
+            info "Thanks for using Cryptic! Goodbye."
+            echo ""
+            exit 0
+            ;;
+        *)
+            warn "Invalid choice. Please try again."
+            sleep 2
+            show_wizard
+            ;;
+    esac
+}
+
+show_help() {
+    cat <<EOF
+Usage: cryptic-onboard [command] [options]
+
+Interactive Mode:
+  cryptic-onboard                   Launch interactive wizard (recommended)
+
+Direct Commands:
+  generate-gpg                      Generate new GPG key pair
+  export-gpg                        Export GPG public key for admin registration
+  request [server_url]              Request TLS certificate from CA
+  info [cert_file]                  Display certificate information
+  help                              Show this help message
+
+Admin-Mediated Onboarding Flow:
+  1. Generate or select your GPG key:
+       cryptic-onboard generate-gpg
+
+  2. Export your GPG public key:
+       cryptic-onboard export-gpg
+
+  3. Send the exported GPG public key to your Cryptic administrator
+
+  4. Once the admin registers your GPG key, request a certificate:
+       cryptic-onboard request [server_url]
+
+  5. Connect to Cryptic:
+       cryptic-console connect wss://server:8443
+
+Certificate Renewal:
+  Certificates are valid for 7 days. Renew before expiration:
+       cryptic-onboard request
+
+  Check certificate expiration:
+       cryptic-onboard info
+
+Examples:
+  # Interactive wizard (recommended for first-time users)
+  cryptic-onboard
+
+  # Generate new GPG key
+  cryptic-onboard generate-gpg
+
+  # Export GPG public key
+  cryptic-onboard export-gpg
+
+  # Request certificate after admin registration
+  cryptic-onboard request https://relay.cryptic.example.org:8443
+
+  # Show certificate info
+  cryptic-onboard info
+
+Dependencies: curl, openssl, gpg, jq
+
+EOF
+}
+
+#
 # Main command dispatcher
 #
 main() {
     check_dependencies
 
     local command="$1"
-    shift
+    shift || true  # Don't exit on error if no args
 
     case "$command" in
-        register)
-            cmd_register "$@"
+        generate-gpg|generate)
+            generate_gpg_key
+            ;;
+        export-gpg|export)
+            cmd_export_gpg "$@"
             ;;
         request)
             cmd_request "$@"
@@ -590,29 +830,11 @@ main() {
             cmd_info "$@"
             ;;
         help|--help|-h)
-            cat <<EOF
-Usage: cryptic-onboard <command> [options]
-
-Commands:
-  register <invite_file>              Register GPG key with CA using invite
-  request <username> [server_url]     Request TLS certificate
-  info [username] [cert_file|server]  Display certificate information
-
-Examples:
-  # Register with invite
-  cryptic-onboard register ~/Downloads/alice-invite.txt
-
-  # Request certificate for user 'bob'
-  cryptic-onboard request bob https://relay.cryptic.example.org:8443
-
-  # Show certificate info
-  cryptic-onboard info bob https://relay.cryptic.example.org:8443
-  cryptic-onboard info bob  # List all certs for bob
-  cryptic-onboard info      # List all users
-
-Dependencies: curl, openssl, gpg, jq
-
-EOF
+            show_help
+            ;;
+        "")
+            # No command = interactive wizard
+            show_wizard
             ;;
         *)
             error "Unknown command: $command\n\nUse 'cryptic-onboard help' for usage information."

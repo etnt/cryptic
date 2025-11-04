@@ -15,6 +15,7 @@
     create_invite/4,
     validate_invite/2,
     consume_invite/3,
+    register_gpg_for_invite/3,
     list_user_invites/2,
     revoke_invite/2,
     cleanup_expired_invites/1
@@ -120,7 +121,7 @@ create_invite(DbRef, InviterFp, ExpiryHours, Meta) ->
         inviter_fp = InviterFp,
         issued_at = Now,
         expires_at = ExpiresAt,
-        consumed = 0,
+        status = <<"active">>,
         meta = MetaJson
     },
 
@@ -195,11 +196,17 @@ validate_invite(DbRef, InviteId) ->
         {ok, Invite} ->
             Now = erlang:system_time(second),
 
-            %% Check if already consumed
+            %% Check if already consumed or revoked
             if
-                Invite#invite.consumed =:= 1 ->
+                Invite#invite.status =:= <<"consumed">> ->
                     ?warning("Invite ~s already consumed", [InviteId]),
                     {error, already_consumed};
+                Invite#invite.status =:= <<"revoked">> ->
+                    ?warning("Invite ~s has been revoked", [InviteId]),
+                    {error, revoked};
+                Invite#invite.status =:= <<"expired">> ->
+                    ?warning("Invite ~s has expired", [InviteId]),
+                    {error, expired};
                 %% Check if expired
                 Invite#invite.expires_at < Now ->
                     ?warning(
@@ -216,6 +223,66 @@ validate_invite(DbRef, InviteId) ->
             {error, not_found};
         {error, Reason} = Error ->
             ?error("Failed to validate invite ~s: ~p", [InviteId, Reason]),
+            Error
+    end.
+
+%% @doc Register a GPG key for an invite (active → registered transition).
+%%
+%% This is the first step in the invite lifecycle after creation. When a user
+%% registers their GPG key using an invite token, the invite transitions from
+%% 'active' to 'registered' state.
+%%
+%% == State Transition ==
+%% <ul>
+%%   <li>Initial state: `active'</li>
+%%   <li>Final state: `registered'</li>
+%%   <li>Records: GPG fingerprint and timestamp</li>
+%% </ul>
+%%
+%% == Validation ==
+%% The invite must be:
+%% <ul>
+%%   <li>In `active' state (not already registered)</li>
+%%   <li>Not expired</li>
+%%   <li>Not revoked</li>
+%% </ul>
+%%
+%% == Example ==
+%% ```
+%% case cryptic_invite_mgr:register_gpg_for_invite(DbRef, InviteId, GpgFp) of
+%%     ok -> {ok, "GPG registered, proceed to CSR"};
+%%     {error, already_registered} -> {error, "This invite already has a GPG key"}
+%% end.
+%% '''
+%%
+%% @param DbRef Database connection reference
+%% @param InviteId The invite ID
+%% @param GpgFp GPG fingerprint being registered
+%% @returns `ok' on success, or `{error, Reason}' on failure
+-spec register_gpg_for_invite(db_ref(), invite_id(), gpg_fingerprint()) ->
+    ok | {error, term()}.
+register_gpg_for_invite(DbRef, InviteId, GpgFp) ->
+    case validate_invite(DbRef, InviteId) of
+        {ok, _InviterFp} ->
+            Metadata = #{gpg_fp => GpgFp, event => <<"gpg_registration">>},
+            case cryptic_ca_store:update_invite_status(DbRef, InviteId, register_gpg, Metadata) of
+                ok ->
+                    ?info("GPG ~s registered for invite ~s (active→registered)", [GpgFp, InviteId]),
+                    AuditLog = #audit_log{
+                        timestamp = erlang:system_time(second),
+                        event_type = <<"invite_gpg_registered">>,
+                        gpg_fp = GpgFp,
+                        invite_id = InviteId,
+                        details = undefined,
+                        ip_address = undefined
+                    },
+                    cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+                    ok;
+                {error, Reason} = Error ->
+                    ?error("Failed to register GPG for invite ~s: ~p", [InviteId, Reason]),
+                    Error
+            end;
+        {error, _Reason} = Error ->
             Error
     end.
 
@@ -265,21 +332,23 @@ validate_invite(DbRef, InviteId) ->
 %% @returns `ok' on successful consumption, or `{error, Reason}' on validation/database failure
 -spec consume_invite(db_ref(), invite_id(), gpg_fingerprint()) ->
     ok | {error, term()}.
-consume_invite(DbRef, InviteId, ConsumerFp) ->
+consume_invite(DbRef, InviteId, ConsumerFpOrSerial) ->
     %% First validate the invite
     case validate_invite(DbRef, InviteId) of
         {ok, _InviterFp} ->
-            case cryptic_ca_store:consume_invite(DbRef, InviteId, ConsumerFp) of
+            %% For now, treat ConsumerFpOrSerial as cert_serial
+            Metadata = #{cert_serial => ConsumerFpOrSerial, event => <<"cert_issued">>},
+            case cryptic_ca_store:update_invite_status(DbRef, InviteId, csr, Metadata) of
                 ok ->
-                    ?info("Invite ~s consumed by ~s", [InviteId, ConsumerFp]),
+                    ?info("Invite ~s consumed with cert serial ~s (registered→consumed)", [InviteId, ConsumerFpOrSerial]),
 
                     %% Audit log
                     AuditLog = #audit_log{
                         timestamp = erlang:system_time(second),
                         event_type = <<"invite_consumed">>,
-                        gpg_fp = ConsumerFp,
+                        gpg_fp = undefined,
                         invite_id = InviteId,
-                        details = undefined,
+                        details = jsx:encode(#{cert_serial => ConsumerFpOrSerial}),
                         ip_address = undefined
                     },
                     cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
@@ -352,9 +421,11 @@ list_user_invites(DbRef, InviterFp) ->
                         invite_id => Invite#invite.invite_id,
                         issued_at => Invite#invite.issued_at,
                         expires_at => Invite#invite.expires_at,
-                        consumed => Invite#invite.consumed =:= 1,
+                        status => Invite#invite.status,
+                        registered_at => Invite#invite.registered_at,
+                        registered_by_fp => Invite#invite.registered_by_fp,
                         consumed_at => Invite#invite.consumed_at,
-                        consumed_by_fp => Invite#invite.consumed_by_fp,
+                        consumed_cert_serial => Invite#invite.consumed_cert_serial,
                         expired => Invite#invite.expires_at < Now,
                         meta =>
                             case Invite#invite.meta of
@@ -406,9 +477,20 @@ list_user_invites(DbRef, InviterFp) ->
 %% @returns `ok' on success (even if already revoked/consumed), or `{error, Reason}' on database error
 -spec revoke_invite(db_ref(), invite_id()) -> ok | {error, term()}.
 revoke_invite(DbRef, InviteId) ->
-    case cryptic_ca_store:revoke_invite(DbRef, InviteId) of
+    revoke_invite(DbRef, InviteId, <<"Admin revoked">>).
+
+%% @doc Revoke an invite with a specific reason.
+%%
+%% @param DbRef Database connection reference
+%% @param InviteId The invite ID to revoke
+%% @param Reason Human-readable reason for revocation
+%% @returns `ok' on success, or `{error, Reason}' on database error
+-spec revoke_invite(db_ref(), invite_id(), binary()) -> ok | {error, term()}.
+revoke_invite(DbRef, InviteId, Reason) ->
+    Metadata = #{reason => Reason, revoked_by => undefined},
+    case cryptic_ca_store:update_invite_status(DbRef, InviteId, revoke, Metadata) of
         ok ->
-            ?info("Invite ~s revoked", [InviteId]),
+            ?info("Invite ~s revoked: ~s", [InviteId, Reason]),
 
             %% Audit log
             AuditLog = #audit_log{
@@ -416,7 +498,7 @@ revoke_invite(DbRef, InviteId) ->
                 event_type = <<"invite_revoked">>,
                 gpg_fp = undefined,
                 invite_id = InviteId,
-                details = undefined,
+                details = jsx:encode(#{reason => Reason}),
                 ip_address = undefined
             },
             cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
