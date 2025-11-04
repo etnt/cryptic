@@ -50,9 +50,16 @@ init([]) ->
     
     ?info("CA initializer starting...", []),
     
+    %% Create ETS table to store CA database reference
+    %% This allows verify_peer callback to access the DB
+    ets:new(cryptic_ca_storage, [named_table, set, protected, {read_concurrency, true}]),
+    
     case cryptic_ca_app:init_ca() of
         {ok, DbRef} ->
             ?info("CA database initialized successfully", []),
+            
+            %% Store the database reference in ETS for global access
+            ets:insert(cryptic_ca_storage, {db_ref, DbRef}),
             
             %% Load GPG bootstrap registrations from filesystem
             %% The bootstrap module handles all logging
@@ -82,4 +89,6 @@ handle_info(_Info, State) ->
 
 terminate(_Reason, _State) ->
     ?info("CA initializer terminating", []),
+    %% Clean up the ETS table
+    catch ets:delete(cryptic_ca_storage),
     ok.

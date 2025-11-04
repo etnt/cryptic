@@ -607,9 +607,13 @@ start_websocket_mtls(Config) ->
     ]),
 
     %% TLS options with client certificate verification
+    %% Note: We use verify_peer but NOT fail_if_no_peer_cert to allow
+    %% public CA endpoints (/ca/v1/register-gpg, /ca/v1/csr) to work without mTLS.
+    %% Protected endpoints (WebSocket) will verify certificates in their handlers.
     TLSOptions = [
         {verify, verify_peer},
-        {fail_if_no_peer_cert, true},
+        {verify_fun, {fun verify_peer/4, []}},
+        {fail_if_no_peer_cert, true},  % Allow connections without client certs
         {log_level, info},
         {versions, ['tlsv1.2']},
         {cacertfile, CACertFile},
@@ -640,3 +644,103 @@ start_websocket_mtls(Config) ->
 
     ?info("Cryptic WebSocket server with mTLS started on port ~p~n", [Port]),
     {ok, started}.
+
+
+verify_peer(_OtpCert, _DerCert, {bad_cert, _} = Reason, _UserState) ->
+    ?debug("VERIFY_PEER: bad_cert - ~p", [Reason]),
+    {fail, Reason};
+
+verify_peer(_OtpCert, _DerCert, {extension, Extension}, UserState) ->
+    %% Check if this is the Subject Alternative Name extension with GPG fingerprint
+    case Extension of
+        {'Extension', {2,5,29,17}, _Critical, SANValues} ->
+            %% This is a SAN extension, check for GPG fingerprint
+            case extract_gpg_from_san(SANValues) of
+                {ok, GpgFp} ->
+                    ?debug("VERIFY_PEER: Found GPG fingerprint in SAN: ~s", [GpgFp]),
+                    %% Verify the GPG fingerprint is registered in the database
+                    case verify_gpg_fingerprint(GpgFp) of
+                        true ->
+                            ?debug("VERIFY_PEER: GPG fingerprint ~s is registered", [GpgFp]),
+                            {valid, UserState};
+                        false ->
+                            ?warning("VERIFY_PEER: GPG fingerprint ~s is NOT registered - rejecting", [GpgFp]),
+                            {fail, {bad_cert, unregistered_gpg_fingerprint}};
+                        {error, Reason} ->
+                            ?error("VERIFY_PEER: Error verifying GPG fingerprint ~s: ~p", [GpgFp, Reason]),
+                            %% On error, reject to be safe
+                            {fail, {bad_cert, gpg_verification_error}}
+                    end;
+                {error, _Reason} ->
+                    ?debug("VERIFY_PEER: No GPG fingerprint in SAN extension", []),
+                    {unknown, UserState}
+            end;
+        _OtherExtension ->
+            ?debug("VERIFY_PEER: Unknown extension - ~p", [Extension]),
+            {unknown, UserState}
+    end;
+
+verify_peer(_OtpCert, _DerCert, valid = Reason, UserState) ->
+    ?debug("VERIFY_PEER: valid - ~p", [Reason]),
+    {valid, UserState};
+
+verify_peer(_OtpCert, _DerCert, valid_peer = Reason, UserState) ->
+    ?debug("VERIFY_PEER: valid_peer - ~p", [Reason]),
+    {valid, UserState};
+
+verify_peer(_OtpCert, _DerCert, Reason, UserState) ->
+    ?debug("VERIFY_PEER: Unknown reason - ~p", [Reason]),
+    {unknown, UserState}.
+
+%% @doc Extract GPG fingerprint from Subject Alternative Name values
+-spec extract_gpg_from_san(list()) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_san(SANValues) ->
+    %% Look for DNS name matching pattern: <fingerprint>.gpg.cryptic.local
+    case lists:foldl(
+        fun
+            ({dNSName, DNSName}, Acc) ->
+                case binary:split(list_to_binary(DNSName), <<".">>) of
+                    [GpgFp, <<"gpg">>, <<"cryptic">>, <<"local">>] 
+                        when byte_size(GpgFp) =:= 40 ->
+                        %% Found it! GPG fingerprint is 40 hex characters
+                        {ok, GpgFp};
+                    _ ->
+                        Acc
+                end;
+            (_, Acc) ->
+                Acc
+        end,
+        {error, not_found},
+        SANValues
+    ) of
+        {ok, _} = Result -> Result;
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Verify that a GPG fingerprint is registered in the CA database
+-spec verify_gpg_fingerprint(binary()) -> boolean() | {error, term()}.
+verify_gpg_fingerprint(GpgFp) ->
+    try
+        %% Look up the database reference from the ETS table
+        case ets:lookup(cryptic_ca_storage, db_ref) of
+            [{db_ref, DbRef}] ->
+                %% Check if the GPG fingerprint is registered
+                case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+                    {ok, _Identity} -> 
+                        true;
+                    {error, not_found} -> 
+                        false;
+                    {error, _Reason} = Error ->
+                        Error
+                end;
+            [] ->
+                %% ETS table not found or empty - CA not initialized yet
+                {error, ca_not_initialized}
+        end
+    catch
+        error:badarg ->
+            %% ETS table doesn't exist
+            {error, ca_storage_not_available};
+        ErrorClass:ErrorReason ->
+            {error, {ErrorClass, ErrorReason}}
+    end.

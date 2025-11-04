@@ -87,6 +87,57 @@ draw_box() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+generate_gpg_key() {
+    info "Generating new GPG key..."
+    echo ""
+    echo "Please provide the following information:"
+    echo ""
+    
+    read -p "Real name: " real_name
+    if [ -z "$real_name" ]; then
+        error "Real name is required"
+    fi
+    
+    read -p "Email address: " email_addr
+    if [ -z "$email_addr" ]; then
+        error "Email address is required"
+    fi
+    
+    read -p "Comment (optional): " comment
+    
+    echo ""
+    info "Generating GPG key for: $real_name <$email_addr>"
+    info "This may take a minute..."
+    echo ""
+    
+    # Generate key using batch mode for automation
+    # Using RSA 4096 as it's widely supported
+    gpg --batch --gen-key <<EOF
+%no-protection
+Key-Type: RSA
+Key-Length: 4096
+Subkey-Type: RSA
+Subkey-Length: 4096
+Name-Real: $real_name
+Name-Email: $email_addr
+Name-Comment: $comment
+Expire-Date: 2y
+%commit
+EOF
+    
+    if [ $? -eq 0 ]; then
+        success "GPG key generated successfully!"
+        echo ""
+        info "Your new GPG key:"
+        gpg --list-keys "$email_addr" 2>/dev/null | head -4
+        echo ""
+        # Set global variable for the caller to use
+        GENERATED_GPG_EMAIL="$email_addr"
+    else
+        error "Failed to generate GPG key"
+    fi
+}
+
 #
 # Command: register <invite_file>
 # Registers GPG key with CA using invitation token
@@ -116,23 +167,59 @@ cmd_register() {
     info "[2/4] Finding GPG key..."
 
     # Try to find a GPG key
-    GPG_KEYS=$(gpg --list-secret-keys --with-colons | grep "^uid" | cut -d: -f10 | head -5)
+    GPG_KEYS=$(gpg --list-secret-keys --with-colons | grep "^uid" | cut -d: -f10 | head -10)
 
     if [ -z "$GPG_KEYS" ]; then
-        error "No GPG keys found. Please generate a GPG key first:\n  gpg --gen-key"
+        warn "No GPG keys found."
+        echo ""
+        read -p "Would you like to generate a new GPG key? [Y/n]: " gen_key
+        gen_key=${gen_key:-Y}
+        if [ "$gen_key" = "Y" ] || [ "$gen_key" = "y" ]; then
+            generate_gpg_key
+            # Use the email from the generated key
+            GPG_KEY_EMAIL="$GENERATED_GPG_EMAIL"
+            if [ -z "$GPG_KEY_EMAIL" ]; then
+                error "GPG key generation failed or was cancelled"
+            fi
+        else
+            error "Cannot proceed without a GPG key. Please generate one manually:\n  gpg --full-generate-key"
+        fi
     fi
 
-    # If only one key, use it; otherwise prompt
+    # If only one key, use it; otherwise prompt with option to generate new
     KEY_COUNT=$(echo "$GPG_KEYS" | wc -l)
-    if [ "$KEY_COUNT" -eq 1 ]; then
+    if [ "$KEY_COUNT" -eq 1 ] && [ -z "$GPG_KEY_EMAIL" ]; then
         GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | head -1)
-        info "Using GPG key: $GPG_KEY_EMAIL"
+        echo "Found GPG key: $GPG_KEY_EMAIL"
+        read -p "Use this key? [Y/n]: " use_key
+        use_key=${use_key:-Y}
+        if [ "$use_key" != "Y" ] && [ "$use_key" != "y" ]; then
+            echo ""
+            read -p "Generate a new GPG key instead? [Y/n]: " gen_new
+            gen_new=${gen_new:-Y}
+            if [ "$gen_new" = "Y" ] || [ "$gen_new" = "y" ]; then
+                generate_gpg_key
+                # Use the email from the generated key
+                GPG_KEY_EMAIL="$GENERATED_GPG_EMAIL"
+            else
+                error "Registration cancelled"
+            fi
+        fi
     else
         echo "Available GPG keys:"
         echo "$GPG_KEYS" | nl
+        echo "     $(($KEY_COUNT + 1))  Generate new GPG key"
+        echo ""
         read -p "Select key number [1]: " key_num
         key_num=${key_num:-1}
-        GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | sed -n "${key_num}p")
+        
+        if [ "$key_num" -eq "$(($KEY_COUNT + 1))" ]; then
+            generate_gpg_key
+            # Use the email from the generated key
+            GPG_KEY_EMAIL="$GENERATED_GPG_EMAIL"
+        else
+            GPG_KEY_EMAIL=$(echo "$GPG_KEYS" | sed -n "${key_num}p")
+        fi
     fi
 
     success "Selected GPG key: $GPG_KEY_EMAIL"
@@ -182,7 +269,9 @@ cmd_register() {
         '{invite_token: $token, gpg_pub: $pubkey}')
 
     # Make API call
-    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/register-gpg" \
+    # Note: Using -k for self-signed certificates in development
+    # In production, you should use --cacert with the CA certificate
+    RESPONSE=$(curl -k -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/register-gpg" \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" 2>/dev/null || echo "000")
 
@@ -308,7 +397,9 @@ cmd_request() {
         '{csr_pem: $csr, gpg_fp: $fp, gpg_sig_b64: $sig}')
 
     # Make API call
-    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/csr" \
+    # Note: Using -k for self-signed certificates in development
+    # In production, you should use --cacert with the CA certificate
+    RESPONSE=$(curl -k -s -w "\n%{http_code}" -X POST "${CA_REST_URL}/ca/v1/csr" \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD" 2>/dev/null || echo "000")
 

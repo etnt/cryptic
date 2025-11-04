@@ -77,23 +77,57 @@ init(Req, _Opts) ->
 
 %% @doc WebSocket connection established.
 %%
-%% Extracts the GPG fingerprint from the mTLS certificate (if available)
-%% or waits for bootstrap registration.
+%% Extracts the GPG fingerprint from the mTLS certificate and verifies it
+%% against the GPG registry. All client certificates must contain a valid
+%% GPG fingerprint in the SAN extension.
+%%
+%% For bootstrap (admin only), clients without valid certificates can use
+%% the gpg_register_bootstrap command.
 %%
 %% @param State Handler state
-%% @returns {ok, State} on successful initialization
-websocket_init(#state{peer_cert = PeerCert} = State) ->
+%% @returns {ok, State} on successful initialization, {stop, State} on auth failure
+websocket_init(#state{peer_cert = PeerCert, db_ref = DbRef} = State) ->
     ?info("CA WebSocket connection established", []),
 
     %% Extract GPG fingerprint from mTLS certificate's SAN extension
     %% The certificate embeds the GPG fingerprint as: <fingerprint>.gpg.cryptic.local
     case extract_gpg_from_cert_der(PeerCert) of
         {ok, GpgFp} ->
-            ?info("Authenticated with GPG fingerprint from certificate: ~s", [GpgFp]),
-            {ok, State#state{gpg_fp = GpgFp, authenticated = true}};
+            %% Verify the GPG fingerprint is registered in our database
+            case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+                {ok, _Identity} ->
+                    ?info("Authenticated with verified GPG fingerprint: ~s", [GpgFp]),
+                    {ok, State#state{gpg_fp = GpgFp, authenticated = true}};
+                {error, not_found} ->
+                    ?warning("Certificate contains unregistered GPG fingerprint: ~s", [GpgFp]),
+                    ?info("Closing connection - GPG fingerprint not in registry", []),
+                    ErrorMsg = jsx:encode(#{
+                        error => <<"authentication_failed">>,
+                        message => <<"GPG fingerprint in certificate is not registered">>
+                    }),
+                    self() ! {send_and_close, ErrorMsg},
+                    {ok, State};
+                {error, Reason} ->
+                    ?error("Database error verifying GPG fingerprint ~s: ~p", [GpgFp, Reason]),
+                    ErrorMsg = jsx:encode(#{
+                        error => <<"internal_error">>,
+                        message => <<"Failed to verify credentials">>
+                    }),
+                    self() ! {send_and_close, ErrorMsg},
+                    {ok, State}
+            end;
+        {error, no_peer_cert} ->
+            ?warning("No client certificate provided - bootstrap mode only", []),
+            ?info("Client must use gpg_register_bootstrap to authenticate", []),
+            {ok, State};
         {error, Reason} ->
             ?warning("Failed to extract GPG fingerprint from certificate: ~p", [Reason]),
-            ?info("Client must use gpg_register_bootstrap to authenticate", []),
+            ?info("Closing connection - invalid certificate format", []),
+            ErrorMsg = jsx:encode(#{
+                error => <<"authentication_failed">>,
+                message => <<"Certificate does not contain valid GPG fingerprint">>
+            }),
+            self() ! {send_and_close, ErrorMsg},
             {ok, State}
     end.
 
@@ -137,7 +171,10 @@ websocket_handle(_Frame, State) ->
 %%
 %% @param Info Erlang message
 %% @param State Handler state
-%% @returns {ok, State}
+%% @returns {ok, State} | {reply, Frame, State} | {stop, State}
+websocket_info({send_and_close, ErrorMsg}, State) ->
+    %% Send error message and then close the connection
+    {[{text, ErrorMsg}, close], State};
 websocket_info(_Info, State) ->
     {ok, State}.
 
@@ -455,13 +492,23 @@ handle_invite_show(
                     case Invite#invite.inviter_fp of
                         GpgFp ->
                             Now = erlang:system_time(second),
+                            %% Decode meta JSON if present
+                            Meta = case Invite#invite.meta of
+                                undefined -> #{};
+                                MetaJson when is_binary(MetaJson) ->
+                                    case jsx:decode(MetaJson, [return_maps]) of
+                                        DecodedMeta when is_map(DecodedMeta) -> DecodedMeta;
+                                        _ -> #{}
+                                    end;
+                                _ -> #{}
+                            end,
                             InviteMap = #{
                                 invite_id => Invite#invite.invite_id,
                                 inviter_fp => Invite#invite.inviter_fp,
                                 expires_at => Invite#invite.expires_at,
                                 consumed => Invite#invite.consumed,
                                 expired => (Invite#invite.expires_at < Now),
-                                meta => Invite#invite.meta
+                                meta => Meta
                             },
                             Response = jsx:encode(#{
                                 type => <<"invite_show_response">>,
