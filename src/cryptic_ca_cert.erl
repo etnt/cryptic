@@ -62,7 +62,7 @@
 -spec issue_from_csr(binary(), binary()) ->
     {ok, binary()} | {error, term()}.
 issue_from_csr(CSR_PEM, GPG_FP) ->
-    ValidityDays = application:get_env(cryptic_ca,
+    ValidityDays = application:get_env(cryptic,
                                        cert_default_lifetime_days,
                                        7),
     issue_from_csr(CSR_PEM, GPG_FP, ValidityDays).
@@ -88,7 +88,7 @@ issue_from_csr(CSR_PEM, GPG_FP, ValidityDays) when ValidityDays > 0 ->
         OTPSubjectPKInfo = convert_subject_pk_info(SubjectPKInfo),
         
         % Load CA key (cert will be loaded in build_client_cert)
-        {ok, CAKey} = application:get_env(cryptic_ca, ca_key),
+        {ok, CAKey} = application:get_env(cryptic, ca_key),
         
         % Build certificate
         {ok, Cert} = build_client_cert(Subject, OTPSubjectPKInfo, GPG_FP,
@@ -144,7 +144,7 @@ issue_from_csr(CSR_PEM, GPG_FP, ValidityDays) when ValidityDays > 0 ->
 -spec issue_from_csr_with_gpg_proof(binary(), binary(), binary()) ->
     {ok, binary()} | {error, term()}.
 issue_from_csr_with_gpg_proof(CSR_PEM, GPG_FP, GPG_Signature) ->
-    ValidityDays = application:get_env(cryptic_ca,
+    ValidityDays = application:get_env(cryptic,
                                        cert_default_lifetime_days,
                                        7),
     issue_from_csr_with_gpg_proof(CSR_PEM, GPG_FP, GPG_Signature, ValidityDays).
@@ -335,7 +335,7 @@ build_client_cert(Subject, SubjectPKInfo, GPG_FP, ValidityDays) ->
         NotAfter = gregorian_to_utc_time(Now + ValiditySecs),
         
         % Load CA cert to get issuer
-        {ok, CACert} = application:get_env(cryptic_ca, ca_cert),
+        {ok, CACert} = application:get_env(cryptic, ca_cert),
         Issuer = extract_issuer(CACert),
         
         % Build certificate extensions

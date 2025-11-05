@@ -356,7 +356,7 @@ csr_impl(Req, State, CsrPem, GpgFp, GpgSigB64) ->
 
                     %% Verify GPG signature on CSR
                     %% The signature proves the user possesses the GPG private key
-                    case cryptic_ca_gpg:verify_detached_signature(GpgSig, CsrPem, GpgPub) of
+                    case cryptic_ca_gpg:verify_detached_signature(CsrPem, GpgSig, GpgPub) of
                         ok ->
                             %% Signature valid, validate CSR contains matching GPG fingerprint
                             case validate_csr_fingerprint(CsrPem, GpgFp) of

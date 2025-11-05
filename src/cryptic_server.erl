@@ -609,13 +609,13 @@ start_websocket_mtls(Config) ->
     ]),
 
     %% TLS options with client certificate verification
-    %% Note: We use verify_peer but NOT fail_if_no_peer_cert to allow
-    %% public CA endpoints (/ca/v1/register-gpg, /ca/v1/csr) to work without mTLS.
+    %% Note: We use verify_peer but set fail_if_no_peer_cert to false to allow
+    %% public CA endpoints (/ca/v1/csr) to work without mTLS for initial cert requests.
     %% Protected endpoints (WebSocket) will verify certificates in their handlers.
     TLSOptions = [
         {verify, verify_peer},
         {verify_fun, {fun verify_peer/4, []}},
-        {fail_if_no_peer_cert, true},  % Allow connections without client certs
+        {fail_if_no_peer_cert, false},  % Allow connections without client certs for /ca/v1/csr
         {log_level, info},
         {versions, ['tlsv1.2']},
         {cacertfile, CACertFile},

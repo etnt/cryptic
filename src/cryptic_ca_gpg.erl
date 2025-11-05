@@ -134,7 +134,7 @@ verify_signature(SignedData, PublicKey) ->
 verify_detached_signature(Data, DetachedSignature, PublicKey) ->
     try
         %% First import the public key temporarily
-        case erl_gpg_api:import(PublicKey, "") of
+        case erl_gpg_api:import_key(PublicKey, "") of
             {ok, _ImportResult} ->
                 %% Now verify the detached signature
                 case erl_gpg_api:verify_detached(Data, DetachedSignature, "") of

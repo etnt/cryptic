@@ -47,30 +47,39 @@ init([]) ->
         log_type => server,
         log_dir => "logs"
     }),
-    
+
     ?info("CA initializer starting...", []),
-    
+
     %% Create ETS table to store CA database reference
     %% This allows verify_peer callback to access the DB
     ets:new(cryptic_ca_storage, [named_table, set, protected, {read_concurrency, true}]),
-    
+
     case cryptic_ca_app:init_ca() of
         {ok, DbRef} ->
             ?info("CA database initialized successfully", []),
-            
+
             %% Store the database reference in ETS for global access
             ets:insert(cryptic_ca_storage, {db_ref, DbRef}),
-            
-            %% Load GPG bootstrap registrations from filesystem
-            %% The bootstrap module handles all logging
-            case cryptic_ca_bootstrap:load_bootstrap_registrations(DbRef) of
-                {ok, _Count} ->
-                    ok;
-                {error, BootstrapReason} ->
-                    ?warning("Failed to load GPG bootstrap registrations: ~p", [BootstrapReason])
-            end,
-            
-            {ok, #state{db_ref = DbRef}};
+
+            %% Initialize CA environment (load certificates and keys)
+            case cryptic_ca_store:init_ca_environment() of
+                ok ->
+                    ?info("CA environment initialized (cert/key loaded)", []),
+
+                    %% Load GPG bootstrap registrations from filesystem
+                    %% The bootstrap module handles all logging
+                    case cryptic_ca_bootstrap:load_bootstrap_registrations(DbRef) of
+                        {ok, _Count} ->
+                            ok;
+                        {error, BootstrapReason} ->
+                            ?warning("Failed to load GPG bootstrap registrations: ~p", [BootstrapReason])
+                    end,
+
+                    {ok, #state{db_ref = DbRef}};
+                {error, CaEnvReason} ->
+                    ?error("Failed to initialize CA environment: ~p", [CaEnvReason]),
+                    {stop, {ca_env_init_failed, CaEnvReason}}
+            end;
         {error, Reason} ->
             ?error("Failed to initialize CA database: ~p", [Reason]),
             {stop, {ca_init_failed, Reason}}

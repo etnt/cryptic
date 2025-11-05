@@ -142,10 +142,16 @@ EOF
 }
 
 select_gpg_key() {
-    # Get list of GPG keys
-    GPG_KEYS=$(gpg --list-secret-keys --with-colons | grep "^uid" | cut -d: -f10 | head -10)
+    # Get list of GPG keys with fingerprints
+    # Format: fingerprint|uid
+    GPG_KEYS_RAW=$(gpg --list-secret-keys --with-colons 2>/dev/null | \
+                   awk -F: '
+                   /^sec/ {fpr=""} 
+                   /^fpr/ {fpr=$10} 
+                   /^uid/ && fpr!="" {print fpr "|" $10; fpr=""}
+                   ' | head -10)
 
-    if [ -z "$GPG_KEYS" ]; then
+    if [ -z "$GPG_KEYS_RAW" ]; then
         warn "No GPG keys found."
         echo ""
         read -p "Would you like to generate a new GPG key? [Y/n]: " gen_key
@@ -157,44 +163,47 @@ select_gpg_key() {
             if [ -z "$SELECTED_GPG_EMAIL" ]; then
                 error "GPG key generation failed or was cancelled"
             fi
+            # Get fingerprint for the generated key
+            SELECTED_GPG_FP=$(gpg --with-colons --fingerprint "$SELECTED_GPG_EMAIL" 2>/dev/null | \
+                             grep "^fpr" | head -1 | cut -d: -f10)
         else
             error "Cannot proceed without a GPG key. Please generate one manually:\n  gpg --full-generate-key"
         fi
         return
     fi
 
-    # If only one key, use it; otherwise prompt
-    KEY_COUNT=$(echo "$GPG_KEYS" | wc -l | tr -d ' ')
-    if [ "$KEY_COUNT" -eq 1 ]; then
-        SELECTED_GPG_EMAIL=$(echo "$GPG_KEYS" | head -1)
-        echo "Found GPG key: $SELECTED_GPG_EMAIL"
-        read -p "Use this key? [Y/n]: " use_key
-        use_key=${use_key:-Y}
-        if [ "$use_key" != "Y" ] && [ "$use_key" != "y" ]; then
-            echo ""
-            read -p "Generate a new GPG key instead? [Y/n]: " gen_new
-            gen_new=${gen_new:-Y}
-            if [ "$gen_new" = "Y" ] || [ "$gen_new" = "y" ]; then
-                generate_gpg_key
-                SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
-            else
-                error "Operation cancelled"
-            fi
+    # Always present a choice menu, even for single key
+    KEY_COUNT=$(echo "$GPG_KEYS_RAW" | wc -l | tr -d ' ')
+    
+    echo "Available GPG keys:"
+    echo ""
+    local i=1
+    while IFS='|' read -r fp uid; do
+        echo "  $i) $uid"
+        echo "     Fingerprint: $fp"
+        echo ""
+        i=$((i + 1))
+    done <<< "$GPG_KEYS_RAW"
+    echo "  $i) Generate new GPG key"
+    echo ""
+    read -p "Select key number [1]: " key_num
+    key_num=${key_num:-1}
+    
+    if [ "$key_num" -eq "$i" ]; then
+        generate_gpg_key
+        SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
+        SELECTED_GPG_FP=$(gpg --with-colons --fingerprint "$SELECTED_GPG_EMAIL" 2>/dev/null | \
+                         grep "^fpr" | head -1 | cut -d: -f10)
+    elif [ "$key_num" -ge 1 ] && [ "$key_num" -lt "$i" ]; then
+        SELECTED_GPG_FP=$(echo "$GPG_KEYS_RAW" | sed -n "${key_num}p" | cut -d'|' -f1)
+        SELECTED_GPG_UID=$(echo "$GPG_KEYS_RAW" | sed -n "${key_num}p" | cut -d'|' -f2)
+        # Extract email from UID
+        SELECTED_GPG_EMAIL=$(echo "$SELECTED_GPG_UID" | grep -oE '[^<]+@[^>]+' | head -1)
+        if [ -z "$SELECTED_GPG_EMAIL" ]; then
+            SELECTED_GPG_EMAIL="$SELECTED_GPG_UID"
         fi
     else
-        echo "Available GPG keys:"
-        echo "$GPG_KEYS" | nl
-        echo "     $(($KEY_COUNT + 1))  Generate new GPG key"
-        echo ""
-        read -p "Select key number [1]: " key_num
-        key_num=${key_num:-1}
-        
-        if [ "$key_num" -eq "$(($KEY_COUNT + 1))" ]; then
-            generate_gpg_key
-            SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
-        else
-            SELECTED_GPG_EMAIL=$(echo "$GPG_KEYS" | sed -n "${key_num}p")
-        fi
+        error "Invalid selection: $key_num"
     fi
 }
 
@@ -213,27 +222,22 @@ cmd_export_gpg() {
     # Step 1: Select GPG key
     select_gpg_key
     
-    if [ -z "$SELECTED_GPG_EMAIL" ]; then
+    if [ -z "$SELECTED_GPG_FP" ]; then
         error "No GPG key selected"
     fi
     
-    success "Selected GPG key: $SELECTED_GPG_EMAIL"
+    GPG_FP="$SELECTED_GPG_FP"
+    GPG_EMAIL="$SELECTED_GPG_EMAIL"
+    
+    echo ""
+    success "Selected GPG key:"
+    echo "  UID:         $GPG_EMAIL"
+    echo "  Fingerprint: $GPG_FP"
     echo ""
     
-    # Step 2: Get GPG fingerprint
-    GPG_FP=$(gpg --with-colons --fingerprint "$SELECTED_GPG_EMAIL" 2>/dev/null | \
-             grep "^fpr" | head -1 | cut -d: -f10)
-    
-    if [ -z "$GPG_FP" ]; then
-        error "Failed to get GPG fingerprint"
-    fi
-    
-    echo "GPG Fingerprint: $GPG_FP"
-    echo ""
-    
-    # Step 3: Export public key
+    # Step 2: Export public key
     info "Exporting GPG public key..."
-    GPG_PUBKEY=$(gpg --armor --export "$SELECTED_GPG_EMAIL" 2>/dev/null)
+    GPG_PUBKEY=$(gpg --armor --export "$GPG_FP" 2>/dev/null)
     if [ -z "$GPG_PUBKEY" ]; then
         error "Failed to export GPG public key"
     fi
@@ -291,19 +295,17 @@ cmd_request() {
         info "Continuing without saved configuration..."
         select_gpg_key
         
-        if [ -z "$SELECTED_GPG_EMAIL" ]; then
+        if [ -z "$SELECTED_GPG_FP" ]; then
             error "No GPG key selected"
         fi
         
+        GPG_FP="$SELECTED_GPG_FP"
         GPG_EMAIL="$SELECTED_GPG_EMAIL"
         
-        # Get fingerprint
-        GPG_FP=$(gpg --with-colons --fingerprint "$GPG_EMAIL" 2>/dev/null | \
-                 grep "^fpr" | head -1 | cut -d: -f10)
-        
-        if [ -z "$GPG_FP" ]; then
-            error "Failed to get GPG fingerprint"
-        fi
+        echo ""
+        success "Selected GPG key:"
+        echo "  UID:         $GPG_EMAIL"
+        echo "  Fingerprint: $GPG_FP"
     else
         GPG_FP=$(jq -r '.gpg_fingerprint // empty' "$CONFIG_FILE")
         GPG_EMAIL=$(jq -r '.gpg_email // empty' "$CONFIG_FILE")
@@ -312,8 +314,10 @@ cmd_request() {
             error "Invalid config file. Please run 'cryptic-onboard export-gpg' again."
         fi
         
-        info "Using GPG key: $GPG_EMAIL"
-        info "Fingerprint: $GPG_FP"
+        echo ""
+        info "Using GPG key from config:"
+        echo "  UID:         $GPG_EMAIL"
+        echo "  Fingerprint: $GPG_FP"
     fi
 
     # Use provided server or default
@@ -361,11 +365,16 @@ cmd_request() {
     success "CSR created"
 
     # Step 3: Sign CSR with GPG key
-    info "[3/4] Signing CSR with GPG key..."
-    CSR_DATA=$(cat "$CSR_FILE")
-    GPG_SIG=$(echo "$CSR_DATA" | gpg --armor --detach-sign --local-user "$GPG_EMAIL" 2>/dev/null)
+    info "[3/4] Signing CSR with GPG key (fingerprint: ${GPG_FP:0:16}...)..."
+    # Read CSR data - preserve exact bytes including any trailing newline
+    CSR_DATA=$(cat "$CSR_FILE"; echo x)
+    CSR_DATA=${CSR_DATA%x}
+    # Use fingerprint with ! suffix to force exact key match
+    # Sign the exact CSR data we're going to send
+    GPG_SIG=$(printf '%s' "$CSR_DATA" | gpg --armor --detach-sign --local-user "${GPG_FP}!" 2>/dev/null)
     if [ $? -ne 0 ]; then
-        error "Failed to sign CSR with GPG key. Make sure you have the private key for $GPG_EMAIL"
+        echo ""
+        error "Failed to sign CSR with GPG key.\n\nFingerprint: $GPG_FP\nUID: $GPG_EMAIL\n\nMake sure you have the private key and it's not expired."
     fi
     success "CSR signed with GPG"
 
@@ -374,7 +383,7 @@ cmd_request() {
     CA_REST_URL="https://${SERVER_HOST}:${SERVER_PORT}"
 
     # Create JSON payload
-    GPG_SIG_B64=$(echo "$GPG_SIG" | base64 | tr -d '\n')
+    GPG_SIG_B64=$(printf '%s' "$GPG_SIG" | base64 | tr -d '\n')
     JSON_PAYLOAD=$(jq -n \
         --arg csr "$CSR_DATA" \
         --arg fp "$GPG_FP" \
@@ -389,7 +398,7 @@ cmd_request() {
         -d "$JSON_PAYLOAD" 2>/dev/null || echo "000")
 
     HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-    BODY=$(echo "$RESPONSE" | head -n -1)
+    BODY=$(echo "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" != "200" ]; then
         echo ""
@@ -591,10 +600,10 @@ show_wizard() {
     clear
     draw_box "
    ╔═══════════════════════════════════════════════════════════════╗
-   ║           Welcome to Cryptic Onboarding Wizard               ║
+   ║           Welcome to Cryptic Onboarding Wizard                ║
    ║                                                               ║
-   ║  This wizard will guide you through the complete process     ║
-   ║  of setting up your Cryptic secure messaging account.        ║
+   ║  This wizard will guide you through the complete process      ║
+   ║  of setting up your Cryptic secure messaging account.         ║
    ╚═══════════════════════════════════════════════════════════════╝
 "
     

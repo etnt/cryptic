@@ -160,8 +160,8 @@ init_ca_environment() ->
         {ok, CACert} = load_ca_cert(),
         {ok, CAKey} = load_ca_key(),
         
-        application:set_env(cryptic_ca, ca_cert, CACert),
-        application:set_env(cryptic_ca, ca_key, CAKey),
+        application:set_env(cryptic, ca_cert, CACert),
+        application:set_env(cryptic, ca_key, CAKey),
         
         ?info("CA environment initialized successfully", []),
         ok
@@ -178,7 +178,7 @@ init_ca_environment() ->
 %% record that can be used for certificate operations.
 -spec load_ca_cert() -> {ok, #'OTPCertificate'{}} | {error, term()}.
 load_ca_cert() ->
-    case application:get_env(cryptic_ca, ca_cert_file) of
+    case application:get_env(cryptic, ca_cert_file) of
         {ok, CertFile} ->
             case file:read_file(CertFile) of
                 {ok, CertPEM} ->
@@ -209,7 +209,7 @@ load_ca_cert() ->
 %% The key must match the algorithm used in the CA certificate.
 -spec load_ca_key() -> {ok, tuple()} | {error, term()}.
 load_ca_key() ->
-    case application:get_env(cryptic_ca, ca_key_file) of
+    case application:get_env(cryptic, ca_key_file) of
         {ok, KeyFile} ->
             case file:read_file(KeyFile) of
                 {ok, KeyPEM} ->
