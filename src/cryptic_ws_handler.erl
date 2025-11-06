@@ -746,12 +746,6 @@ handle_command(#{<<"type">> := <<"reactivate_user">>} = Command, _Username, Stat
     handle_admin_command(reactivate_user, Command, State);
 handle_command(#{<<"type">> := <<"get_user_info">>} = Command, _Username, State) ->
     handle_admin_command(get_user_info, Command, State);
-handle_command(#{<<"type">> := <<"invite_create">>} = Command, _Username, State) ->
-    handle_admin_command(invite_create, Command, State);
-handle_command(#{<<"type">> := <<"invite_list">>} = Command, _Username, State) ->
-    handle_admin_command(invite_list, Command, State);
-handle_command(#{<<"type">> := <<"invite_revoke">>} = Command, _Username, State) ->
-    handle_admin_command(invite_revoke, Command, State);
 
 handle_command(Command, Username, _State) ->
     ?debug("Unknown command from ~s: ~p", [Username, Command]),
@@ -878,54 +872,6 @@ execute_admin_command(get_user_info, #{
         {error, Reason} ->
             {reply, #{
                 error => <<"query_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
-            }}
-    end;
-
-execute_admin_command(invite_create, Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
-    Email = maps:get(<<"email">>, Command, undefined),
-    ExpiresIn = maps:get(<<"expires_in_hours">>, Command, 24),
-    
-    case cryptic_invite_mgr:create_invite(DbRef, AdminFp, Email, ExpiresIn) of
-        {ok, InviteId, ExpiresAt} ->
-            {reply, #{
-                type => <<"invite_created">>,
-                invite_id => InviteId,
-                expires_at => ExpiresAt
-            }};
-        {error, Reason} ->
-            {reply, #{
-                error => <<"invite_creation_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
-            }}
-    end;
-
-execute_admin_command(invite_list, _Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
-    case cryptic_invite_mgr:list_invites_by_inviter(DbRef, AdminFp) of
-        {ok, Invites} ->
-            {reply, #{
-                type => <<"invite_list">>,
-                invites => Invites
-            }};
-        {error, Reason} ->
-            {reply, #{
-                error => <<"query_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
-            }}
-    end;
-
-execute_admin_command(invite_revoke, #{
-    <<"invite_id">> := InviteId
-}, #{db_ref := DbRef}) ->
-    case cryptic_invite_mgr:revoke_invite(DbRef, InviteId) of
-        ok ->
-            {reply, #{
-                type => <<"invite_revoked">>,
-                invite_id => InviteId
-            }};
-        {error, Reason} ->
-            {reply, #{
-                error => <<"revocation_failed">>,
                 message => iolist_to_binary(io_lib:format("~p", [Reason]))
             }}
     end;

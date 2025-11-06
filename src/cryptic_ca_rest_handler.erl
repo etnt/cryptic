@@ -4,8 +4,7 @@
 %% operations including GPG registration and certificate signing requests.
 %%
 %% Public Endpoints:
-%% - POST /ca/v1/register-gpg: Register a new user with invite token
-%% - POST /ca/v1/csr: Request a certificate with GPG-signed CSR
+%% - POST /ca/v1/csr: Submit certificate signing request
 %% - GET /ca/v1/status/:fingerprint: Check registration status
 %% - GET /ca/v1/ca-cert: Download the CA certificate in PEM format
 %%
@@ -140,8 +139,6 @@ handle_get(Req, State) ->
 -spec handle_post_operation(atom(), cowboy_req:req(), map()) ->
     {true | false, cowboy_req:req(), map()}.
 
-handle_post_operation(register_gpg, Req, State) ->
-    handle_register_gpg(Req, State);
 handle_post_operation(csr, Req, State) ->
     handle_csr(Req, State);
 handle_post_operation(_Operation, Req, State) ->
@@ -156,8 +153,6 @@ handle_post_operation(_Operation, Req, State) ->
 -spec handle_post_route(binary(), cowboy_req:req(), map()) ->
     {true | false, cowboy_req:req(), map()}.
 
-handle_post_route(<<"/ca/v1/register-gpg">>, Req, State) ->
-    handle_register_gpg(Req, State);
 handle_post_route(<<"/ca/v1/csr">>, Req, State) ->
     handle_csr(Req, State);
 handle_post_route(_Path, Req, State) ->
@@ -169,138 +164,6 @@ handle_post_route(_Path, Req, State) ->
     {false, Req2, State}.
 
 %% @doc Handle GPG registration with invite token.
-%%
-%% Request body:
-%% ```
-%% {
-%%   "invite_id": "inv-123...",
-%%   "gpg_pub": "-----BEGIN PGP PUBLIC KEY BLOCK-----..."
-%% }
-%% '''
-%%
-%% Response:
-%% ```
-%% {
-%%   "status": "verified",
-%%   "gpg_fp": "ABCD1234...",
-%%   "issued_at": 1234567890
-%% }
-%% '''
--spec handle_register_gpg(cowboy_req:req(), map()) ->
-    {true | false, cowboy_req:req(), map()}.
-handle_register_gpg(Req, State) ->
-    {ok, Body, Req2} = cowboy_req:read_body(Req),
-
-    try
-        ReqMap = jsx:decode(Body, [return_maps]),
-        InviteId = maps:get(<<"invite_id">>, ReqMap),
-        GpgPub = maps:get(<<"gpg_pub">>, ReqMap),
-
-        ?info("GPG registration request for invite: ~s", [InviteId]),
-
-        %% Extract IP address for rate limiting
-        IpAddr = get_ip_address(Req2),
-
-        %% Check rate limit per IP address
-        case cryptic_ca_rate_limiter:check_limit(IpAddr, register_gpg, 1) of
-            {ok, _Remaining} ->
-                register_gpg_impl(Req2, State, InviteId, GpgPub);
-            {error, rate_limited, RetryAfter} ->
-                ?warning(
-                    "Rate limit exceeded for registration from IP ~s, retry after ~p seconds",
-                    [IpAddr, RetryAfter]
-                ),
-                rate_limit_response(RetryAfter, Req2, State)
-        end
-    catch
-        Error:CatchReason:Stack ->
-            ?error(
-                "Error processing registration: ~p:~p~nStack: ~p",
-                [Error, CatchReason, Stack]
-            ),
-            error_response(<<"invalid_request">>, CatchReason, Req2, State)
-    end.
-
-%% @private Perform GPG registration after rate limit check
-register_gpg_impl(Req, State, InviteId, GpgPub) ->
-    %% Get database reference
-    {ok, DbRef} = application:get_env(cryptic, ca_db_ref),
-
-    %% Validate invite
-    case cryptic_invite_mgr:validate_invite(DbRef, InviteId) of
-        {ok, InviterFp} ->
-            %% Extract and validate GPG public key
-            case cryptic_ca_gpg:extract_public_key(GpgPub) of
-                {ok, ValidatedKey} ->
-                    %% Compute fingerprint
-                    case cryptic_ca_gpg:compute_fingerprint(ValidatedKey) of
-                        {ok, GpgFp} ->
-                            %% Register identity
-                            case
-                                cryptic_gpg_registry:register_gpg_identity(
-                                    DbRef,
-                                    GpgFp,
-                                    ValidatedKey,
-                                    InviterFp,
-                                    InviteId
-                                )
-                            of
-                                ok ->
-                                    %% Register GPG for the invite (active → registered)
-                                    ok = cryptic_invite_mgr:register_gpg_for_invite(
-                                        DbRef, InviteId, GpgFp
-                                    ),
-
-                                    Now = erlang:system_time(second),
-                                    RespBody = jsx:encode(#{
-                                        status => <<"verified">>,
-                                        gpg_fp => GpgFp,
-                                        issued_at => Now
-                                    }),
-
-                                    ?info(
-                                        "GPG registration successful: ~s", [
-                                            GpgFp
-                                        ]
-                                    ),
-
-                                    Req2 = cowboy_req:set_resp_body(
-                                        RespBody, Req
-                                    ),
-                                    Req3 = cowboy_req:set_resp_header(
-                                        <<"content-type">>,
-                                        <<"application/json">>,
-                                        Req2
-                                    ),
-                                    {true, Req3, State};
-                                {error, Reason} ->
-                                    ?error("GPG registration failed: ~p", [
-                                        Reason
-                                    ]),
-                                    error_response(
-                                        <<"registration_failed">>,
-                                        Reason,
-                                        Req,
-                                        State
-                                    )
-                            end;
-                        {error, Reason} ->
-                            error_response(
-                                <<"fingerprint_computation_failed">>,
-                                Reason,
-                                Req,
-                                State
-                            )
-                    end;
-                {error, Reason} ->
-                    error_response(<<"invalid_gpg_key">>, Reason, Req, State)
-            end;
-        {error, Reason} ->
-            ?warning("Invalid invite: ~s, reason: ~p", [InviteId, Reason]),
-            error_response(<<"verification_failed">>, Reason, Req, State)
-    end.
-
-%% @doc Handle certificate signing request.
 %%
 %% Request body:
 %% ```

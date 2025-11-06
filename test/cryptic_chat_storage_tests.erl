@@ -13,16 +13,6 @@
 -define(TEST_PORT, 8443).
 -define(TEST_PASSPHRASE, <<"test_passphrase_123">>).
 
-setup() ->
-    %% Ensure test directory is clean
-    os:cmd("rm -rf " ++ ?TEST_DB_DIR),
-    ok.
-
-cleanup() ->
-    %% Clean up test database
-    cryptic_chat_storage:close_storage(),
-    os:cmd("rm -rf " ++ ?TEST_DB_DIR),
-    ok.
 
 %%%===================================================================
 %%% Encryption Tests

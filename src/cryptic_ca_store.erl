@@ -1,14 +1,14 @@
-%% @doc Cryptic CA Store - SQLite Storage for GPG Registry and Invites
+%% @doc Cryptic CA Store - SQLite Storage for GPG Registry
 %%
-%% This module provides persistent storage for the GPG-based Certificate Authority
-%% system, managing invite tokens, GPG identities, and audit logs.
+%% This module provides persistent storage for the GPG-based Certificate
+%% Authority system, GPG identities, and audit logs.
 %%
 %% == Features ==
 %% <ul>
 %%   <li>SQLite-based persistent storage for CA data</li>
-%%   <li>Optional encryption for sensitive data (GPG keys, invite metadata)</li>
+%%   <li>Optional encryption for sensitive data (GPG keys)</li>
 %%   <li>Transaction support for atomic operations</li>
-%%   <li>Indexed lookups for fingerprints and invite IDs</li>
+%%   <li>Indexed lookups for fingerprints</li>
 %% </ul>
 %%
 %% == Database Schema ==
@@ -32,13 +32,6 @@
     load_ca_cert/0,
     load_ca_key/0,
     init_ca_environment/0,
-
-    %% Invite operations
-    insert_invite/2,
-    get_invite/2,
-    update_invite_status/4,
-    list_invites_by_inviter/2,
-    delete_expired_invites/1,
 
     %% GPG identity operations
     insert_gpg_identity/2,
@@ -71,7 +64,6 @@
 
 %% esqlite3 connection reference
 -type db_ref() :: tuple().
--type invite_id() :: binary().
 -type gpg_fingerprint() :: binary().
 -type unix_timestamp() :: non_neg_integer().
 
@@ -235,28 +227,7 @@ load_ca_key() ->
 %% @doc Create database tables
 -spec create_tables(db_ref()) -> ok | {error, term()}.
 create_tables(Conn) ->
-    InvitesTable =
-        <<
-            "\n"
-            "        CREATE TABLE IF NOT EXISTS invites (\n"
-            "            invite_id TEXT PRIMARY KEY,\n"
-            "            inviter_fp TEXT NOT NULL,\n"
-            "            issued_at INTEGER NOT NULL,\n"
-            "            expires_at INTEGER NOT NULL,\n"
-            "            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN (\n"
-            "                'active', 'registered', 'consumed', 'expired', 'revoked'\n"
-            "            )),\n"
-            "            registered_at INTEGER,\n"
-            "            registered_by_fp TEXT,\n"
-            "            consumed_at INTEGER,\n"
-            "            consumed_cert_serial TEXT,\n"
-            "            revoked_at INTEGER,\n"
-            "            revoked_by TEXT,\n"
-            "            revoked_reason TEXT,\n"
-            "            meta TEXT\n"
-            "        )\n"
-            "    ">>,
-
+    
     GpgIdentitiesTable =
         <<
             "\n"
@@ -284,7 +255,6 @@ create_tables(Conn) ->
             "            timestamp INTEGER NOT NULL,\n"
             "            event_type TEXT NOT NULL,\n"
             "            gpg_fp TEXT,\n"
-            "            invite_id TEXT,\n"
             "            details TEXT,\n"
             "            ip_address TEXT\n"
             "        )\n"
@@ -310,8 +280,6 @@ create_tables(Conn) ->
 
     %% Create indexes
     Indexes = [
-        <<"CREATE INDEX IF NOT EXISTS idx_invites_inviter ON invites(inviter_fp)">>,
-        <<"CREATE INDEX IF NOT EXISTS idx_invites_expires ON invites(expires_at)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_gpg_status ON gpg_identities(status)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_gpg_registered_by ON gpg_identities(registered_by)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)">>,
@@ -322,7 +290,6 @@ create_tables(Conn) ->
     ],
 
     try
-        ok = esqlite3:exec(Conn, InvitesTable),
         ok = esqlite3:exec(Conn, GpgIdentitiesTable),
         ok = esqlite3:exec(Conn, AuditLogTable),
         ok = esqlite3:exec(Conn, CertificatesTable),
@@ -337,289 +304,6 @@ create_tables(Conn) ->
     end.
 
 %%====================================================================
-%% Invite Operations
-%%====================================================================
-
-%% @doc Insert a new invite into the database.
-%%
-%% Creates a new invite record that can be used for onboarding new users.
-%% The invite contains metadata about who created it, when it expires, and
-%% optional additional data (stored as JSON).
-%%
-%% == Example ==
-%% ```
-%% Invite = #invite{
-%%     invite_id = <<"inv-123">>,
-%%     inviter_fp = <<"ABCD1234...">>,
-%%     issued_at = 1700000000,
-%%     expires_at = 1700086400,
-%%     consumed = 0,
-%%     meta = <<"{\"role\":\"admin\"}">>
-%% },
-%% ok = cryptic_ca_store:insert_invite(Conn, Invite).
-%% '''
-%%
-%% @param Conn Database connection reference
-%% @param Invite The invite record to insert
-%% @returns `ok' on success, `{error, Reason}' on failure (e.g., duplicate ID, FK violation)
--spec insert_invite(db_ref(), #invite{}) -> ok | {error, term()}.
-insert_invite(Conn, #invite{} = Invite) ->
-    SQL =
-        <<
-            "INSERT INTO invites (invite_id, inviter_fp, issued_at, expires_at, status, meta) \n"
-            "             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-        >>,
-    Params = [
-        Invite#invite.invite_id,
-        Invite#invite.inviter_fp,
-        Invite#invite.issued_at,
-        Invite#invite.expires_at,
-        Invite#invite.status,
-        Invite#invite.meta
-    ],
-
-    case esqlite3:q(Conn, SQL, Params) of
-        Result when Result =:= [] orelse Result =:= ok ->
-            ok;
-        {error, Reason} = Error ->
-            ?error("Failed to insert invite ~s: ~p", [
-                Invite#invite.invite_id, Reason
-            ]),
-            Error
-    end.
-
-%% @doc Retrieve an invite by its unique ID.
-%%
-%% Fetches a complete invite record including consumption status and metadata.
-%% Can be used to validate invite tokens during the onboarding process.
-%%
-%% == Example ==
-%% ```
-%% case cryptic_ca_store:get_invite(Conn, <<"inv-123">>) of
-%%     {ok, Invite} ->
-%%         %% Check if consumed, expired, etc.
-%%         handle_invite(Invite);
-%%     {error, not_found} ->
-%%         invalid_invite()
-%% end.
-%% '''
-%%
-%% @param Conn Database connection reference
-%% @param InviteId The unique invite identifier
-%% @returns `{ok, Invite}' if found, `{error, not_found}' if not found, or `{error, Reason}' on database error
--spec get_invite(db_ref(), invite_id()) ->
-    {ok, #invite{}} | {error, not_found} | {error, term()}.
-get_invite(Conn, InviteId) ->
-    SQL =
-        <<
-            "SELECT invite_id, inviter_fp, issued_at, expires_at, status, \n"
-            "       registered_at, registered_by_fp, consumed_at, consumed_cert_serial, \n"
-            "       revoked_at, revoked_by, revoked_reason, meta \n"
-            "FROM invites WHERE invite_id = ?1"
-        >>,
-
-    case esqlite3:q(Conn, SQL, [InviteId]) of
-        [
-            [
-                Id,
-                InviterFp,
-                IssuedAt,
-                ExpiresAt,
-                Status,
-                RegisteredAt,
-                RegisteredByFp,
-                ConsumedAt,
-                ConsumedCertSerial,
-                RevokedAt,
-                RevokedBy,
-                RevokedReason,
-                Meta
-            ]
-        ] ->
-            {ok, #invite{
-                invite_id = Id,
-                inviter_fp = InviterFp,
-                issued_at = IssuedAt,
-                expires_at = ExpiresAt,
-                status = Status,
-                registered_at = RegisteredAt,
-                registered_by_fp = RegisteredByFp,
-                consumed_at = ConsumedAt,
-                consumed_cert_serial = ConsumedCertSerial,
-                revoked_at = RevokedAt,
-                revoked_by = RevokedBy,
-                revoked_reason = RevokedReason,
-                meta = Meta
-            }};
-        Result when Result =:= [] orelse Result =:= ok ->
-            {error, not_found};
-        {error, Reason} = Error ->
-            ?error("Failed to get invite ~s: ~p", [InviteId, Reason]),
-            Error
-    end.
-
-%% @doc Update invite status based on operation (state machine transition).
-%%
-%% Transitions the invite through its lifecycle:
-%% - active → registered (when GPG key is registered)
-%% - registered → consumed (when production cert is requested)
-%% - any → revoked (manual revocation by admin)
-%%
-%% == Examples ==
-%% ```
-%% %% GPG registration: active → registered
-%% Metadata = #{gpg_fp => <<"04764AB...">>, event => <<"gpg_registration">>},
-%% ok = cryptic_ca_store:update_invite_status(Conn, <<"inv-123">>, register_gpg, Metadata).
-%%
-%% %% Production cert: registered → consumed
-%% Metadata2 = #{cert_serial => <<"ABC123">>, event => <<"cert_issued">>},
-%% ok = cryptic_ca_store:update_invite_status(Conn, <<"inv-123">>, csr, Metadata2).
-%%
-%% %% Manual revocation: any → revoked
-%% Metadata3 = #{reason => <<"User left company">>, revoked_by => <<"admin_fp">>},
-%% ok = cryptic_ca_store:update_invite_status(Conn, <<"inv-123">>, revoke, Metadata3).
-%% '''
-%%
-%% @param Conn Database connection reference
-%% @param InviteId The invite ID to update
-%% @param Operation The operation being performed: register_gpg | csr | revoke
-%% @param Metadata Map containing operation-specific data
-%% @returns `ok' on success, `{error, Reason}' on failure
--spec update_invite_status(db_ref(), invite_id(), atom(), map()) ->
-    ok | {error, term()}.
-update_invite_status(Conn, InviteId, Operation, Metadata) ->
-    Now = erlang:system_time(second),
-    
-    {NewStatus, SQL, Params} = case Operation of
-        register_gpg ->
-            %% active → registered
-            GpgFp = maps:get(gpg_fp, Metadata),
-            {<<"registered">>,
-             <<"UPDATE invites SET status = ?1, registered_at = ?2, registered_by_fp = ?3 WHERE invite_id = ?4">>,
-             [<<"registered">>, Now, GpgFp, InviteId]};
-        
-        csr ->
-            %% registered → consumed
-            CertSerial = maps:get(cert_serial, Metadata, undefined),
-            {<<"consumed">>,
-             <<"UPDATE invites SET status = ?1, consumed_at = ?2, consumed_cert_serial = ?3 WHERE invite_id = ?4">>,
-             [<<"consumed">>, Now, CertSerial, InviteId]};
-        
-        revoke ->
-            %% any → revoked
-            Reason = maps:get(reason, Metadata, <<"No reason provided">>),
-            RevokedBy = maps:get(revoked_by, Metadata, undefined),
-            {<<"revoked">>,
-             <<"UPDATE invites SET status = ?1, revoked_at = ?2, revoked_by = ?3, revoked_reason = ?4 WHERE invite_id = ?5">>,
-             [<<"revoked">>, Now, RevokedBy, Reason, InviteId]}
-    end,
-
-    case esqlite3:q(Conn, SQL, Params) of
-        Result when Result =:= [] orelse Result =:= ok ->
-            ?info("Updated invite ~s: ~p → ~s", [InviteId, Operation, NewStatus]),
-            ok;
-        {error, ErrReason} = Error ->
-            ?error("Failed to update invite ~s status (~p): ~p", [InviteId, Operation, ErrReason]),
-            Error
-    end.
-
-%% @doc List all invites created by a specific user.
-%%
-%% Returns invites in reverse chronological order (most recent first).
-%% Includes both consumed and unconsumed invites. Useful for displaying
-%% a user's invitation history.
-%%
-%% == Example ==
-%% ```
-%% {ok, Invites} = cryptic_ca_store:list_invites_by_inviter(
-%%     Conn,
-%%     <<"ABCD1234...">>
-%% ),
-%% lists:foreach(fun(I) -> io:format("~s~n", [I#invite.invite_id]) end, Invites).
-%% '''
-%%
-%% @param Conn Database connection reference
-%% @param InviterFp GPG fingerprint of the user who created the invites
-%% @returns `{ok, [Invite]}' with list of invites (may be empty), or `{error, Reason}' on database error
--spec list_invites_by_inviter(db_ref(), gpg_fingerprint()) ->
-    {ok, [#invite{}]} | {error, term()}.
-list_invites_by_inviter(Conn, InviterFp) ->
-    SQL =
-        <<
-            "SELECT invite_id, inviter_fp, issued_at, expires_at, status, \n"
-            "       registered_at, registered_by_fp, consumed_at, consumed_cert_serial, \n"
-            "       revoked_at, revoked_by, revoked_reason, meta \n"
-            "FROM invites WHERE inviter_fp = ?1 ORDER BY issued_at DESC"
-        >>,
-
-    case esqlite3:q(Conn, SQL, [InviterFp]) of
-        Rows when is_list(Rows) ->
-            Invites = lists:map(
-                fun([Id, Inv, Issued, Exp, Status, RegAt, RegByFp, ConsAt, ConsCertSerial, RevAt, RevBy, RevReason, Meta]) ->
-                    #invite{
-                        invite_id = Id,
-                        inviter_fp = Inv,
-                        issued_at = Issued,
-                        expires_at = Exp,
-                        status = Status,
-                        registered_at = RegAt,
-                        registered_by_fp = RegByFp,
-                        consumed_at = ConsAt,
-                        consumed_cert_serial = ConsCertSerial,
-                        revoked_at = RevAt,
-                        revoked_by = RevBy,
-                        revoked_reason = RevReason,
-                        meta = Meta
-                    }
-                end,
-                Rows
-            ),
-            {ok, Invites};
-        {error, Reason} = Error ->
-            ?error("Failed to list invites for ~s: ~p", [InviterFp, Reason]),
-            Error
-    end.
-
-%% @doc Revoke an invite (soft delete).
-%%
-%% Marks an invite as consumed without recording who consumed it or when.
-%% This is effectively a soft delete - the invite remains in the database
-%% for audit purposes but cannot be used for onboarding.
-%%
-%% Use this when an admin needs to invalidate an invite that was issued
-%% but should no longer be usable (e.g., employee left before using invite).
-%%
-%% == Example ==
-%% @doc Delete all expired invites from the database.
-%%
-%% Performs a hard delete (permanent removal) of invites where the expiry
-%% timestamp is in the past. This is useful for cleanup/maintenance.
-%%
-%% Warning: This permanently removes data. Audit logs referencing these
-%% invites will remain, but the invite details will be lost.
-%%
-%% == Example ==
-%% ```
-%% {ok, Count} = cryptic_ca_store:delete_expired_invites(Conn),
-%% io:format("Deleted ~p expired invites~n", [Count]).
-%% '''
-%%
-%% @param Conn Database connection reference
-%% @returns `{ok, Count}' where Count is the number of invites deleted, or `{error, Reason}' on failure
--spec delete_expired_invites(db_ref()) ->
-    {ok, non_neg_integer()} | {error, term()}.
-delete_expired_invites(Conn) ->
-    Now = erlang:system_time(second),
-    SQL = <<"DELETE FROM invites WHERE expires_at < ?1">>,
-    case esqlite3:q(Conn, SQL, [Now]) of
-        Result when Result =:= [] orelse Result =:= ok ->
-            {ok, esqlite3:changes(Conn)};
-        {error, Reason} = Error ->
-            ?error("Failed to delete expired invites: ~p", [Reason]),
-            Error
-    end.
-
-%%====================================================================
 %% GPG Identity Operations
 %%====================================================================
 
@@ -628,8 +312,7 @@ delete_expired_invites(Conn) ->
 %% Registers a new user's GPG key in the system. The status field indicates
 %% how the identity was verified:
 %% <ul>
-%%   <li>`verified_via_invite' - User joined via invite token</li>
-%%   <li>`verified_bootstrap' - Manually added by admin (no invite)</li>
+%%   <li>`verified_bootstrap' - Manually added by admin</li>
 %%   <li>`pending' - Awaiting verification</li>
 %%   <li>`revoked' - Identity has been revoked</li>
 %% </ul>
@@ -639,11 +322,9 @@ delete_expired_invites(Conn) ->
 %% Identity = #gpg_identity{
 %%     gpg_fp = <<"ABCD1234...">>,
 %%     gpg_pub_armor = <<"-----BEGIN PGP PUBLIC KEY BLOCK-----\n...">>,
-%%     status = <<"verified_via_invite">>,
-%%     inviter_fp = <<"EFGH5678...">>,
+%%     status = <<"verified_bootstrap">>,
 %%     registered_at = erlang:system_time(second),
-%%     last_seen = erlang:system_time(second),
-%%     invite_id = <<"inv-123">>
+%%     last_seen = erlang:system_time(second)
 %% },
 %% ok = cryptic_ca_store:insert_gpg_identity(Conn, Identity).
 %% '''
@@ -767,7 +448,7 @@ update_last_seen(Conn, GpgFp) ->
 %% Verified = lists:filter(
 %%     fun(I) ->
 %%         lists:member(I#gpg_identity.status,
-%%                      [<<"verified_via_invite">>, <<"verified_bootstrap">>])
+%%                      [<<"verified_boottraps">>, <<"verified_bootstrap">>])
 %%     end,
 %%     Identities
 %% ).
@@ -859,7 +540,7 @@ register_user(Conn, GpgFp, GpgPubArmor, RegisteredBy, Metadata) ->
 %%
 %% @param Conn Database connection reference
 %% @param GpgFp The GPG fingerprint to update
-%% @param NewStatus One of: <<"active">>, <<"suspended">>, <<"revoked">>
+%% @param NewStatus One of: &lt;&lt;"active">>, &lt;&lt;"suspended">>, &lt;&lt;"revoked">>
 %% @returns `ok' on success, `{error, Reason}' on failure
 -spec update_user_status(db_ref(), gpg_fingerprint(), binary()) -> ok | {error, term()}.
 update_user_status(Conn, GpgFp, NewStatus) ->
@@ -879,24 +560,10 @@ update_user_status(Conn, GpgFp, NewStatus) ->
 %% @doc Insert an audit log entry.
 %%
 %% Records a security-relevant event in the audit log for compliance and
-%% forensic purposes. Events include invite creation/consumption, identity
-%% registration, revocations, etc.
+%% forensic purposes. Events include identity registration, revocations, etc.
 %%
 %% The details field typically contains JSON-encoded additional information
 %% about the event.
-%%
-%% == Example ==
-%% ```
-%% Log = #audit_log{
-%%     timestamp = erlang:system_time(second),
-%%     event_type = <<"invite_created">>,
-%%     gpg_fp = <<"ABCD1234...">>,
-%%     invite_id = <<"inv-123">>,
-%%     details = <<"{\"expires_in\":86400}">>,
-%%     ip_address = <<"192.168.1.100">>
-%% },
-%% ok = cryptic_ca_store:insert_audit_log(Conn, Log).
-%% '''
 %%
 %% @param Conn Database connection reference
 %% @param Log The audit log entry to insert
@@ -905,14 +572,13 @@ update_user_status(Conn, GpgFp, NewStatus) ->
 insert_audit_log(Conn, #audit_log{} = Log) ->
     SQL =
         <<
-            "INSERT INTO audit_log (timestamp, event_type, gpg_fp, invite_id, details, ip_address) \n"
-            "             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            "INSERT INTO audit_log (timestamp, event_type, gpg_fp, details, ip_address) \n"
+            "             VALUES (?1, ?2, ?3, ?4, ?5)"
         >>,
     Params = [
         Log#audit_log.timestamp,
         Log#audit_log.event_type,
         Log#audit_log.gpg_fp,
-        Log#audit_log.invite_id,
         Log#audit_log.details,
         Log#audit_log.ip_address
     ],
@@ -956,7 +622,7 @@ insert_audit_log(Conn, #audit_log{} = Log) ->
 get_audit_logs(Conn, FromTimestamp, ToTimestamp) ->
     SQL =
         <<
-            "SELECT timestamp, event_type, gpg_fp, invite_id, details, ip_address \n"
+            "SELECT timestamp, event_type, gpg_fp, details, ip_address \n"
             "             FROM audit_log \n"
             "             WHERE timestamp >= ?1 AND timestamp <= ?2 \n"
             "             ORDER BY timestamp DESC"
@@ -965,12 +631,11 @@ get_audit_logs(Conn, FromTimestamp, ToTimestamp) ->
     case esqlite3:q(Conn, SQL, [FromTimestamp, ToTimestamp]) of
         Rows when is_list(Rows) ->
             Logs = lists:map(
-                fun([Ts, Evt, Fp, Inv, Det, Ip]) ->
+                fun([Ts, Evt, Fp, Det, Ip]) ->
                     #audit_log{
                         timestamp = Ts,
                         event_type = Evt,
                         gpg_fp = Fp,
-                        invite_id = Inv,
                         details = Det,
                         ip_address = Ip
                     }
@@ -1145,7 +810,6 @@ revoke_certificate(Conn, Serial, RevokedBy, Reason) ->
                 timestamp = Now,
                 event_type = <<"certificate_revoked">>,
                 gpg_fp = RevokedBy,
-                invite_id = undefined,
                 details = iolist_to_binary(io_lib:format("Revoked cert ~s: ~s", [Serial, Reason])),
                 ip_address = undefined
             },
@@ -1269,7 +933,7 @@ list_tables(Conn) ->
 %% == Example ==
 %% ```
 %% DbRef = cryptic_ca_init:get_db_ref().
-%% {ok, Schema} = cryptic_ca_store:describe_table(DbRef, <<"invites">>).
+%% {ok, Schema} = cryptic_ca_store:describe_table(DbRef, &lt;&lt;"certificates">>).
 %% io:format("~s~n", [Schema]).
 %% '''
 %%
@@ -1322,7 +986,7 @@ inspect_db() ->
                                 _ -> unknown
                             end,
                             io:format("~n  - ~s (~p rows)~n", [TableName, Count]),
-                            
+
                             %% Show schema
                             case describe_table(Conn, TableName) of
                                 {ok, Schema} ->

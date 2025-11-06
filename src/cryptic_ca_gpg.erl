@@ -310,7 +310,7 @@ extract_public_key(KeyBlock) ->
 %% @doc Extract email address from GPG public key user ID.
 %%
 %% Parses the GPG public key to extract the email address from the first
-%% user ID. GPG user IDs typically follow the format "Name <email@example.com>".
+%% user ID. GPG user IDs typically follow the format "Name &lt;email@example.com>".
 %%
 %% == Use Cases ==
 %% <ul>
@@ -333,7 +333,7 @@ extract_public_key(KeyBlock) ->
 %% '''
 %%
 %% @param KeyBlock The GPG public key in ASCII-armored format
-%% @returns `{ok, Email}' where Email is a binary like <<"bob@smith.org">>,
+%% @returns `{ok, Email}' where Email is a binary like &lt;&lt;"bob@smith.org">>,
 %%          or `{error, no_email_found}' if no valid email in user IDs
 -spec extract_email_from_key(binary()) -> {ok, binary()} | {error, term()}.
 extract_email_from_key(KeyBlock) ->
@@ -372,7 +372,7 @@ extract_email_from_key(KeyBlock) ->
 %% @private
 %% @doc Extract email address from GPG user ID list.
 %%
-%% Parses user IDs in the format "Name <email@example.com>" or "email@example.com"
+%% Parses user IDs in the format "Name &lt;email@example.com>" or "email@example.com"
 %% and extracts the email address from the first user ID that contains one.
 %%
 %% @param UserIDs List of user ID binaries from GPG key
@@ -390,9 +390,9 @@ extract_email_from_uids([UID | Rest]) ->
 %% @doc Extract email from a single user ID string.
 %%
 %% Handles formats:
-%% - "Name <email@example.com>" → "email@example.com"
+%% - "Name &lt;email@example.com>" → "email@example.com"
 %% - "email@example.com" → "email@example.com"
-%% - "Name (comment) <email@example.com>" → "email@example.com"
+%% - "Name (comment) &lt;email@example.com>" → "email@example.com"
 %%
 %% @param UID User ID binary
 %% @returns `{ok, Email}' or `{error, no_email_found}'

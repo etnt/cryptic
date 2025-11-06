@@ -707,13 +707,8 @@ parse_history_command(Args) ->
         end,
     {history_cmd, Result}.
 
-%% @doc Parse invite create options
-%% Examples:
-%%   "--expires 24h --note Welcome Bob"
-%%   "--note Welcome"
-%%   "" (empty, use defaults)
 %% @doc Parse admin register command
-%% Format: admin register <gpg_fp> <key_file> [--note "description"]
+%% Format: admin register &lt;gpg_fp> &lt;key_file> [--note "description"]
 parse_admin_register(ArgsStr) ->
     Parts = string:tokens(ArgsStr, " "),
     case Parts of
@@ -1294,11 +1289,7 @@ notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
     %% Run notifier in a separate process to avoid blocking
     spawn(F).
 
-%%%===================================================================
-%%% Invite Command Implementations
-%%%===================================================================
 
-%% @doc Execute invite create command
 %%====================================================================
 %% Admin Command Execution
 %%====================================================================

@@ -115,7 +115,9 @@ generate_gpg_key() {
 
     # Generate key using batch mode for automation
     # Using RSA 4096 as it's widely supported
-    gpg --batch --gen-key <<EOF
+    # Only include Name-Comment if comment is not empty
+    if [ -n "$comment" ]; then
+        gpg --batch --gen-key <<EOF
 %no-protection
 Key-Type: RSA
 Key-Length: 4096
@@ -127,6 +129,19 @@ Name-Comment: $comment
 Expire-Date: 2y
 %commit
 EOF
+    else
+        gpg --batch --gen-key <<EOF
+%no-protection
+Key-Type: RSA
+Key-Length: 4096
+Subkey-Type: RSA
+Subkey-Length: 4096
+Name-Real: $real_name
+Name-Email: $email_addr
+Expire-Date: 2y
+%commit
+EOF
+    fi
 
     if [ $? -eq 0 ]; then
         success "GPG key generated successfully!"
