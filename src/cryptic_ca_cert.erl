@@ -24,11 +24,12 @@
 -export([
     issue_from_csr/2,
     issue_from_csr/3,
+    issue_from_csr/4,
     issue_from_csr_with_gpg_proof/3,
     issue_from_csr_with_gpg_proof/4,
     parse_csr/1,
     validate_csr/1,
-    build_client_cert/4,
+    build_client_cert/5,
     sign_cert/2,
     encode_pem/1
 ]).
@@ -65,12 +66,18 @@ issue_from_csr(CSR_PEM, GPG_FP) ->
     ValidityDays = application:get_env(cryptic,
                                        cert_default_lifetime_days,
                                        7),
-    issue_from_csr(CSR_PEM, GPG_FP, ValidityDays).
+    issue_from_csr(CSR_PEM, GPG_FP, undefined, ValidityDays).
 
 %% @doc Issue certificate from CSR with custom validity period
 -spec issue_from_csr(binary(), binary(), pos_integer()) ->
     {ok, binary()} | {error, term()}.
-issue_from_csr(CSR_PEM, GPG_FP, ValidityDays) when ValidityDays > 0 ->
+issue_from_csr(CSR_PEM, GPG_FP, ValidityDays) when is_integer(ValidityDays), ValidityDays > 0 ->
+    issue_from_csr(CSR_PEM, GPG_FP, undefined, ValidityDays).
+
+%% @doc Issue certificate from CSR with optional email and custom validity period
+-spec issue_from_csr(binary(), binary(), binary() | undefined, pos_integer()) ->
+    {ok, binary()} | {error, term()}.
+issue_from_csr(CSR_PEM, GPG_FP, Email, ValidityDays) when ValidityDays > 0 ->
     try
         % Parse CSR
         {ok, CSR} = parse_csr(CSR_PEM),
@@ -90,9 +97,9 @@ issue_from_csr(CSR_PEM, GPG_FP, ValidityDays) when ValidityDays > 0 ->
         % Load CA key (cert will be loaded in build_client_cert)
         {ok, CAKey} = application:get_env(cryptic, ca_key),
         
-        % Build certificate
+        % Build certificate with email
         {ok, Cert} = build_client_cert(Subject, OTPSubjectPKInfo, GPG_FP,
-                                        ValidityDays),
+                                        Email, ValidityDays),
         
         % Get serial before signing
         Serial = Cert#'OTPCertificate'.tbsCertificate#'OTPTBSCertificate'.serialNumber,
@@ -157,13 +164,13 @@ issue_from_csr_with_gpg_proof(CSR_PEM, GPG_FP, GPG_Signature, ValidityDays)
     try
         %% Step 1: Verify GPG fingerprint exists in registry
         case verify_gpg_identity(GPG_FP) of
-            {ok, GPG_PubKey} ->
+            {ok, GPG_PubKey, Email} ->
                 %% Step 2: Verify GPG signature over CSR
                 case cryptic_ca_gpg:verify_detached_signature(
                     CSR_PEM, GPG_Signature, GPG_PubKey) of
                     ok ->
                         %% Step 3: Issue certificate (this validates CSR internally)
-                        case issue_from_csr(CSR_PEM, GPG_FP, ValidityDays) of
+                        case issue_from_csr(CSR_PEM, GPG_FP, Email, ValidityDays) of
                             {ok, CertPEM} ->
                                 ?info("Issued certificate for verified GPG FP ~s with proof",
                                       [GPG_FP]),
@@ -190,10 +197,10 @@ issue_from_csr_with_gpg_proof(CSR_PEM, GPG_FP, GPG_Signature, ValidityDays)
             {error, {cert_issuance_with_proof_failed, ErrorReason}}
     end.
 
-%% @doc Verify GPG identity exists in registry and return public key
+%% @doc Verify GPG identity exists in registry and return public key and email
 %% @private
 -spec verify_gpg_identity(binary()) ->
-    {ok, binary()} | {error, term()}.
+    {ok, binary(), binary() | undefined} | {error, term()}.
 verify_gpg_identity(GPG_FP) ->
     try
         %% Get database reference
@@ -206,13 +213,15 @@ verify_gpg_identity(GPG_FP) ->
                         Status = maps:get(status, Identity, undefined),
                         case Status of
                             <<"verified_via_invite">> ->
-                                %% Return public key
+                                %% Extract public key and email
                                 GPG_PubKey = maps:get(gpg_pub_armor, Identity),
-                                {ok, GPG_PubKey};
+                                Email = extract_email_from_gpg_key(GPG_PubKey),
+                                {ok, GPG_PubKey, Email};
                             <<"verified_bootstrap">> ->
-                                %% Return public key
+                                %% Extract public key and email
                                 GPG_PubKey = maps:get(gpg_pub_armor, Identity),
-                                {ok, GPG_PubKey};
+                                Email = extract_email_from_gpg_key(GPG_PubKey),
+                                {ok, GPG_PubKey, Email};
                             <<"pending">> ->
                                 {error, gpg_identity_pending_verification};
                             <<"revoked">> ->
@@ -234,6 +243,15 @@ verify_gpg_identity(GPG_FP) ->
             ?error("Exception during GPG identity verification: ~p:~p~n~p",
                    [ErrorType, ErrorReason, Stack]),
             {error, {gpg_identity_verification_exception, ErrorReason}}
+    end.
+
+%% @doc Extract email from GPG public key
+%% @private
+-spec extract_email_from_gpg_key(binary()) -> binary() | undefined.
+extract_email_from_gpg_key(GPG_PubKey) ->
+    case cryptic_ca_gpg:extract_email_from_key(GPG_PubKey) of
+        {ok, Email} -> Email;
+        {error, _} -> undefined
     end.
 
 %% @doc Parse PEM-encoded CSR
@@ -315,14 +333,15 @@ validate_csr(CSR) ->
 %% - Subject from CSR
 %% - Public key from CSR
 %% - Extensions for TLS client auth
-%% - GPG fingerprint in Subject Alternative Name
+%% - GPG fingerprint and optional email in Subject Alternative Name
 -spec build_client_cert(
     tuple(),  % Subject Name from CSR
     tuple(),  % SubjectPublicKeyInfo from CSR
-    binary(),
-    pos_integer()
+    binary(), % GPG Fingerprint
+    binary() | undefined, % Email (optional)
+    pos_integer() % Validity days
 ) -> {ok, #'OTPCertificate'{}} | {error, term()}.
-build_client_cert(Subject, SubjectPKInfo, GPG_FP, ValidityDays) ->
+build_client_cert(Subject, SubjectPKInfo, GPG_FP, Email, ValidityDays) ->
     try
         % Get next serial number
         SerialNum = cryptic_ca_serial:next(),
@@ -338,8 +357,8 @@ build_client_cert(Subject, SubjectPKInfo, GPG_FP, ValidityDays) ->
         {ok, CACert} = application:get_env(cryptic, ca_cert),
         Issuer = extract_issuer(CACert),
         
-        % Build certificate extensions
-        Extensions = build_client_extensions(GPG_FP),
+        % Build certificate extensions with email
+        Extensions = build_client_extensions(GPG_FP, Email),
         
         % Construct TBSCertificate (To Be Signed)
         TBSCert = #'OTPTBSCertificate'{
@@ -579,10 +598,18 @@ decode_params({asn1_OPENTYPE, _ParamsBin}, undefined) ->
     asn1_NOVALUE;  % Unknown algorithm, use NOVALUE
 decode_params(Other, _) -> Other.
 
-%% @private Build extensions for client certificates
-build_client_extensions(GPG_FP) ->
+%% @private Build extensions for client certificates with optional email
+build_client_extensions(GPG_FP, Email) ->
     % Create DNS name from GPG fingerprint for SAN
     DNSName = binary_to_list(<<GPG_FP/binary, ".gpg.cryptic.local">>),
+    
+    % Build SAN values - include email if provided
+    SANValues = case Email of
+        undefined -> 
+            [{dNSName, DNSName}];
+        EmailBin when is_binary(EmailBin) ->
+            [{dNSName, DNSName}, {rfc822Name, binary_to_list(EmailBin)}]
+    end,
     
     [
         % Key Usage: Digital Signature + Key Encipherment (critical)
@@ -599,12 +626,12 @@ build_client_extensions(GPG_FP) ->
             extnValue = [?ID_KP_CLIENT_AUTH]
         },
         
-        % Subject Alternative Name: GPG Fingerprint as DNS name
-        % Format: <fingerprint>.gpg.cryptic.local
+        % Subject Alternative Name: GPG Fingerprint as DNS name + optional email
+        % Format: <fingerprint>.gpg.cryptic.local + email if available
         #'Extension'{
             extnID = ?ID_CE_SUBJECT_ALT_NAME,
             critical = false,
-            extnValue = [{dNSName, DNSName}]
+            extnValue = SANValues
         }
     ].
 

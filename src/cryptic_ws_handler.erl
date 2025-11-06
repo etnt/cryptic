@@ -147,6 +147,7 @@
 -behaviour(cowboy_websocket).
 
 -include("cryptic_server.hrl").
+-include("../include/cryptic_ca.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 -export([
@@ -169,11 +170,30 @@
 %% @returns {cowboy_websocket, Req, State} for successful authentication,
 %%          or {ok, Response, State} with 401 error for authentication failure
 init(Req, State) ->
-    %% Extract client certificate information during handshake
+    %%  Extract client certificate information during handshake
     case get_client_identity(Req) of
         {ok, Username} ->
             ?info("Client ~s authenticated via certificate", [Username]),
-            {cowboy_websocket, Req, #{username => Username}};
+            
+            %% Get database reference and peer certificate for admin operations
+            {ok, DbRef} = application:get_env(cryptic, ca_db_ref),
+            PeerCert = cowboy_req:cert(Req),
+            
+            %% Extract GPG fingerprint from certificate for admin permission checks
+            GpgFp = case PeerCert of
+                undefined -> undefined;
+                _ -> 
+                    case extract_gpg_from_cert_der(PeerCert) of
+                        {ok, Fp} -> Fp;
+                        {error, _} -> undefined
+                    end
+            end,
+            
+            {cowboy_websocket, Req, #{
+                username => Username,
+                gpg_fp => GpgFp,
+                db_ref => DbRef
+            }};
         {error, Reason} ->
             ?error("Client certificate authentication failed: ~p", [Reason]),
             Reply = cowboy_req:reply(
@@ -714,9 +734,207 @@ handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
         users => [list_to_binary(U) || U <- Users]
     },
     {reply, Response};
+
+%% Admin commands - require admin privileges
+handle_command(#{<<"type">> := <<"register_user">>} = Command, _Username, State) ->
+    handle_admin_command(register_user, Command, State);
+handle_command(#{<<"type">> := <<"suspend_user">>} = Command, _Username, State) ->
+    handle_admin_command(suspend_user, Command, State);
+handle_command(#{<<"type">> := <<"revoke_user">>} = Command, _Username, State) ->
+    handle_admin_command(revoke_user, Command, State);
+handle_command(#{<<"type">> := <<"reactivate_user">>} = Command, _Username, State) ->
+    handle_admin_command(reactivate_user, Command, State);
+handle_command(#{<<"type">> := <<"get_user_info">>} = Command, _Username, State) ->
+    handle_admin_command(get_user_info, Command, State);
+handle_command(#{<<"type">> := <<"invite_create">>} = Command, _Username, State) ->
+    handle_admin_command(invite_create, Command, State);
+handle_command(#{<<"type">> := <<"invite_list">>} = Command, _Username, State) ->
+    handle_admin_command(invite_list, Command, State);
+handle_command(#{<<"type">> := <<"invite_revoke">>} = Command, _Username, State) ->
+    handle_admin_command(invite_revoke, Command, State);
+
 handle_command(Command, Username, _State) ->
     ?debug("Unknown command from ~s: ~p", [Username, Command]),
     {error, "Unknown command"}.
+
+%%%===================================================================
+%%% Admin Command Handlers
+%%%===================================================================
+
+%% @doc Handle admin commands with permission checking
+%% Checks if the user has admin privileges before executing the command
+handle_admin_command(CommandType, Command, #{gpg_fp := GpgFp, db_ref := DbRef} = State) ->
+    case is_admin(GpgFp, DbRef) of
+        true ->
+            execute_admin_command(CommandType, Command, State);
+        false ->
+            ?warning("Non-admin user attempted admin command: ~p", [GpgFp]),
+            {reply, #{
+                error => <<"permission_denied">>,
+                message => <<"Admin privileges required for this command">>
+            }}
+    end;
+handle_admin_command(_CommandType, _Command, _State) ->
+    {reply, #{
+        error => <<"authentication_required">>,
+        message => <<"Valid GPG certificate required for admin commands">>
+    }}.
+
+%% @doc Execute admin commands after permission check
+execute_admin_command(register_user, #{
+    <<"gpg_fp">> := UserGpgFp,
+    <<"gpg_pub">> := GpgPub
+} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
+    Metadata = maps:get(<<"metadata">>, Command, null),
+    
+    case cryptic_ca_store:register_user(DbRef, UserGpgFp, GpgPub, AdminFp, Metadata) of
+        ok ->
+            {reply, #{
+                type => <<"user_registered">>,
+                gpg_fp => UserGpgFp,
+                registered_by => AdminFp
+            }};
+        {error, Reason} ->
+            {reply, #{
+                error => <<"registration_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+execute_admin_command(suspend_user, #{
+    <<"gpg_fp">> := UserGpgFp
+} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
+    Reason = maps:get(<<"reason">>, Command, <<"No reason provided">>),
+    
+    case cryptic_ca_store:suspend_user(DbRef, UserGpgFp, AdminFp, Reason) of
+        ok ->
+            {reply, #{
+                type => <<"user_suspended">>,
+                gpg_fp => UserGpgFp,
+                suspended_by => AdminFp,
+                reason => Reason
+            }};
+        {error, ErrorReason} ->
+            {reply, #{
+                error => <<"suspension_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
+            }}
+    end;
+
+execute_admin_command(revoke_user, #{
+    <<"gpg_fp">> := UserGpgFp
+} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
+    Reason = maps:get(<<"reason">>, Command, <<"No reason provided">>),
+    
+    case cryptic_ca_store:revoke_user(DbRef, UserGpgFp, AdminFp, Reason) of
+        ok ->
+            {reply, #{
+                type => <<"user_revoked">>,
+                gpg_fp => UserGpgFp,
+                revoked_by => AdminFp,
+                reason => Reason
+            }};
+        {error, ErrorReason} ->
+            {reply, #{
+                error => <<"revocation_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
+            }}
+    end;
+
+execute_admin_command(reactivate_user, #{
+    <<"gpg_fp">> := UserGpgFp
+}, #{db_ref := DbRef}) ->
+    case cryptic_ca_store:reactivate_user(DbRef, UserGpgFp) of
+        ok ->
+            {reply, #{
+                type => <<"user_reactivated">>,
+                gpg_fp => UserGpgFp
+            }};
+        {error, Reason} ->
+            {reply, #{
+                error => <<"reactivation_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+execute_admin_command(get_user_info, #{
+    <<"gpg_fp">> := UserGpgFp
+}, #{db_ref := DbRef}) ->
+    case cryptic_ca_store:get_gpg_identity(DbRef, UserGpgFp) of
+        {ok, Identity} ->
+            {reply, #{
+                type => <<"user_info">>,
+                gpg_fp => Identity#gpg_identity.gpg_fp,
+                status => Identity#gpg_identity.status,
+                registered_by => Identity#gpg_identity.registered_by,
+                registered_at => Identity#gpg_identity.registered_at,
+                last_seen => Identity#gpg_identity.last_seen
+            }};
+        {error, not_found} ->
+            {reply, #{
+                error => <<"user_not_found">>,
+                message => <<"User not registered">>
+            }};
+        {error, Reason} ->
+            {reply, #{
+                error => <<"query_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+execute_admin_command(invite_create, Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
+    Email = maps:get(<<"email">>, Command, undefined),
+    ExpiresIn = maps:get(<<"expires_in_hours">>, Command, 24),
+    
+    case cryptic_invite_mgr:create_invite(DbRef, AdminFp, Email, ExpiresIn) of
+        {ok, InviteId, ExpiresAt} ->
+            {reply, #{
+                type => <<"invite_created">>,
+                invite_id => InviteId,
+                expires_at => ExpiresAt
+            }};
+        {error, Reason} ->
+            {reply, #{
+                error => <<"invite_creation_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+execute_admin_command(invite_list, _Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
+    case cryptic_invite_mgr:list_invites_by_inviter(DbRef, AdminFp) of
+        {ok, Invites} ->
+            {reply, #{
+                type => <<"invite_list">>,
+                invites => Invites
+            }};
+        {error, Reason} ->
+            {reply, #{
+                error => <<"query_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+execute_admin_command(invite_revoke, #{
+    <<"invite_id">> := InviteId
+}, #{db_ref := DbRef}) ->
+    case cryptic_invite_mgr:revoke_invite(DbRef, InviteId) of
+        ok ->
+            {reply, #{
+                type => <<"invite_revoked">>,
+                invite_id => InviteId
+            }};
+        {error, Reason} ->
+            {reply, #{
+                error => <<"revocation_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+execute_admin_command(CommandType, _Command, _State) ->
+    {reply, #{
+        error => <<"not_implemented">>,
+        message => iolist_to_binary(io_lib:format("Admin command ~p not yet implemented", [CommandType]))
+    }}.
 
 %% @doc Extract client identity from SSL/TLS certificate
 %%
@@ -1229,3 +1447,82 @@ store_message(ToUser, MessageBlob) ->
     MessageId = erlang:unique_integer([positive]),
     ets:insert(?MESSAGE_TABLE, {MessageId, ToUser, MessageBlob}),
     ok.
+
+%%%===================================================================
+%%% Admin Permission and GPG Extraction Functions
+%%%===================================================================
+
+%% OID constant for certificate extensions
+-define(ID_CE_SUBJECT_ALT_NAME, {2, 5, 29, 17}).
+
+%% @doc Extract GPG fingerprint from client certificate DER
+-spec extract_gpg_from_cert_der(binary() | undefined) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_cert_der(undefined) ->
+    {error, no_peer_cert};
+extract_gpg_from_cert_der(CertDER) ->
+    try
+        %% Decode the certificate
+        Cert = public_key:pkix_decode_cert(CertDER, otp),
+        
+        %% Extract extensions
+        #'OTPCertificate'{
+            tbsCertificate = #'OTPTBSCertificate'{
+                extensions = Extensions
+            }
+        } = Cert,
+        
+        %% Find the Subject Alternative Name extension
+        case find_san_extension(Extensions) of
+            {ok, SANValue} ->
+                extract_gpg_from_san(SANValue);
+            {error, _} = Error ->
+                Error
+        end
+    catch
+        _:DecodeReason ->
+            {error, {cert_decode_failed, DecodeReason}}
+    end.
+
+%% @private Find the SAN extension in the certificate extensions list
+-spec find_san_extension([#'Extension'{}]) -> {ok, term()} | {error, not_found}.
+find_san_extension([]) ->
+    {error, san_not_found};
+find_san_extension([#'Extension'{extnID = ?ID_CE_SUBJECT_ALT_NAME, extnValue = Value} | _]) ->
+    {ok, Value};
+find_san_extension([_ | Rest]) ->
+    find_san_extension(Rest).
+
+%% @private Extract GPG fingerprint from SAN value
+%% Expected format: [{dNSName, "<fingerprint>.gpg.cryptic.local"}]
+-spec extract_gpg_from_san(term()) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_san([{dNSName, DNSName} | _]) ->
+    %% DNSName format: "<fingerprint>.gpg.cryptic.local"
+    case string:split(DNSName, ".gpg.cryptic.local") of
+        [Fingerprint, ""] ->
+            {ok, list_to_binary(Fingerprint)};
+        _ ->
+            {error, invalid_san_format}
+    end;
+extract_gpg_from_san([_ | Rest]) ->
+    extract_gpg_from_san(Rest);
+extract_gpg_from_san([]) ->
+    {error, no_gpg_in_san}.
+
+%% @doc Check if a user has admin privileges
+%% A user is considered an admin if they were not registered by another user
+%% (i.e., registered_by is undefined), indicating they are a bootstrap/initial admin
+-spec is_admin(binary(), term()) -> boolean().
+is_admin(undefined, _DbRef) ->
+    false;
+is_admin(GpgFp, DbRef) ->
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, Identity} ->
+            %% Admin if they were not registered by someone else
+            %% Need to include the record definition
+            case Identity of
+                #gpg_identity{registered_by = undefined} -> true;
+                _ -> false
+            end;
+        {error, _} ->
+            false
+    end.

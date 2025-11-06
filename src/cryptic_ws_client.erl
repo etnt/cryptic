@@ -120,6 +120,7 @@
     username,
     server_host,
     server_port = 8443,
+    ws_path = "/ws",  % WebSocket endpoint path: "/ws" for chat, "/ca/ws" for admin
     conn_pid,
     stream_ref,
     cert_file,
@@ -765,8 +766,8 @@ connect_websocket(State) ->
                         "TLS connection established, upgrading to WebSocket~n",
                         []
                     ),
-                    %% Connect to CA WebSocket endpoint for certificate authority operations
-                    StreamRef = gun:ws_upgrade(ConnPid, "/ca/ws"),
+                    %% Connect to WebSocket endpoint (configurable: /ws for chat, /ca/ws for admin)
+                    StreamRef = gun:ws_upgrade(ConnPid, State#state.ws_path),
                     NewState = State#state{
                         conn_pid = ConnPid,
                         stream_ref = StreamRef

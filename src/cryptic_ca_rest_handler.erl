@@ -7,6 +7,7 @@
 %% - POST /ca/v1/register-gpg: Register a new user with invite token
 %% - POST /ca/v1/csr: Request a certificate with GPG-signed CSR
 %% - GET /ca/v1/status/:fingerprint: Check registration status
+%% - GET /ca/v1/ca-cert: Download the CA certificate in PEM format
 %%
 %% @author Cryptic Development Team
 %% @version 1.0.0
@@ -69,13 +70,26 @@ content_types_accepted(Req, State) ->
 %% @param State Handler state
 %% @returns {ContentTypes, Req, State}
 content_types_provided(Req, State) ->
-    {
-        [
-            {{<<"application">>, <<"json">>, []}, handle_get}
-        ],
-        Req,
-        State
-    }.
+    case maps:get(operation, State, undefined) of
+        ca_cert ->
+            %% CA certificate endpoint returns PEM format
+            {
+                [
+                    {{<<"application">>, <<"x-pem-file">>, []}, handle_get}
+                ],
+                Req,
+                State
+            };
+        _ ->
+            %% Default to JSON for other endpoints
+            {
+                [
+                    {{<<"application">>, <<"json">>, []}, handle_get}
+                ],
+                Req,
+                State
+            }
+    end.
 
 %%====================================================================
 %% Request Handlers
@@ -101,6 +115,7 @@ handle_post(Req, State) ->
 %%
 %% Routes to appropriate handler based on operation in state:
 %% - status: Get registration status
+%% - ca_cert: Get CA certificate in PEM format
 %%
 %% @param Req Cowboy request
 %% @param State Handler state with operation type
@@ -109,6 +124,9 @@ handle_get(Req, #{operation := status} = State) ->
     %% Extract fingerprint from binding
     Fingerprint = cowboy_req:binding(fingerprint, Req),
     handle_status(Fingerprint, Req, State);
+handle_get(Req, #{operation := ca_cert} = State) ->
+    %% Return the CA certificate in PEM format
+    handle_ca_cert(Req, State);
 handle_get(Req, State) ->
     %% Fallback for unknown operation
     Path = cowboy_req:path(Req),
@@ -441,8 +459,21 @@ validate_csr_fingerprint(CsrPem, _ExpectedGpgFp) ->
 
 %% @private Issue certificate and update database
 issue_certificate(Req, State, DbRef, CsrPem, GpgFp, Identity) ->
-    %% Issue certificate using cryptic_ca_cert module
-    case cryptic_ca_cert:issue_from_csr(CsrPem, GpgFp) of
+    %% Extract email from GPG public key
+    GpgPubKey = Identity#gpg_identity.gpg_pub_armor,
+    Email = case cryptic_ca_gpg:extract_email_from_key(GpgPubKey) of
+        {ok, E} -> 
+            ?info("Extracted email from GPG key: ~s", [E]),
+            E;
+        {error, EmailReason} -> 
+            ?warning("Failed to extract email from GPG key: ~p", [EmailReason]),
+            undefined
+    end,
+    
+    ?info("Issuing certificate for ~s with email: ~p", [GpgFp, Email]),
+    
+    %% Issue certificate using cryptic_ca_cert module with email
+    case cryptic_ca_cert:issue_from_csr(CsrPem, GpgFp, Email, 7) of
         {ok, CertPem} ->
             %% Extract validity from configuration
             ValidityDays = application:get_env(cryptic_ca, cert_default_lifetime_days, 7),
@@ -465,7 +496,22 @@ issue_certificate(Req, State, DbRef, CsrPem, GpgFp, Identity) ->
                 status = <<"active">>,
                 cert_pem = CertPem
             },
-            ok = cryptic_ca_store:insert_certificate(DbRef, CertRecord),
+            case cryptic_ca_store:insert_certificate(DbRef, CertRecord) of
+                ok -> 
+                    ok;
+                {error, 1555} ->
+                    %% Duplicate serial number - this indicates the serial counter is out of sync
+                    %% This can happen if the server crashed after issuing a cert but before 
+                    %% persisting the serial counter. The solution is to restart the server
+                    %% so it re-syncs from the database.
+                    ?error("Certificate serial ~s already exists - serial counter out of sync. "
+                           "Please restart the server to re-sync serial numbers.", [Serial]),
+                    error({duplicate_serial, Serial, 
+                           "Serial counter out of sync. Restart server to fix."});
+                {error, Reason} ->
+                    ?error("Failed to insert certificate ~s: ~p", [Serial, Reason]),
+                    error({cert_insert_failed, Reason})
+            end,
 
             %% Update last_seen timestamp for user
             ok = cryptic_ca_store:update_last_seen(DbRef, GpgFp),
@@ -536,6 +582,67 @@ handle_get_route(Path, Req, State) ->
                 message => <<"Unknown endpoint">>
             }),
             {ErrorBody, Req, State}
+    end.
+
+%% @doc Handle CA certificate download request.
+%%
+%% Returns the CA certificate in PEM format so clients can verify
+%% the server's certificate during TLS handshake.
+%%
+%% Response: PEM-encoded CA certificate (application/x-pem-file)
+-spec handle_ca_cert(cowboy_req:req(), map()) ->
+    {binary(), cowboy_req:req(), map()}.
+handle_ca_cert(Req, State) ->
+    ?info("CA certificate download request from ~s", [get_ip_address(Req)]),
+
+    %% Get CA certificate from application environment
+    case application:get_env(cryptic, ca_cert) of
+        {ok, CaCert} ->
+            %% Encode to PEM format
+            try
+                %% Convert OTP certificate to plain format for encoding
+                %% This unwraps ECPoint records and other OTP-specific structures
+                PlainCert = public_key:pkix_encode('OTPCertificate', CaCert, otp),
+                DecodedCert = public_key:pkix_decode_cert(PlainCert, plain),
+                
+                PemEntry = public_key:pem_entry_encode('Certificate', DecodedCert),
+                CaPem = public_key:pem_encode([PemEntry]),
+                
+                ?info("Serving CA certificate (~p bytes)", [byte_size(CaPem)]),
+                
+                %% Return PEM-encoded certificate
+                Req2 = cowboy_req:set_resp_header(
+                    <<"content-type">>, <<"application/x-pem-file">>, Req
+                ),
+                Req3 = cowboy_req:set_resp_header(
+                    <<"content-disposition">>, <<"attachment; filename=\"ca.crt\"">>, Req2
+                ),
+                {CaPem, Req3, State}
+            catch
+                Error:CatchReason:Stack ->
+                    ?error(
+                        "Failed to encode CA certificate: ~p:~p~nStack: ~p",
+                        [Error, CatchReason, Stack]
+                    ),
+                    ErrorBody = jsx:encode(#{
+                        error => <<"encoding_failed">>,
+                        message => <<"Failed to encode CA certificate">>
+                    }),
+                    ReqErr = cowboy_req:set_resp_header(
+                        <<"content-type">>, <<"application/json">>, Req
+                    ),
+                    {ErrorBody, ReqErr, State}
+            end;
+        undefined ->
+            ?error("CA certificate not configured in application environment: ~p", [undefined]),
+            ErrorBody = jsx:encode(#{
+                error => <<"not_configured">>,
+                message => <<"CA certificate not available">>
+            }),
+            ReqErr2 = cowboy_req:set_resp_header(
+                <<"content-type">>, <<"application/json">>, Req
+            ),
+            {ErrorBody, ReqErr2, State}
     end.
 
 %% @doc Handle status check request.
@@ -681,11 +788,15 @@ extract_serial_from_cert(CertPem) ->
         TbsCert = OtpCert#'OTPCertificate'.tbsCertificate,
         Serial = TbsCert#'OTPTBSCertificate'.serialNumber,
         
-        %% Convert to hex string
-        integer_to_binary(Serial, 16)
+        %% Convert to hex string (uppercase for consistency)
+        list_to_binary(string:uppercase(integer_to_list(Serial, 16)))
     catch
         _:Error ->
             ?error("Failed to extract serial from certificate: ~p", [Error]),
-            %% Fallback to random serial if extraction fails
-            crypto:strong_rand_bytes(16)
+            %% Fallback to random hex serial if extraction fails
+            RandomBytes = crypto:strong_rand_bytes(16),
+            %% Convert random bytes to hex string
+            list_to_binary(string:uppercase(
+                lists:flatten([io_lib:format("~2.16.0B", [X]) || X <- binary_to_list(RandomBytes)])
+            ))
     end.

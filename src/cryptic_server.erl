@@ -595,6 +595,9 @@ start_websocket_mtls(Config) ->
             {"/ca/ws", cryptic_ca_ws_handler, []},
 
             %% CA REST API for public operations
+            {"/ca/v1/ca-cert", cryptic_ca_rest_handler, #{
+                operation => ca_cert
+            }},
             {"/ca/v1/register-gpg", cryptic_ca_rest_handler, #{
                 operation => register_gpg
             }},

@@ -1,5 +1,12 @@
 %% @doc WebSocket handler for CA operations from trusted clients (cryptic_console)
 %%
+%% **DEPRECATED**: This endpoint (/ca/ws) is deprecated in favor of the unified
+%% /ws endpoint which now handles both chat and admin commands with proper
+%% permission checks. This handler remains for backward compatibility only.
+%%
+%% Please use the main /ws endpoint for all connections. Admin commands are
+%% automatically routed based on user permissions.
+%%
 %% This module handles WebSocket connections from authenticated clients
 %% (cryptic_console) for CA management operations. Authentication is
 %% provided by the existing mTLS connection.
@@ -100,6 +107,14 @@ init(Req, _Opts) ->
 %% @returns {ok, State} on successful initialization, {stop, State} on auth failure
 websocket_init(#state{peer_cert = PeerCert, db_ref = DbRef} = State) ->
     ?info("CA WebSocket connection established", []),
+    ?warning("DEPRECATED: /ca/ws endpoint is deprecated. Please use /ws for all connections.", []),
+
+    %% Send deprecation warning to client
+    DeprecationMsg = jsx:encode(#{
+        warning => <<"deprecated_endpoint">>,
+        message => <<"The /ca/ws endpoint is deprecated. Please use /ws for all connections. Admin commands work on /ws with proper permissions.">>
+    }),
+    self() ! {send_warning, DeprecationMsg},
 
     %% Extract GPG fingerprint from mTLS certificate's SAN extension
     %% The certificate embeds the GPG fingerprint as: <fingerprint>.gpg.cryptic.local
@@ -187,6 +202,9 @@ websocket_handle(_Frame, State) ->
 websocket_info({send_and_close, ErrorMsg}, State) ->
     %% Send error message and then close the connection
     {[{text, ErrorMsg}, close], State};
+websocket_info({send_warning, WarningMsg}, State) ->
+    %% Send deprecation warning
+    {reply, {text, WarningMsg}, State};
 websocket_info(_Info, State) ->
     {ok, State}.
 

@@ -99,19 +99,16 @@ init([]) ->
     ets:insert(?TABLE, {?COUNTER_KEY, 0}),
     
     % Try to restore from database if configured
-    DbRef = case application:get_env(cryptic_ca, storage_backend) of
-        {ok, esqlite} ->
-            case init_database() of
-                {ok, Ref} ->
-                    restore_from_db(Ref),
-                    Ref;
-                {error, Reason} ->
-                    error_logger:warning_msg(
-                        "~p: Failed to init database: ~p~n",
-                        [?MODULE, Reason]),
-                    undefined
-            end;
-        _ ->
+    % Use the already-initialized CA database connection
+    DbRef = case application:get_env(cryptic, ca_db_ref) of
+        {ok, Ref} ->
+            create_table(Ref),
+            restore_from_db(Ref),
+            Ref;
+        undefined ->
+            error_logger:warning_msg(
+                "~p: CA database not initialized~n",
+                [?MODULE]),
             undefined
     end,
 
@@ -182,21 +179,6 @@ terminate(_Reason, State) ->
 %%% Internal functions
 %%%===================================================================
 
-%% @private Initialize database connection
-init_database() ->
-    case application:get_env(cryptic_ca, db_file) of
-        {ok, DbFile} ->
-            case cryptic_ca_store:open_db(DbFile) of
-                {ok, Ref} ->
-                    create_table(Ref),
-                    {ok, Ref};
-                Error ->
-                    Error
-            end;
-        undefined ->
-            {error, no_db_file_configured}
-    end.
-
 %% @private Create serial number table if not exists
 create_table(DbRef) ->
     SQL = <<"
@@ -207,7 +189,7 @@ create_table(DbRef) ->
         )
     ">>,
     
-    case esqlite3:exec(SQL, DbRef) of
+    case esqlite3:exec(DbRef, SQL) of
         ok -> ok;
         {error, Reason} ->
             error_logger:error_msg(
@@ -222,17 +204,39 @@ restore_from_db(undefined) ->
 restore_from_db(DbRef) ->
     SQL = <<"SELECT serial_number FROM ca_serial_numbers WHERE id = 1">>,
     
-    case esqlite3:q(SQL, DbRef) of
-        {ok, [{Serial}]} when is_integer(Serial) ->
+    case esqlite3:q(DbRef, SQL) of
+        [[Serial]] when is_integer(Serial) ->
             ets:insert(?TABLE, {?COUNTER_KEY, Serial}),
             error_logger:info_msg(
                 "~p: Restored serial number: ~p~n",
                 [?MODULE, Serial]),
             ok;
-        {ok, []} ->
-            % No saved serial, start from 1
-            ets:insert(?TABLE, {?COUNTER_KEY, 1}),
-            ok;
+        [] ->
+            % No saved serial, query the max serial from certificates table
+            MaxSerialSQL = <<"SELECT MAX(CAST(serial AS INTEGER)) FROM certificates">>,
+            case esqlite3:q(DbRef, MaxSerialSQL) of
+                [[MaxSerial]] when is_integer(MaxSerial) ->
+                    % Start from next serial
+                    NextSerial = MaxSerial + 1,
+                    ets:insert(?TABLE, {?COUNTER_KEY, NextSerial}),
+                    error_logger:info_msg(
+                        "~p: Initialized serial from max certificate serial: ~p~n",
+                        [?MODULE, NextSerial]),
+                    ok;
+                [[null]] ->
+                    % No certificates yet, start from 1
+                    ets:insert(?TABLE, {?COUNTER_KEY, 1}),
+                    error_logger:info_msg(
+                        "~p: No certificates found, starting from serial 1~n",
+                        [?MODULE]),
+                    ok;
+                {error, Reason} ->
+                    error_logger:error_msg(
+                        "~p: Failed to query max serial: ~p, defaulting to 1~n",
+                        [?MODULE, Reason]),
+                    ets:insert(?TABLE, {?COUNTER_KEY, 1}),
+                    ok
+            end;
         {error, Reason} ->
             error_logger:error_msg(
                 "~p: Failed to restore serial: ~p~n",
@@ -253,9 +257,9 @@ write_to_db(DbRef, Serial) ->
             updated_at = ?2
     ">>,
     
-    case esqlite3:exec(SQL, [Serial, Now], DbRef) of
-        ok ->
-            ok;
+    case esqlite3:q(DbRef, SQL, [Serial, Now]) of
+        [] -> ok;
+        ok -> ok;
         {error, Reason} ->
             error_logger:error_msg(
                 "~p: Failed to backup serial ~p: ~p~n",
