@@ -11,7 +11,7 @@
   0},
  {<<"erl_gpg">>,
   {git,"git@github.com:etnt/erl_gpg.git",
-       {ref,"5d1b141fd9ba7c1af4044307760e57a24052f298"}},
+       {ref,"2475c56b298202ccff19d7753c486c97e716bfe9"}},
   0},
  {<<"esqlite">>,
   {git,"https://github.com/mmzeeman/esqlite.git",

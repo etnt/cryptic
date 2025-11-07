@@ -33,7 +33,7 @@ start(_StartType, _StartArgs) ->
     case init_ca() of
         {ok, DbRef} ->
             ?info("CA database initialized: ~p", [DbRef]),
-            
+
             %% Initialize CA environment (load certificates and keys)
             case cryptic_ca_store:init_ca_environment() of
                 ok ->

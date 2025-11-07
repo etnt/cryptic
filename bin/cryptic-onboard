@@ -350,8 +350,22 @@ cmd_request() {
             GPG_FP=$(jq -r '.gpg_fingerprint // empty' "$USER_CONFIG")
             GPG_EMAIL=$(jq -r '.gpg_email // empty' "$USER_CONFIG")
 
-            if [ -z "$GPG_FP" ] || [ -z "$GPG_EMAIL" ]; then
-                warn "Invalid user config. Re-selecting GPG key..."
+            # Validate that the stored fingerprint exists and matches the stored email
+            VERIFY_EMAIL=""
+            if [ -n "$GPG_FP" ]; then
+                # Get email associated with this fingerprint in GPG keyring
+                VERIFY_EMAIL=$(gpg --list-keys --with-colons "$GPG_FP" 2>/dev/null | \
+                              awk -F: '/^uid/ {print $10}' | head -1 | \
+                              grep -oE '[^<]+@[^>]+' | head -1)
+            fi
+
+            if [ -z "$GPG_FP" ] || [ -z "$GPG_EMAIL" ] || [ "$VERIFY_EMAIL" != "$GPG_EMAIL" ]; then
+                if [ -n "$GPG_FP" ] && [ -n "$VERIFY_EMAIL" ] && [ "$VERIFY_EMAIL" != "$GPG_EMAIL" ]; then
+                    warn "Config mismatch! Stored email ($GPG_EMAIL) doesn't match GPG key ($VERIFY_EMAIL)"
+                else
+                    warn "Invalid or incomplete user config."
+                fi
+                echo ""
                 select_gpg_key
                 GPG_FP="$SELECTED_GPG_FP"
                 GPG_EMAIL="$SELECTED_GPG_EMAIL"

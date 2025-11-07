@@ -109,6 +109,7 @@
     print_help/0,
     print_help/1,
     print_console_status/1,
+    print_cert_status/5,
     print_ca_response/1,
     make_prompt/0,
     make_prompt/1,
@@ -2377,3 +2378,63 @@ print_console_status(Status) ->
 
     %% Return to main screen buffer
     io:format(?ALT_SCREEN_OFF).
+
+%% @doc Print certificate status with nice formatting
+-spec print_cert_status(
+    Serial :: string(),
+    Expiry :: string(),
+    Subject :: string(),
+    SAN :: string() | undefined,
+    Files :: {CertFile :: string(), KeyFile :: string()}
+) -> ok.
+print_cert_status(Serial, Expiry, Subject, SAN, {CertFile, KeyFile}) ->
+    %% Display header with border
+    io:format("\r\n"),
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CERTIFICATE STATUS                              "
+            ) ++ ?BOLD(" ║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    %% Status
+    io:format(?FG_GREEN("  Status:           ") ++ ?FG_GREEN("✓ Valid") ++ "\r\n\r\n"),
+
+    %% Certificate details
+    io:format(?FG_YELLOW("  Certificate Details:\r\n")),
+    io:format("    " ++ ?FG_CYAN(Serial) ++ "\r\n"),
+    io:format("    " ++ ?FG_CYAN(Expiry) ++ "\r\n"),
+    io:format("    " ++ ?FG_CYAN(Subject) ++ "\r\n"),
+    
+    %% SAN extensions (if present)
+    case SAN of
+        undefined -> 
+            ok;
+        SANValue ->
+            io:format("    " ++ ?FG_CYAN("Subject Alternative Names: " ++ SANValue) ++ "\r\n")
+    end,
+    io:format("\r\n"),
+
+    %% Local files
+    io:format(?FG_YELLOW("  Local Files:\r\n")),
+    io:format("    Certificate: " ++ ?FG_WHITE(CertFile) ++ "\r\n"),
+    io:format("    Private Key: " ++ ?FG_WHITE(KeyFile) ++ "\r\n\r\n"),
+
+    %% Footer
+    io:format(
+        ?BOLD(
+            "═══════════════════════════════════════════════════════════════"
+        ) ++ "\r\n"
+    ),
+    ok.
+

@@ -292,6 +292,15 @@ init({UIPid, Username, ServerHost, Config}) ->
                 {missing_ca,
                     "Set CRYPTIC_CA_CERT environment variable or provide ca_file in config"}};
         {Cert, Key, CA} ->
+            %% Subscribe to event bus for websocket_outbound messages
+            WsOutboundFilter = fun(Event) ->
+                case Event of
+                    #{type := websocket_outbound} -> true;
+                    _ -> false
+                end
+            end,
+            ok = cryptic_event_bus:subscribe(self(), WsOutboundFilter),
+
             State = #state{
                 ui_pid = UIPid,
                 username = Username,
@@ -312,17 +321,20 @@ init({UIPid, Username, ServerHost, Config}) ->
             end
     end.
 
+%%%===================================================================
+%%% Internal helper functions
+%%%===================================================================
+
 %% @private
-%% @doc Handle synchronous calls to the gen_server.
+%% @doc Send a command message via WebSocket.
 %%
-%% Processes various client operations including command sending,
-%% UI PID registration, and shutdown requests.
+%% Handles message tracking for critical message types (x3dh, ratchet)
+%% and sends the message over the WebSocket connection.
 %%
-%% @param Request The call request
-%% @param From The caller's reference
-%% @param State Current gen_server state
-%% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
-handle_call({send_message, Command}, _From, State) ->
+%% @param Command The command map to send
+%% @param State Current state
+%% @returns {Reply, NewState}
+do_send_message(Command, State) ->
     %% Add message_id if this is a message that needs acknowledgment
     {CommandWithId, NewState} =
         case maps:get(<<"type">>, Command, undefined) of
@@ -346,7 +358,21 @@ handle_call({send_message, Command}, _From, State) ->
         NewState#state.stream_ref,
         {text, JsonCommand}
     ),
-    {reply, ok, NewState};
+    {ok, NewState}.
+
+%% @private
+%% @doc Handle synchronous calls to the gen_server.
+%%
+%% Processes various client operations including command sending,
+%% UI PID registration, and shutdown requests.
+%%
+%% @param Request The call request
+%% @param From The caller's reference
+%% @param State Current gen_server state
+%% @returns `{reply, Reply, NewState}' or `{stop, Reason, Reply, State}'
+handle_call({send_message, Command}, _From, State) ->
+    {Reply, NewState} = do_send_message(Command, State),
+    {reply, Reply, NewState};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call({set_engine_pid, EnginePid}, _From, State) ->
@@ -605,6 +631,12 @@ handle_info({retry_message, MessageId}, State) ->
                     {noreply, State#state{pending_acks = NewPendingAcks}}
             end
     end;
+%% Handle events from the event bus
+handle_info({event, #{type := websocket_outbound, message := Message}}, State) ->
+    ?dbg("Received websocket_outbound event from bus: ~p", [Message]),
+    %% Send the message via WebSocket
+    {_Reply, NewState} = do_send_message(Message, State),
+    {noreply, NewState};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -820,28 +852,19 @@ dispatch_to_engine(ValidatedMessage, State) ->
     
     case IsCAResponse of
         true ->
-            %% Send CA responses to console (ui_pid)
-            case State#state.ui_pid of
-                undefined ->
-                    ?warning("No UI PID set, cannot dispatch CA message: ~p~n", [
-                        ValidatedMessage
-                    ]);
-                UIPid ->
-                    ?dbg("Dispatching CA response to Console: ~p~n", [ValidatedMessage]),
-                    UIPid ! {ca_response, ValidatedMessage}
-            end;
+            %% Publish CA response to event bus for console
+            ?dbg("Publishing CA response event to bus: ~p~n", [ValidatedMessage]),
+            cryptic_event_bus:publish(#{
+                type => ca_response,
+                response => ValidatedMessage
+            });
         false ->
-            %% Send chat/engine messages to engine
-            case State#state.engine_pid of
-                undefined ->
-                    ?warning("No Engine PID set, cannot dispatch message: ~p~n", [
-                        ValidatedMessage
-                    ]);
-                EnginePid ->
-                    ?dbg("Dispatching message to Engine: ~p~n", [ValidatedMessage]),
-                    %% Send the validated message to the Engine using standardized format
-                    EnginePid ! {websocket_message, ValidatedMessage}
-            end
+            %% Publish websocket message to event bus for engine
+            ?dbg("Publishing websocket_message event to bus: ~p~n", [ValidatedMessage]),
+            cryptic_event_bus:publish(#{
+                type => websocket_message,
+                message => ValidatedMessage
+            })
     end,
     {noreply, State}.
 
