@@ -100,9 +100,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set default certificate paths if not already set (use absolute paths)
-export CRYPTIC_SERVER_CERT="${CRYPTIC_SERVER_CERT:-$PROJECT_ROOT/CA/certs/server.crt}"
-export CRYPTIC_SERVER_KEY="${CRYPTIC_SERVER_KEY:-$PROJECT_ROOT/CA/private/server.key}"
-export CRYPTIC_CA_CERT="${CRYPTIC_CA_CERT:-$PROJECT_ROOT/CA/certs/ca.crt}"
+export CRYPTIC_SERVER_CERT="${CRYPTIC_SERVER_CERT:-$PROJECT_ROOT/priv/ssl/server.crt}"
+export CRYPTIC_SERVER_KEY="${CRYPTIC_SERVER_KEY:-$PROJECT_ROOT/priv/ssl/server.key}"
+export CRYPTIC_CA_CERT="${CRYPTIC_CA_CERT:-$PROJECT_ROOT/priv/ssl/ca.crt}"
 
 # Set server host and port via environment variables
 export CRYPTIC_SERVER_HOST="${CRYPTIC_SERVER_HOST:-$SERVER_HOST}"
@@ -139,23 +139,23 @@ timer:sleep(infinity).
 if [ "$DAEMON_MODE" = true ]; then
     # Run as detached daemon
     echo "Starting server in daemon mode..."
-    
+
     # Create log directory if it doesn't exist
     mkdir -p "$PROJECT_ROOT/logs"
-    
+
     LOG_FILE="$PROJECT_ROOT/logs/server.log"
     PID_FILE="$PROJECT_ROOT/logs/server.pid"
-    
+
     # Start detached Erlang node with heart for auto-restart
     erl -detached \
         -heart \
         $ERL_OPTS \
         -kernel error_logger '{file,"'$LOG_FILE'"}' \
         -eval "$ERL_CODE" &
-    
+
     # Save the PID
     echo $! > "$PID_FILE"
-    
+
     echo ""
     echo "Server started in daemon mode"
     echo "  PID: $(cat $PID_FILE)"

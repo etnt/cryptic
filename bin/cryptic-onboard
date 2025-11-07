@@ -22,7 +22,7 @@ set -e  # Exit on error
 # Configuration
 CONFIG_DIR="${HOME}/.cryptic"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
-DEFAULT_SERVER="https://relay.cryptic.example.org:8443"
+DEFAULT_SERVER="https://localhost:8443"
 
 # Colors for output
 RED='\033[0;31m'
@@ -607,11 +607,11 @@ EOF
         success "CA certificate downloaded"
     else
         # Fallback: try to copy from local CA directory if running locally
-        if [ -f "CA/certs/ca.crt" ]; then
-            cp "CA/certs/ca.crt" "$CA_CERT_FILE"
+        if [ -f "priv/ssl/ca.crt" ]; then
+            cp "priv/ssl/ca.crt" "$CA_CERT_FILE"
             success "CA certificate copied from local CA"
-        elif [ -f "../CA/certs/ca.crt" ]; then
-            cp "../CA/certs/ca.crt" "$CA_CERT_FILE"
+        elif [ -f "../priv/ssl/ca.crt" ]; then
+            cp "../priv/ssl/ca.crt" "$CA_CERT_FILE"
             success "CA certificate copied from local CA"
         else
             warn "Could not retrieve CA certificate. Server verification will be disabled."
