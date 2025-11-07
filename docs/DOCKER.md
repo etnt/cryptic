@@ -31,8 +31,7 @@ foreground mode and requires external mTLS certificates mounted as volumes.
 
 1. **Generate certificates** (if you haven't already):
    ```bash
-   cd CA
-   make all
+   ./scripts/generate-mtls-certs.sh
    ```
 
 2. **Build the Docker image**:
@@ -140,8 +139,8 @@ ports:
 
 ## Certificate Generation
 
-If you need to generate certificates for testing or development
-read [here](docs/CERTIFICATE_HANDLING.md).
+Generate the CA and Server certificates using the
+`scripts/generate-mtls-certs.sh` script.
 
 **Production Note**: For production deployments, use certificates from a
 trusted Certificate Authority.
