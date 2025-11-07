@@ -351,6 +351,15 @@ init(Config) ->
     % Handle ratchet engine crashes gracefully
     process_flag(trap_exit, true),
 
+    % Subscribe to event bus for websocket_message events
+    WebsocketFilter = fun(Event) ->
+        case Event of
+            #{type := websocket_message} -> true;
+            _ -> false
+        end
+    end,
+    ok = cryptic_event_bus:subscribe(self(), WebsocketFilter),
+
     % Extract configuration
     CallbackModule = maps:get(callback_mod, Config),
     Username = maps:get(username, Config),
@@ -485,6 +494,10 @@ handle_cast(_Msg, State) ->
 %%% H A N D L E _ I N F O
 %%% ----------------------
 %% @private
+%% Handle events from the event bus
+handle_info({event, #{type := websocket_message, message := Message}}, State) ->
+    %% Unwrap the event and handle as websocket_message
+    handle_info({websocket_message, Message}, State);
 handle_info(
     {websocket_message,
         #{

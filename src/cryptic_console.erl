@@ -119,6 +119,8 @@ main(InitCfg) ->
     cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
+    cryptic_event_bus:start_link(),
+
     Username = maps:get(username, InitCfg),
 
     %% Initialize the enhanced shell first
@@ -201,6 +203,19 @@ main(InitCfg) ->
 
     %% Get console PID to pass to callbacks
     ConsolePid = self(),
+
+    %% Subscribe to event bus for console-relevant messages
+    %% Filter for: deliver_message, system_message, ca_response events
+    ConsoleFilter = fun(Event) ->
+        case Event of
+            #{type := deliver_message} -> true;
+            #{type := system_message} -> true;
+            #{type := ca_response} -> true;
+            #{type := websocket_message} -> true;
+            _ -> false
+        end
+    end,
+    ok = cryptic_event_bus:subscribe(ConsolePid, ConsoleFilter),
 
     %% Start cryptic engine with passphrase and WebSocket client PID
     EngineCfg = CertCfg#{
@@ -405,14 +420,14 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
         {'DOWN', MonitorRef, process, InputPid, _Reason} ->
             %% Input process died (we killed it), restart command loop
             command_loop(State);
-        {ca_response, Response} ->
+        {event, #{type := ca_response, response := Response}} ->
             %% CA operation response arrived while waiting for input
             exit(InputPid, kill),
             %% Display the CA response
             display_ca_response(Response),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State);
-        {system_message, Message} ->
+        {event, #{type := system_message, message := Message}} ->
             %% A message arrived while waiting for input
             %% Note: We can't retrieve the actual input buffer from the blocked process
             %% A future enhancement would be to modify cryptic_shell to support this
@@ -422,7 +437,7 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             display_system_message(Message),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State);
-        {deliver_message, FromUsername, Message, Timestamp} ->
+        {event, #{type := deliver_message, from := FromUsername, message := Message, timestamp := Timestamp}} ->
             %% A chat message arrived while waiting for input
             %% Note: We can't retrieve the actual input buffer from the blocked process
             %% A future enhancement would be to modify cryptic_shell to support this
@@ -474,6 +489,13 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
                     ok
             end,
 
+            %% Continue waiting - the DOWN message will trigger restart
+            wait_for_input_or_messages(InputPid, MonitorRef, State);
+        {event, #{type := websocket_message, message := Message}} ->
+            %% WebSocket message arrived while waiting for input
+            exit(InputPid, kill),
+            %% Display the websocket message response
+            display_websocket_message(Message),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
@@ -1191,12 +1213,12 @@ clear_command_line(Message) ->
 %% @doc Check for and handle any pending messages
 check_messages_with_state(State) ->
     receive
-        {system_message, Message} ->
+        {event, #{type := system_message, message := Message}} ->
             %% Clear line and print system message
             display_system_message(Message),
             %% Recursively check for more messages
             check_messages_with_state(State);
-        {deliver_message, FromUsername, Message, Timestamp} ->
+        {event, #{type := deliver_message, from := FromUsername, message := Message, timestamp := Timestamp}} ->
             %% Clear line and print delivered message
             display_user_message(FromUsername, Message, Timestamp),
 
@@ -1246,7 +1268,12 @@ check_messages_with_state(State) ->
 
 display_user_message(FromUsername, Message, Timestamp) ->
     %% Print the user message (cryptic_shell handles line clearing)
-    cryptic_shell:print_user_message(FromUsername, Message, Timestamp),
+    %% Convert binary username to list for cryptic_shell:print_user_message/3
+    FromUser = case FromUsername of
+        Bin when is_binary(Bin) -> binary_to_list(Bin);
+        List when is_list(List) -> List
+    end,
+    cryptic_shell:print_user_message(FromUser, Message, Timestamp),
     %% Force flush output streams
     io:format("~s", [""]),
     %% Longer delay to ensure terminal has processed all ANSI sequences
@@ -1265,6 +1292,71 @@ display_system_message(Message) ->
 display_ca_response(Response) ->
     %% Delegate to cryptic_shell for proper formatting
     cryptic_shell:print_ca_response(Response).
+
+%% @doc Display websocket message responses
+display_websocket_message(#{<<"type">> := <<"users">>, <<"users">> := Users}) ->
+    %% Handle user list response from admin list command
+    io:format("\r\n"),
+    cryptic_shell:print_info("Registered users:"),
+    lists:foreach(
+        fun(Username) ->
+            io:format("  " ++ ?FG_CYAN(binary_to_list(Username)) ++ "\r\n")
+        end,
+        Users
+    ),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"pending_messages_delivered">>, <<"count">> := Count}) ->
+    %% Handle pending messages notification
+    case Count of
+        0 ->
+            io:format("\r\n"),
+            cryptic_shell:print_info("No pending messages found at the server."),
+            io:format("~s", [""]),
+            timer:sleep(100);
+        1 ->
+            io:format("\r\n"),
+            cryptic_shell:print_success("1 pending message delivered from server."),
+            io:format("~s", [""]),
+            timer:sleep(100);
+        N ->
+            io:format("\r\n"),
+            cryptic_shell:print_success(
+                integer_to_list(N) ++ " pending messages delivered from server."
+            ),
+            io:format("~s", [""]),
+            timer:sleep(100)
+    end;
+display_websocket_message(#{<<"type">> := <<"success">>}) ->
+    %% Suppress generic success messages - they're not interesting for the user
+    ok;
+display_websocket_message(#{<<"type">> := <<"message">>}) ->
+    %% Suppress encrypted message details - the decrypted message is displayed via deliver_message event
+    ok;
+display_websocket_message(#{<<"type">> := <<"key_bundle">>}) ->
+    %% Suppress key bundle messages - internal protocol data for key exchange
+    ok;
+display_websocket_message(#{<<"type">> := <<"error">>, <<"message">> := ErrorMsg, <<"success">> := false}) ->
+    %% Handle error messages from server
+    io:format("\r\n"),
+    cryptic_shell:print_error("Server error: " ++ binary_to_list(ErrorMsg)),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"user_registered">>, <<"gpg_fp">> := GpgFp, <<"registered_by">> := RegisteredBy}) ->
+    %% Handle user registration confirmation
+    io:format("\r\n"),
+    cryptic_shell:print_success("User registered successfully!"),
+    io:format("  GPG Fingerprint: " ++ ?FG_CYAN(binary_to_list(GpgFp)) ++ "\r\n"),
+    io:format("  Registered by:   " ++ ?FG_YELLOW(binary_to_list(RegisteredBy)) ++ "\r\n"),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(Message) ->
+    %% Generic handler for other websocket messages
+    io:format("\r\n"),
+    cryptic_shell:print_info("WebSocket message: " ++ 
+        lists:flatten(io_lib:format("~p", [Message]))),
+    io:format("~s", [""]),
+    timer:sleep(100).
 
 notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
     F = fun() ->
@@ -1508,23 +1600,28 @@ display_certificate_status(CertFile, KeyFile, State) ->
     SerialCmd = "openssl x509 -in " ++ CertFile ++ " -noout -serial 2>/dev/null",
     ExpiryCmd = "openssl x509 -in " ++ CertFile ++ " -noout -enddate 2>/dev/null",
     SubjectCmd = "openssl x509 -in " ++ CertFile ++ " -noout -subject 2>/dev/null",
-    
+    SANCmd = "openssl x509 -in " ++ CertFile ++ " -noout -ext subjectAltName 2>/dev/null",
+
     Serial = string:trim(os:cmd(SerialCmd)),
     Expiry = string:trim(os:cmd(ExpiryCmd)),
     Subject = string:trim(os:cmd(SubjectCmd)),
+    SANRaw = string:trim(os:cmd(SANCmd)),
     
-    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-    cryptic_shell:print_info("Certificate Status"),
-    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-    io:format("Status:        Valid ✓~n"),
-    io:format("~s~n", [Serial]),
-    io:format("~s~n", [Expiry]),
-    io:format("~s~n", [Subject]),
-    io:format("~n"),
-    io:format("Local Files:~n"),
-    io:format("  Certificate: ~s~n", [CertFile]),
-    io:format("  Private Key: ~s~n", [KeyFile]),
-    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+    %% Parse SAN output to extract DNS names
+    SAN = case SANRaw of
+        "" -> undefined;
+        _ ->
+            %% SAN format: "X509v3 Subject Alternative Name: \n    DNS:example.com, DNS:www.example.com"
+            Lines = string:split(SANRaw, "\n", all),
+            case Lines of
+                [_Header | [DNSLine | _]] ->
+                    string:trim(DNSLine);
+                _ -> undefined
+            end
+    end,
+    
+    %% Use the new formatted print function
+    cryptic_shell:print_cert_status(Serial, Expiry, Subject, SAN, {CertFile, KeyFile}),
     
     %% Also query server for GPG status if connected
     case State#console_state.ws_client_pid of

@@ -5,26 +5,15 @@ filesystem-based approach.
 
 ## Use Cases
 
-The bootstrap mechanism serves two primary purposes:
+The bootstrap mechanism is used for:
 
 ### 1. Initial System Setup
 
-When first deploying the system, you need at least one "root" or "admin" user
-who can create invites for other users. This creates a chicken-and-egg problem:
+When first deploying the system, you need to register the first user(s) who
+can then authenticate and use the system.
 
-- New users need invites to register
-- But who creates the first invite?
-
-**Solution**: Bootstrap the initial admin user(s) via the filesystem.
-These users can then create invites for subsequent users, establishing
-the chain of trust.
-
-### 2. Legacy Certificate Migration
-
-For users with existing client certificates that don't have GPG fingerprint
-information embedded in the Subject Alternative Name (SAN) extension.
-In older versions, certificates were issued without this information,
-preventing automatic authentication.
+**Solution**: Bootstrap the initial user(s) via the filesystem. These users
+can then connect and use the system normally.
 
 ## How It Works
 
@@ -34,7 +23,7 @@ security risk), the system uses a filesystem-based approach:
 1. Users export their GPG public key to a designated directory
 2. The server loads these keys on startup
 3. GPG fingerprints are registered in the CA database
-4. Users can then connect normally with their existing certificates
+4. Users can then request certificates (CSR) via the Cryptic onboarding process
 
 ## How to Bootstrap a User
 
@@ -48,13 +37,12 @@ Use the provided script to export a user's GPG public key:
 
 This will:
 - Verify the GPG key exists for `admin@cryptic.local`
-- Export the armored public key to `_build/default/lib/cryptic/priv/ca/bootstrap/admin.gpg`
-- Display instructions for applying the change
+- Export the armored public key to `priv/ca/bootstrap/admin.gpg`
 
-### Step 2: Restart Server or Reload
+### Step 2: (Re-)Start Server or Reload
 
-The server automatically loads bootstrap registrations on startup. If the server
-is already running, you can reload without restart:
+The server automatically loads bootstrap registrations on startup.
+If the server is already running, you can reload without restart:
 
 ```erlang
 %% From the Erlang shell:
@@ -62,27 +50,39 @@ is already running, you can reload without restart:
 cryptic_ca_bootstrap:load_bootstrap_registrations(DbRef).
 ```
 
-### Step 3: Verify Registration
+### Step 3: Request certificates
 
-Check that the GPG identity was registered:
+Request new certificates via the `./bin/cryptic-onboard` script.
+Choose the `Request a TLS certificate from server` action.
 
-```erlang
-%% From the Erlang shell:
-{ok, DbRef} = cryptic_ca_init:get_db_ref().
-cryptic_ca_store:list_gpg_identities(DbRef).
+Veryfy that you have got certificates, for example:
+
+```
+❯ tree ~/.cryptic
+.../.cryptic
+├── admin
+│   ├── localhost_8443
+│   │   ├── certificates
+│   │   │   ├── admin.crt
+│   │   │   ├── admin.csr
+│   │   │   ├── admin.key
+│   │   │   └── ca.crt
 ```
 
-Or use the database inspection tool:
+### Step 4: Log on via the cryptic_console
 
-```erlang
-cryptic_ca_store:inspect_db().
+Example:
+
 ```
+./script/cryptic_console -u admin --enable-db
+```
+
 
 ## Bootstrap File Format
 
 Bootstrap files are stored in:
 ```
-_build/default/lib/cryptic/priv/ca/bootstrap/
+priv/ca/bootstrap/
 ```
 
 Each file:
@@ -110,84 +110,40 @@ gpg --armor --export alice@cryptic.local > \
 
 ## Bootstrapping Multiple Users
 
-You can bootstrap multiple users at once:
+You can bootstrap multiple users at once by running the script for each user:
 
 ```bash
-for user in alice bob charlie; do
-    ./scripts/bootstrap_gpg.sh $user
-done
+./scripts/bootstrap_gpg.sh alice
+./scripts/bootstrap_gpg.sh bob
+./scripts/bootstrap_gpg.sh charlie
 ```
 
 Then restart the server or reload bootstrap registrations.
 
-## Initial System Setup Example
+**Key Points**:
+- Bootstrap is needed for the first user(s) to register their GPG identity
+- After bootstrapping, use `./bin/cryptic-onboard request` to get a certificate
+- The onboarding script handles GPG key creation, CSR generation, and signing
+- Subsequent users follow the same process: bootstrap GPG, then request certificate
 
-When deploying a new Cryptic server from scratch (day zero), you need to:
-1. Create the admin's GPG key
-2. Generate the admin's client certificate
-3. Bootstrap the admin's GPG registration
-4. Start the server
-
-### Complete Day Zero Setup
-
-```bash
-# 1. Create GPG key for admin user
-gpg --batch --gen-key <<EOF
-%no-protection
-Key-Type: RSA
-Key-Length: 4096
-Name-Real: Admin
-Name-Email: admin@cryptic.local
-Expire-Date: 0
-%commit
-EOF
-
-# 2. Generate admin's client certificate
-# First, ensure CA certificates exist (run once per deployment)
-cd CA
-make clean  # Clean old certs if they exist
-make all    # Generate CA root certificate
-cd ..
-
-# Generate and install admin's client certificate
-./scripts/bootstrap_cert.sh admin localhost 8443
-
-# This creates certificates in:
-#   $HOME/.cryptic/admin/localhost_8443/certificates/admin.crt
-#   $HOME/.cryptic/admin/localhost_8443/certificates/admin.key
-#   $HOME/.cryptic/admin/localhost_8443/certificates/admin.pem
-#   $HOME/.cryptic/admin/localhost_8443/certificates/ca.crt
-
-# 3. Bootstrap admin's GPG registration
-cd ..
-./scripts/bootstrap_gpg.sh admin
-
-# 4. Start the server (bootstrap happens automatically)
-./scripts/start-server.sh
-
-# 5. Connect as admin and verify you can create invites
-./scripts/cryptic_console --username admin \
-  --cert ~/.cryptic/admin/localhost/certificates/admin.crt \
-  --key ~/.cryptic/admin/localhost/certificates/admin.key
-
-# In the console:
-# > invite create --expiry 24 --note "Test invite"
-```
-
-**Once the admin is bootstrapped**, the normal invite-based onboarding flow
-takes over:
-
-1. Admin creates invite: `invite create --expiry 24 --note "Invite for Alice"`
-2. Alice uses invite to register via external script or REST endpoint
-3. Alice's certificate will include GPG info in SAN extension (no bootstrap needed)
-4. Alice can create invites for others
-5. Chain of trust is established
-
-**Key Point**: Bootstrap is only needed for the initial admin user(s) who seed
-the system. All subsequent users should use the invite-based registration flow,
-which embeds GPG fingerprints in their certificates automatically.
 
 ## Troubleshooting
+
+### Verify Registration via server shell
+
+Check that the GPG identity was registered:
+
+```erlang
+%% From the Erlang shell:
+{ok, DbRef} = cryptic_ca_init:get_db_ref().
+cryptic_ca_store:list_gpg_identities(DbRef).
+```
+
+Or use the database inspection tool:
+
+```erlang
+cryptic_ca_store:inspect_db().
+```
 
 ### GPG key not found
 
@@ -216,15 +172,7 @@ and log a debug message. This is normal and safe.
 Ensure the bootstrap directory is writable:
 
 ```bash
-mkdir -p _build/default/lib/cryptic/priv/ca/bootstrap
-chmod 755 _build/default/lib/cryptic/priv/ca/bootstrap
+mkdir -p priv/ca/bootstrap
+chmod 755 priv/ca/bootstrap
 ```
 
-## Migration Path
-
-Once all users have been migrated to certificates with embedded GPG fingerprints:
-
-1. New certificates (issued after this feature) will have GPG info in SAN
-2. Users with new certificates don't need bootstrapping
-3. Bootstrap files can be cleaned up
-4. The bootstrap mechanism can be deprecated in a future version

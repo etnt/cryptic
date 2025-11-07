@@ -79,7 +79,8 @@ init([]) ->
           type => worker,
           modules => [cryptic_server]},
 
-    ChildSpecs = [EventManager, CaInit, CaSerialManager, CaRateLimiter, CertMonitor, CrypticServer],
+    ChildSpecs = [EventManager, CaInit, CaSerialManager,
+                  CaRateLimiter, CertMonitor, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

@@ -230,6 +230,13 @@ restore_from_db(DbRef) ->
                         "~p: No certificates found, starting from serial 1~n",
                         [?MODULE]),
                     ok;
+                [[undefined]] ->
+                    % No certificates yet (undefined variant), start from 1
+                    ets:insert(?TABLE, {?COUNTER_KEY, 1}),
+                    error_logger:info_msg(
+                        "~p: No certificates found (undefined), starting from serial 1~n",
+                        [?MODULE]),
+                    ok;
                 {error, Reason} ->
                     error_logger:error_msg(
                         "~p: Failed to query max serial: ~p, defaulting to 1~n",
