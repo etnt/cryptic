@@ -173,29 +173,15 @@ send_message_to_server(FromUsername, Message, Context) when
         debug, {"Message: ~p", [Message]}, UpdatedContext1
     ),
 
-    case maps:get(ws_client_pid, UpdatedContext2, undefined) of
-        undefined ->
-            {ok, UpdatedContext3} = log_message(
-                error, {"No WebSocket client available", []}, UpdatedContext2
-            ),
-            {error, no_ws_client, UpdatedContext3};
-        WSClientPid when is_pid(WSClientPid) ->
-            case cryptic_ws_client:send_message(WSClientPid, Message) of
-                ok ->
-                    log_message(
-                        debug,
-                        {"Message sent successfully", []},
-                        UpdatedContext2
-                    );
-                {error, Reason} ->
-                    {ok, UpdatedContext3} = log_message(
-                        error,
-                        {"Failed to send message: ~p", [Reason]},
-                        UpdatedContext2
-                    ),
-                    {error, Reason, UpdatedContext3}
-            end
-    end.
+    %% Publish to event bus instead of calling ws_client directly
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Message
+    }),
+    
+    log_message(
+        debug, {"Message published to event bus", []}, UpdatedContext2
+    ).
 
 %%%===================================================================
 %%% UI Operations
@@ -205,21 +191,21 @@ send_message_to_server(FromUsername, Message, Context) when
 deliver_message(FromUsername, Message, Timestamp, Context)
   when is_list(FromUsername) andalso is_binary(Message) andalso
        is_map(Context) ->
-    ConsolePid = maps:get(console_pid, Context),
-    ConsolePid ! {deliver_message, FromUsername, Message, Timestamp},
+    %% Publish to event bus instead of sending direct message
+    cryptic_event_bus:publish(#{
+        type => deliver_message,
+        from => list_to_binary(FromUsername),
+        message => Message,
+        timestamp => Timestamp
+    }),
     {ok, Context}.
 
 system_message(Message, Context) when is_binary(Message), is_map(Context) ->
-    % Send message to console process for proper handling
-    case maps:get(console_pid, Context, undefined) of
-        undefined ->
-            % Fallback: print directly if no console PID
-            io:format("\r\n"),
-            cryptic_shell:print_info(binary_to_list(Message));
-        ConsolePid when is_pid(ConsolePid) ->
-            % Send to console process for async handling
-            ConsolePid ! {system_message, Message}
-    end,
+    %% Publish to event bus instead of sending direct message
+    cryptic_event_bus:publish(#{
+        type => system_message,
+        message => Message
+    }),
     {ok, Context}.
 
 %% @doc Handle undeliverable messages
@@ -234,7 +220,7 @@ message_undeliverable(ToUsername, MessageId, MessageText, Reason, Context) when
         Context
     ),
     
-    % Optionally notify user via system message
+    % Publish system message to event bus
     SystemMsg = iolist_to_binary([
         <<"Message to ">>, ToUsername,
         <<" could not be delivered: ">>,
@@ -242,12 +228,10 @@ message_undeliverable(ToUsername, MessageId, MessageText, Reason, Context) when
         <<" (\"">>, MessageText, <<"\")">>
     ]),
     
-    case maps:get(console_pid, UpdatedContext1, undefined) of
-        undefined ->
-            io:format("\r\n[UNDELIVERABLE] ~s~n", [SystemMsg]);
-        ConsolePid when is_pid(ConsolePid) ->
-            ConsolePid ! {system_message, SystemMsg}
-    end,
+    cryptic_event_bus:publish(#{
+        type => system_message,
+        message => SystemMsg
+    }),
     
     {ok, UpdatedContext1}.
 

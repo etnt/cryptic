@@ -123,6 +123,8 @@ main(InitCfg) ->
     cryptic_shell:print_info("Cryptic Console starting..."),
     ok = application:load(cryptic),
 
+    cryptic_event_bus:start_link(),
+
     Username = maps:get(username, InitCfg),
 
     %% Initialize the enhanced shell first
@@ -205,6 +207,19 @@ main(InitCfg) ->
 
     %% Get console PID to pass to callbacks
     ConsolePid = self(),
+
+    %% Subscribe to event bus for console-relevant messages
+    %% Filter for: deliver_message, system_message, ca_response events
+    ConsoleFilter = fun(Event) ->
+        case Event of
+            #{type := deliver_message} -> true;
+            #{type := system_message} -> true;
+            #{type := ca_response} -> true;
+            #{type := websocket_message} -> true;
+            _ -> false
+        end
+    end,
+    ok = cryptic_event_bus:subscribe(ConsolePid, ConsoleFilter),
 
     %% Start cryptic engine with passphrase and WebSocket client PID
     EngineCfg = CertCfg#{
@@ -409,7 +424,14 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
         {'DOWN', MonitorRef, process, InputPid, _Reason} ->
             %% Input process died (we killed it), restart command loop
             command_loop(State);
-        {system_message, Message} ->
+        {event, #{type := ca_response, response := Response}} ->
+            %% CA operation response arrived while waiting for input
+            exit(InputPid, kill),
+            %% Display the CA response
+            display_ca_response(Response),
+            %% Continue waiting - the DOWN message will trigger restart
+            wait_for_input_or_messages(InputPid, MonitorRef, State);
+        {event, #{type := system_message, message := Message}} ->
             %% A message arrived while waiting for input
             %% Note: We can't retrieve the actual input buffer from the blocked process
             %% A future enhancement would be to modify cryptic_shell to support this
@@ -419,7 +441,7 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             display_system_message(Message),
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State);
-        {deliver_message, FromUsername, Message, Timestamp} ->
+        {event, #{type := deliver_message, from := FromUsername, message := Message, timestamp := Timestamp}} ->
             %% A chat message arrived while waiting for input
             %% Note: We can't retrieve the actual input buffer from the blocked process
             %% A future enhancement would be to modify cryptic_shell to support this
@@ -472,6 +494,13 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             end,
 
             %% Continue waiting - the DOWN message will trigger restart
+            wait_for_input_or_messages(InputPid, MonitorRef, State);
+        {event, #{type := websocket_message, message := Message}} ->
+            %% WebSocket message arrived while waiting for input
+            exit(InputPid, kill),
+            %% Display the websocket message response
+            display_websocket_message(Message),
+            %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
 
@@ -500,6 +529,16 @@ parse_command(":hi") ->
     {history_cmd, {last_n, 10}};
 parse_command(":hi " ++ Args) ->
     parse_history_command(Args);
+%% Admin shortcut commands
+parse_command(":ar " ++ Args) ->
+    parse_admin_register(Args);
+parse_command(":au") ->
+    {admin_cmd, list};
+%% Cert shortcut commands
+parse_command(":cs") ->
+    {cert_cmd, status};
+parse_command(":cr") ->
+    {cert_cmd, renew, #{}};
 %% Full commands
 parse_command("help") ->
     {help};
@@ -527,6 +566,34 @@ parse_command("history") ->
     {history_cmd, {last_n, 10}};
 parse_command("history " ++ Args) ->
     parse_history_command(Args);
+%% Admin commands
+parse_command("admin") ->
+    {admin_cmd, list};
+parse_command("admin register " ++ Args) ->
+    parse_admin_register(Args);
+parse_command("admin list") ->
+    {admin_cmd, list};
+parse_command("admin status " ++ GpgFp) ->
+    {admin_cmd, status, string:trim(GpgFp)};
+parse_command("admin suspend " ++ GpgFp) ->
+    {admin_cmd, suspend, string:trim(GpgFp)};
+parse_command("admin revoke " ++ GpgFp) ->
+    {admin_cmd, revoke, string:trim(GpgFp)};
+parse_command("admin reactivate " ++ GpgFp) ->
+    {admin_cmd, reactivate, string:trim(GpgFp)};
+parse_command("admin certs " ++ GpgFp) ->
+    {admin_cmd, list_certs, string:trim(GpgFp)};
+parse_command("admin revoke-cert " ++ Serial) ->
+    {admin_cmd, revoke_cert, string:trim(Serial)};
+%% Cert commands
+parse_command("cert") ->
+    {cert_cmd, status};
+parse_command("cert status") ->
+    {cert_cmd, status};
+parse_command("cert renew") ->
+    {cert_cmd, renew, #{}};
+parse_command("cert renew " ++ Options) ->
+    parse_cert_renew_options(Options);
 %% Check for shortcut send command ":s <username> <message>"
 %% Check for shortcut alias commands ":an/:ad/:aa/:ar <...>"
 parse_command(Line) ->
@@ -610,7 +677,7 @@ check_alias_shortcuts(Line) ->
             parse_alias_new_shortcut(Rest)
     end.
 
-%% @doc Parse alias new shortcut: ":an &lt;name&gt; &lt;member1&gt; &lt;member2&gt; ..."
+%% Parse alias new shortcut: ":an <name> <member1> <member2> ..."
 parse_alias_new_shortcut(Rest) ->
     case string:tokens(Rest, " ") of
         [AliasName | Members] when length(Members) > 0 ->
@@ -619,7 +686,7 @@ parse_alias_new_shortcut(Rest) ->
             {error, "Usage: :an <alias_name> <member1> [member2 ...]"}
     end.
 
-%% @doc Parse alias add shortcut: ":aa &lt;name&gt; &lt;member1&gt; &lt;member2&gt; ..."
+%% Parse alias add shortcut: ":aa <name> <member1> <member2> ..."
 parse_alias_add_shortcut(Rest) ->
     case string:tokens(Rest, " ") of
         [AliasName | Members] when length(Members) > 0 ->
@@ -628,7 +695,7 @@ parse_alias_add_shortcut(Rest) ->
             {error, "Usage: :aa <alias_name> <member1> [member2 ...]"}
     end.
 
-%% @doc Parse alias rm shortcut: ":ar &lt;name&gt; &lt;member1&gt; &lt;member2&gt; ..."
+%% Parse alias rm shortcut: ":ar <name> <member1> <member2> ..."
 parse_alias_rm_shortcut(Rest) ->
     case string:tokens(Rest, " ") of
         [AliasName | Members] when length(Members) > 0 ->
@@ -666,6 +733,62 @@ parse_history_command(Args) ->
                     "Usage: history [from <user> yesterday|last N] | [last N] | [with <user> [last N]]"}
         end,
     {history_cmd, Result}.
+
+%% @doc Parse admin register command
+%% Format: admin register &lt;gpg_fp> &lt;key_file> [--note "description"]
+parse_admin_register(ArgsStr) ->
+    Parts = string:tokens(ArgsStr, " "),
+    case Parts of
+        [GpgFp, KeyFile | Rest] ->
+            Opts = parse_admin_register_opts(Rest, #{}),
+            {admin_cmd, register, string:trim(GpgFp), string:trim(KeyFile), Opts};
+        _ ->
+            {error, "Usage: admin register <gpg_fp> <key_file> [--note \"description\"]"}
+    end.
+
+parse_admin_register_opts([], Acc) ->
+    Acc;
+parse_admin_register_opts(["--note" | Rest], Acc) ->
+    %% Note takes all remaining words as value
+    Note = string:join(Rest, " "),
+    Acc#{note => Note};
+parse_admin_register_opts([_Unknown | Rest], Acc) ->
+    %% Skip unknown options
+    parse_admin_register_opts(Rest, Acc).
+
+%% @doc Parse cert renew options
+%% Examples:
+%%   "--force"
+%%   "--new-key"
+%%   "--force --new-key"
+parse_cert_renew_options(OptionsStr) ->
+    Opts = parse_options(OptionsStr, #{
+        force => false,
+        new_key => false
+    }),
+    {cert_cmd, renew, Opts}.
+
+%% @doc Parse command-line options
+%% Simple parser that handles --key value and --flag formats
+parse_options(Str, Defaults) ->
+    Tokens = string:tokens(Str, " "),
+    parse_options_loop(Tokens, Defaults).
+
+parse_options_loop([], Acc) ->
+    Acc;
+parse_options_loop(["--expires", Value | Rest], Acc) ->
+    parse_options_loop(Rest, Acc#{expires => Value});
+parse_options_loop(["--note" | Rest], Acc) ->
+    %% Note takes all remaining words as value
+    Note = string:join(Rest, " "),
+    Acc#{note => Note};
+parse_options_loop(["--force" | Rest], Acc) ->
+    parse_options_loop(Rest, Acc#{force => true});
+parse_options_loop(["--new-key" | Rest], Acc) ->
+    parse_options_loop(Rest, Acc#{new_key => true});
+parse_options_loop([_Unknown | Rest], Acc) ->
+    %% Skip unknown options
+    parse_options_loop(Rest, Acc).
 
 %% Helper to try parsing a number string
 try_parse_last_n(NStr, SuccessFun) ->
@@ -844,6 +967,36 @@ execute_command({history_cmd, {error, Msg}}, State) ->
     State;
 execute_command({history_cmd, Query}, State) ->
     execute_history_query(Query, State),
+    State;
+execute_command({admin_cmd, register, GpgFp, KeyFile, Opts}, State) ->
+    execute_admin_register(GpgFp, KeyFile, Opts, State),
+    State;
+execute_command({admin_cmd, list}, State) ->
+    execute_admin_list(State),
+    State;
+execute_command({admin_cmd, status, GpgFp}, State) ->
+    execute_admin_status(GpgFp, State),
+    State;
+execute_command({admin_cmd, suspend, GpgFp}, State) ->
+    execute_admin_suspend(GpgFp, State),
+    State;
+execute_command({admin_cmd, revoke, GpgFp}, State) ->
+    execute_admin_revoke(GpgFp, State),
+    State;
+execute_command({admin_cmd, reactivate, GpgFp}, State) ->
+    execute_admin_reactivate(GpgFp, State),
+    State;
+execute_command({admin_cmd, list_certs, GpgFp}, State) ->
+    execute_admin_list_certs(GpgFp, State),
+    State;
+execute_command({admin_cmd, revoke_cert, Serial}, State) ->
+    execute_admin_revoke_cert(Serial, State),
+    State;
+execute_command({cert_cmd, status}, State) ->
+    execute_cert_status(State),
+    State;
+execute_command({cert_cmd, renew, Opts}, State) ->
+    execute_cert_renew(Opts, State),
     State;
 execute_command({send_message, ToUsername, Message}, State) ->
     send_message_to_user(ToUsername, Message, State),
@@ -1065,12 +1218,12 @@ clear_command_line(Message) ->
 %% @doc Check for and handle any pending messages
 check_messages_with_state(State) ->
     receive
-        {system_message, Message} ->
+        {event, #{type := system_message, message := Message}} ->
             %% Clear line and print system message
             display_system_message(Message),
             %% Recursively check for more messages
             check_messages_with_state(State);
-        {deliver_message, FromUsername, Message, Timestamp} ->
+        {event, #{type := deliver_message, from := FromUsername, message := Message, timestamp := Timestamp}} ->
             %% Clear line and print delivered message
             display_user_message(FromUsername, Message, Timestamp),
 
@@ -1120,7 +1273,12 @@ check_messages_with_state(State) ->
 
 display_user_message(FromUsername, Message, Timestamp) ->
     %% Print the user message (cryptic_shell handles line clearing)
-    cryptic_shell:print_user_message(FromUsername, Message, Timestamp),
+    %% Convert binary username to list for cryptic_shell:print_user_message/3
+    FromUser = case FromUsername of
+        Bin when is_binary(Bin) -> binary_to_list(Bin);
+        List when is_list(List) -> List
+    end,
+    cryptic_shell:print_user_message(FromUser, Message, Timestamp),
     %% Force flush output streams
     io:format("~s", [""]),
     %% Longer delay to ensure terminal has processed all ANSI sequences
@@ -1134,6 +1292,75 @@ display_system_message(Message) ->
     %% Force flush output streams
     io:format("~s", [""]),
     %% Longer delay to ensure terminal has processed all ANSI sequences
+    timer:sleep(100).
+
+display_ca_response(Response) ->
+    %% Delegate to cryptic_shell for proper formatting
+    cryptic_shell:print_ca_response(Response).
+
+%% @doc Display websocket message responses
+display_websocket_message(#{<<"type">> := <<"users">>, <<"users">> := Users}) ->
+    %% Handle user list response from admin list command
+    io:format("\r\n"),
+    cryptic_shell:print_info("Registered users:"),
+    lists:foreach(
+        fun(Username) ->
+            io:format("  " ++ ?FG_CYAN(binary_to_list(Username)) ++ "\r\n")
+        end,
+        Users
+    ),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"pending_messages_delivered">>, <<"count">> := Count}) ->
+    %% Handle pending messages notification
+    case Count of
+        0 ->
+            io:format("\r\n"),
+            cryptic_shell:print_info("No pending messages found at the server."),
+            io:format("~s", [""]),
+            timer:sleep(100);
+        1 ->
+            io:format("\r\n"),
+            cryptic_shell:print_success("1 pending message delivered from server."),
+            io:format("~s", [""]),
+            timer:sleep(100);
+        N ->
+            io:format("\r\n"),
+            cryptic_shell:print_success(
+                integer_to_list(N) ++ " pending messages delivered from server."
+            ),
+            io:format("~s", [""]),
+            timer:sleep(100)
+    end;
+display_websocket_message(#{<<"type">> := <<"success">>}) ->
+    %% Suppress generic success messages - they're not interesting for the user
+    ok;
+display_websocket_message(#{<<"type">> := <<"message">>}) ->
+    %% Suppress encrypted message details - the decrypted message is displayed via deliver_message event
+    ok;
+display_websocket_message(#{<<"type">> := <<"key_bundle">>}) ->
+    %% Suppress key bundle messages - internal protocol data for key exchange
+    ok;
+display_websocket_message(#{<<"type">> := <<"error">>, <<"message">> := ErrorMsg, <<"success">> := false}) ->
+    %% Handle error messages from server
+    io:format("\r\n"),
+    cryptic_shell:print_error("Server error: " ++ binary_to_list(ErrorMsg)),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"user_registered">>, <<"gpg_fp">> := GpgFp, <<"registered_by">> := RegisteredBy}) ->
+    %% Handle user registration confirmation
+    io:format("\r\n"),
+    cryptic_shell:print_success("User registered successfully!"),
+    io:format("  GPG Fingerprint: " ++ ?FG_CYAN(binary_to_list(GpgFp)) ++ "\r\n"),
+    io:format("  Registered by:   " ++ ?FG_YELLOW(binary_to_list(RegisteredBy)) ++ "\r\n"),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(Message) ->
+    %% Generic handler for other websocket messages
+    io:format("\r\n"),
+    cryptic_shell:print_info("WebSocket message: " ++ 
+        lists:flatten(io_lib:format("~p", [Message]))),
+    io:format("~s", [""]),
     timer:sleep(100).
 
 notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
@@ -1158,6 +1385,350 @@ notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
     end,
     %% Run notifier in a separate process to avoid blocking
     spawn(F).
+
+
+%%====================================================================
+%% Admin Command Execution
+%%====================================================================
+
+%% @doc Execute admin register command
+execute_admin_register(GpgFp, KeyFile, _Opts, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            %% Read the GPG public key file
+            case file:read_file(KeyFile) of
+                {ok, GpgPubKey} ->
+                    %% Send register_user command via WebSocket
+                    Msg = #{
+                        <<"type">> => <<"register_user">>,
+                        <<"gpg_fp">> => list_to_binary(GpgFp),
+                        <<"gpg_pub">> => GpgPubKey
+                    },
+                    case cryptic_ws_client:send_message(WsPid, Msg) of
+                        ok ->
+                            cryptic_shell:print_info("User registration request sent...");
+                        {error, Reason} ->
+                            cryptic_shell:print_error(
+                                "Failed to register user: " ++
+                                lists:flatten(io_lib:format("~p", [Reason]))
+                            )
+                    end;
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to read key file: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin list command
+execute_admin_list(State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{<<"type">> => <<"list_users">>},
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_info("Fetching user list...");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to list users: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin status command
+execute_admin_status(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"get_user_info">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_info("Fetching user status...");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to get user status: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin suspend command
+execute_admin_suspend(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"suspend_user">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("User suspend request sent");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to suspend user: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin revoke command  
+execute_admin_revoke(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"revoke_user">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("User revoke request sent");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to revoke user: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin reactivate command
+execute_admin_reactivate(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"reactivate_user">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("User reactivate request sent");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to reactivate user: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin list certificates command
+execute_admin_list_certs(GpgFp, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            Msg = #{
+                <<"type">> => <<"list_certificates">>,
+                <<"gpg_fp">> => list_to_binary(GpgFp)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_info("Fetching certificates...");
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Failed to list certificates: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end.
+
+%% @doc Execute admin revoke certificate command
+execute_admin_revoke_cert(Serial, State) ->
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            %% Prompt for reason
+            Reason = cryptic_shell:get_line("Revocation reason: "),
+            Msg = #{
+                <<"type">> => <<"revoke_certificate">>,
+                <<"serial">> => list_to_binary(Serial),
+                <<"reason">> => list_to_binary(Reason)
+            },
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    cryptic_shell:print_success("Certificate revoke request sent");
+                {error, Error} ->
+                    cryptic_shell:print_error(
+                        "Failed to revoke certificate: " ++
+                        lists:flatten(io_lib:format("~p", [Error]))
+                    )
+            end
+    end.
+
+%%====================================================================
+%% Invite Command Execution (Legacy - Deprecated - Removed)
+%%====================================================================
+
+%%%===================================================================
+%%% Certificate Command Implementations
+%%%===================================================================
+
+%% @doc Execute cert status command
+execute_cert_status(State) ->
+    %% Get certificate file path from config
+    Username = binary_to_list(State#console_state.username),
+    ServerHost = State#console_state.server_host,
+    ServerPort = State#console_state.server_port,
+    CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
+    
+    CertFile = CrypticDir ++ "/certificates/" ++ Username ++ ".crt",
+    KeyFile = CrypticDir ++ "/certificates/" ++ Username ++ ".key",
+    
+    %% Check if files exist
+    case {filelib:is_file(CertFile), filelib:is_file(KeyFile)} of
+        {true, true} ->
+            display_certificate_status(CertFile, KeyFile, State);
+        {false, _} ->
+            cryptic_shell:print_error("Certificate file not found: " ++ CertFile);
+        {_, false} ->
+            cryptic_shell:print_error("Private key file not found: " ++ KeyFile)
+    end.
+
+%% @doc Display certificate status information
+display_certificate_status(CertFile, KeyFile, State) ->
+    %% Read certificate using OpenSSL command
+    SerialCmd = "openssl x509 -in " ++ CertFile ++ " -noout -serial 2>/dev/null",
+    ExpiryCmd = "openssl x509 -in " ++ CertFile ++ " -noout -enddate 2>/dev/null",
+    SubjectCmd = "openssl x509 -in " ++ CertFile ++ " -noout -subject 2>/dev/null",
+    SANCmd = "openssl x509 -in " ++ CertFile ++ " -noout -ext subjectAltName 2>/dev/null",
+
+    Serial = string:trim(os:cmd(SerialCmd)),
+    Expiry = string:trim(os:cmd(ExpiryCmd)),
+    Subject = string:trim(os:cmd(SubjectCmd)),
+    SANRaw = string:trim(os:cmd(SANCmd)),
+    
+    %% Parse SAN output to extract DNS names
+    SAN = case SANRaw of
+        "" -> undefined;
+        _ ->
+            %% SAN format: "X509v3 Subject Alternative Name: \n    DNS:example.com, DNS:www.example.com"
+            Lines = string:split(SANRaw, "\n", all),
+            case Lines of
+                [_Header | [DNSLine | _]] ->
+                    string:trim(DNSLine);
+                _ -> undefined
+            end
+    end,
+    
+    %% Use the new formatted print function
+    cryptic_shell:print_cert_status(Serial, Expiry, Subject, SAN, {CertFile, KeyFile}),
+    
+    %% Also query server for GPG status if connected
+    case State#console_state.ws_client_pid of
+        undefined ->
+            ok;
+        WsPid ->
+            {ok, Msg} = cryptic_messages:cert_status_query(),
+            case cryptic_ws_client:send_message(WsPid, Msg) of
+                ok ->
+                    ok;
+                {error, _Reason} ->
+                    ok
+            end
+    end.
+
+%% @doc Execute cert renew command
+execute_cert_renew(Opts, State) ->
+    Force = maps:get(force, Opts, false),
+    NewKey = maps:get(new_key, Opts, false),
+    
+    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+    cryptic_shell:print_info("Certificate Renewal"),
+    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+    
+    %% Get paths
+    Username = binary_to_list(State#console_state.username),
+    ServerHost = State#console_state.server_host,
+    ServerPort = State#console_state.server_port,
+    CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
+    
+    KeyFile = CrypticDir ++ "/certificates/" ++ Username ++ ".key",
+    CSRFile = CrypticDir ++ "/certificates/" ++ Username ++ ".csr",
+    
+    %% Step 1: Generate new key if requested
+    case NewKey of
+        true ->
+            cryptic_shell:print_info("[1/4] Generating new TLS key pair..."),
+            GenKeyCmd = "openssl ecparam -genkey -name secp384r1 -out " ++ KeyFile ++ " 2>/dev/null",
+            os:cmd(GenKeyCmd),
+            os:cmd("chmod 600 " ++ KeyFile),
+            cryptic_shell:print_success("New TLS key generated");
+        false ->
+            cryptic_shell:print_info("[1/4] Reusing existing TLS key..."),
+            case filelib:is_file(KeyFile) of
+                true -> 
+                    cryptic_shell:print_success("Using existing key");
+                false ->
+                    cryptic_shell:print_error("Key file not found: " ++ KeyFile),
+                    throw({error, key_not_found})
+            end
+    end,
+    
+    %% Step 2: Create CSR
+    cryptic_shell:print_info("[2/4] Creating Certificate Signing Request..."),
+    
+    %% Get GPG fingerprint from config (would need to be stored)
+    GPG_FP = "PLACEHOLDER_FP",  %% TODO: Store this during registration
+    SubjectStr = "/CN=" ++ GPG_FP ++ "@" ++ ServerHost,
+    
+    GenCSRCmd = "openssl req -new -key " ++ KeyFile ++ 
+                " -subj \"" ++ SubjectStr ++ "\" -out " ++ CSRFile ++ " 2>/dev/null",
+    os:cmd(GenCSRCmd),
+    cryptic_shell:print_success("CSR created"),
+    
+    %% Step 3: Sign CSR with GPG
+    cryptic_shell:print_info("[3/4] Signing CSR with GPG key..."),
+    cryptic_shell:print_warning("GPG signing not yet implemented"),
+    %% TODO: Sign CSR with GPG key
+    
+    %% Step 4: Send renewal request
+    cryptic_shell:print_info("[4/4] Requesting certificate renewal..."),
+    
+    case State#console_state.ws_client_pid of
+        undefined ->
+            cryptic_shell:print_error("Not connected to server");
+        WsPid ->
+            MsgData = #{
+                force => Force,
+                new_key => NewKey,
+                csr => <<"PLACEHOLDER_CSR">>,  %% TODO: Read actual CSR
+                gpg_sig => <<"PLACEHOLDER_SIG">>  %% TODO: Actual GPG signature
+            },
+            case cryptic_messages:cert_renew(MsgData) of
+                {ok, Msg} ->
+                    case cryptic_ws_client:send_message(WsPid, Msg) of
+                        ok ->
+                            cryptic_shell:print_success("Renewal request sent");
+                        {error, Reason} ->
+                            cryptic_shell:print_error(
+                                "Failed to renew certificate: " ++
+                                lists:flatten(io_lib:format("~p", [Reason]))
+                            )
+                    end;
+                {error, Reason} ->
+                    cryptic_shell:print_error(
+                        "Invalid cert renew parameters: " ++
+                        lists:flatten(io_lib:format("~p", [Reason]))
+                    )
+            end
+    end,
+    
+    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").
 
 %% @doc Cleanup resources
 cleanup(State) ->

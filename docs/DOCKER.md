@@ -31,8 +31,7 @@ foreground mode and requires external mTLS certificates mounted as volumes.
 
 1. **Generate certificates** (if you haven't already):
    ```bash
-   cd CA
-   make all
+   ./scripts/generate-mtls-certs.sh
    ```
 
 2. **Build the Docker image**:
@@ -55,6 +54,25 @@ foreground mode and requires external mTLS certificates mounted as volumes.
    ```bash
    cryptic_console ...
    ```
+
+6. **Study the server.log**:
+   ```bash
+   # Tail the log in real-time 
+   docker exec cryptic-server tail -f /opt/cryptic/logs/server.log
+
+   # Copy the log to your host 
+   docker cp cryptic-server:/opt/cryptic/logs/server.log ./server.log
+
+   # Interactive shell 
+   docker exec -it cryptic-server /bin/sh
+   # Then you can use: cd /opt/cryptic/logs && ls -la
+   # And: cat server.log, tail -f server.log, etc.
+   ```
+
+7. **Get a remote Erlang shell**:
+```bash
+   docker exec -it cryptic-server bin/cryptic remote_console
+```
 
 ## Docker Image Details
 
@@ -83,15 +101,18 @@ including the full Erlang/OTP development environment.
 
 ### Environment Variables
 
-Configure the server using these environment variables:
+Configure the server using these environment variables (names reflect the Erlang server code in `cryptic_server.erl` and `cryptic_ca_app.erl`):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CRYPTIC_SERVER_HOST` | `0.0.0.0` | Server bind address (use 0.0.0.0 for Docker) |
-| `CRYPTIC_SERVER_PORT` | `8443` | WebSocket server port |
-| `CRYPTIC_CERT_FILE` | `/opt/cryptic/certs/server.crt` | Server certificate path |
-| `CRYPTIC_KEY_FILE` | `/opt/cryptic/certs/server.key` | Server private key path |
-| `CRYPTIC_CA_CERT_FILE` | `/opt/cryptic/certs/ca.crt` | CA certificate path |
+| Variable                | Default                                   | Description |
+|-------------------------|-------------------------------------------|-------------|
+| `CRYPTIC_SERVER_HOST`   | `0.0.0.0`                                 | Server bind address (use 0.0.0.0 for Docker) |
+| `CRYPTIC_SERVER_PORT`   | `8443`                                    | WebSocket server port |
+| `CRYPTIC_SERVER_CERT`   | `/opt/cryptic/certs/server.crt`           | Server certificate path (mTLS) |
+| `CRYPTIC_SERVER_KEY`    | `/opt/cryptic/certs/server.key`           | Server private key path |
+| `CRYPTIC_CA_CERT`       | `/opt/cryptic/certs/ca.crt`               | CA certificate used to verify client certs |
+| `CRYPTIC_CA_DB_FILE`    | `/opt/cryptic/data/ca/cryptic_ca.db`      | CA database (stores user registrations, fingerprints, issuance metadata) |
+| `CRYPTIC_EVENT_HANDLERS`| `cryptic_file_logger`                     | Comma-separated event handlers (logging) |
+| `CRYPTIC_DEBUG`         | (unset)                                   | Set to `"true"` to enable verbose debug logging in event handlers |
 
 You can override these in `docker-compose.yml`:
 
@@ -101,6 +122,7 @@ services:
     environment:
       - CRYPTIC_SERVER_PORT=9443
       - CRYPTIC_SERVER_HOST=0.0.0.0
+      - CRYPTIC_DEBUG=true
 ```
 
 ### Volume Mounts
@@ -110,9 +132,9 @@ The docker-compose.yml defines several volumes:
 1. **Certificate volumes** (read-only):
    ```yaml
    volumes:
-     - ./CA/certs/server.crt:/opt/cryptic/certs/server.crt:ro
-     - ./CA/private/server.key:/opt/cryptic/certs/server.key:ro
-     - ./CA/certs/ca.crt:/opt/cryptic/certs/ca.crt:ro
+     - ./priv/ssl/server.crt:/opt/cryptic/certs/server.crt:ro
+     - ./priv/ssl/server.key:/opt/cryptic/certs/server.key:ro
+     - ./priv/ssl/ca.crt:/opt/cryptic/certs/ca.crt:ro
    ```
 
 2. **Data volumes** (persistent):
@@ -120,6 +142,26 @@ The docker-compose.yml defines several volumes:
    volumes:
      - cryptic-logs:/opt/cryptic/logs
      - cryptic-data:/opt/cryptic/data
+   ```
+
+3. **Optional CA bootstrap (GPG fingerprints)**:
+   If you want to preload verified user fingerprints, place `.gpg` files in `priv/ca/bootstrap/` **before building the image**, or mount a host directory into the release `priv` path after deployment.
+   During build, the release copies your `priv/` tree, so any files under `priv/ca/bootstrap` become available at runtime.
+
+   Example (build-time approach):
+   ```bash
+   # Add files like priv/ca/bootstrap/alice.gpg, bob.gpg
+   docker build -t cryptic-server .
+   ```
+
+   Example (runtime mount — adjust version number after inspecting container):
+   ```bash
+   # Discover priv dir inside container
+   docker compose exec cryptic-server bin/cryptic eval 'io:format("~s\n", [code:priv_dir(cryptic)]).'
+   # Suppose output is /opt/cryptic/lib/cryptic-1.2.3/priv
+   # Then add to docker-compose.yml:
+   volumes:
+     - ./bootstrap:/opt/cryptic/lib/cryptic-1.2.3/priv/ca/bootstrap:ro
    ```
 
 ### Port Mapping
@@ -138,13 +180,24 @@ ports:
   - "9443:8443"
 ```
 
-## Certificate Generation
+## Certificate & CA Database Generation
 
-If you need to generate certificates for testing or development
-read [here](docs/CERTIFICATE_HANDLING.md).
+Generate the CA and Server certificates using the
+`scripts/generate-mtls-certs.sh` script.
 
 **Production Note**: For production deployments, use certificates from a
-trusted Certificate Authority.
+trusted Certificate Authority. The CA database (`CRYPTIC_CA_DB_FILE`) is persisted on a volume; back it up regularly.
+
+### CA Database Persistence
+
+The CA subsystem stores state (user registrations, issued cert metadata) in the SQLite file referenced by `CRYPTIC_CA_DB_FILE`. Mount the parent directory (`/opt/cryptic/data/ca`) as a named volume or host bind to retain state across container restarts:
+
+```yaml
+volumes:
+  - cryptic-ca-data:/opt/cryptic/data/ca
+```
+
+The server does **not** store end-to-end encrypted chat messages; those are only persisted client-side in each user's `messages.db`. This keeps the server largely stateless apart from CA data and logs.
 
 ## Common Operations
 
@@ -293,16 +346,16 @@ docker compose exec cryptic-server env | grep CRYPTIC_SERVER_HOST
 **Verify certificates**:
 ```bash
 # Check server certificate
-openssl x509 -in CA/certs/server.crt -text -noout
+openssl x509 -in priv/ssl/server.crt -text -noout
 
 # Verify certificate chain
-openssl verify -CAfile CA/certs/ca.crt CA/certs/server.crt
+openssl verify -CAfile priv/ssl/ca.crt priv/ssl/server.crt
 ```
 
 **Check client certificate**:
 ```bash
 # Ensure client has valid certificate signed by same CA
-openssl verify -CAfile CA/certs/ca.crt CA/client_keys/alice.crt
+openssl verify -CAfile priv/ssl/ca.crt ~/.cryptic/<username>/<server>_<port>/certificates/<username>.crt
 ```
 
 ### Performance Issues
@@ -349,14 +402,12 @@ services:
    
    secrets:
      server_key:
-       file: ./CA/private/server.key
+       file: ./priv/ssl/server.key
      server_cert:
-       file: ./CA/certs/server.crt
+       file: ./priv/ssl/server.crt
      ca_cert:
-       file: ./CA/certs/ca.crt
-   ```
-
-2. **Enable logging** to external system (e.g., Loki, ELK):
+       file: ./priv/ssl/ca.crt
+```2. **Enable logging** to external system (e.g., Loki, ELK):
    ```yaml
    services:
      cryptic-server:
@@ -423,13 +474,15 @@ Run the container directly:
 docker run -d \
   --name cryptic-server \
   -p 8443:8443 \
-  -v $(pwd)/CA/certs/server.crt:/opt/cryptic/certs/server.crt:ro \
-  -v $(pwd)/CA/private/server.key:/opt/cryptic/certs/server.key:ro \
-  -v $(pwd)/CA/certs/ca.crt:/opt/cryptic/certs/ca.crt:ro \
+  -v $(pwd)/priv/ssl/server.crt:/opt/cryptic/certs/server.crt:ro \
+  -v $(pwd)/priv/ssl/server.key:/opt/cryptic/certs/server.key:ro \
+  -v $(pwd)/priv/ssl/ca.crt:/opt/cryptic/certs/ca.crt:ro \
   -v cryptic-logs:/opt/cryptic/logs \
   -v cryptic-data:/opt/cryptic/data \
   -e CRYPTIC_SERVER_HOST=0.0.0.0 \
   -e CRYPTIC_SERVER_PORT=8443 \
+  -e CRYPTIC_CA_DB_FILE=/opt/cryptic/data/ca/cryptic_ca.db \
+  -e CRYPTIC_DEBUG=true \
   --restart unless-stopped \
   cryptic-server
 ```

@@ -34,7 +34,43 @@ init([]) ->
                      start => {gen_event, start_link, [{local, cryptic_event_manager}]},
                      modules => dynamic},
 
-    %% Start the HTTP server as a child process
+    %% CA database initializer (must start after event manager)
+    CaInit =
+        #{id => cryptic_ca_init,
+          start => {cryptic_ca_init, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_ca_init]},
+
+    %% CA serial number manager
+    CaSerialManager =
+        #{id => cryptic_ca_serial,
+          start => {cryptic_ca_serial, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_ca_serial]},
+
+    %% CA rate limiter
+    CaRateLimiter =
+        #{id => cryptic_ca_rate_limiter,
+          start => {cryptic_ca_rate_limiter, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_ca_rate_limiter]},
+
+    %% Certificate expiration monitor
+    CertMonitor =
+        #{id => cryptic_cert_monitor,
+          start => {cryptic_cert_monitor, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_cert_monitor]},
+
+    %% Start the HTTP server as a child process (must start after CA init)
     CrypticServer =
         #{id => cryptic_server,
           start => {cryptic_server, start_link, []},
@@ -43,7 +79,8 @@ init([]) ->
           type => worker,
           modules => [cryptic_server]},
 
-    ChildSpecs = [EventManager, CrypticServer],
+    ChildSpecs = [EventManager, CaInit, CaSerialManager,
+                  CaRateLimiter, CertMonitor, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

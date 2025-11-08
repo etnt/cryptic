@@ -243,6 +243,16 @@
     get_messages/0,
     request_pending_messages/0,
 
+    % Client to Server - Invite Management
+    invite_create/1,
+    invite_list/0,
+    invite_show/1,
+    invite_revoke/1,
+
+    % Client to Server - Certificate Management
+    cert_status_query/0,
+    cert_renew/1,
+
     % Server to Client - Responses
     welcome/1,
     success/1,
@@ -273,6 +283,12 @@
     | list_users
     | get_messages
     | request_pending_messages
+    | invite_create
+    | invite_list
+    | invite_show
+    | invite_revoke
+    | cert_status_query
+    | cert_renew
     | welcome
     | success
     | error
@@ -481,6 +497,130 @@ get_messages() ->
 -spec request_pending_messages() -> validation_result().
 request_pending_messages() ->
     {ok, #{<<"type">> => <<"request_pending_messages">>}}.
+
+%%% ============================================================================
+%%% Client to Server Messages - Invite Management
+%%% ============================================================================
+
+%% @doc Construct the `invite_create' message
+%%
+%% Creates a new GPG-signed invite token for onboarding new users.
+%%
+%% @param MsgMap Map containing:
+%%   - `expiry_hours' (integer): Hours until invite expires (default 24)
+%%   - `meta' (map, optional): Metadata like #{note => &lt;&lt;"text">>}
+%% @returns `{ok, Message}' or `{error, Reason}'
+-spec invite_create(map()) -> validation_result().
+invite_create(MsgMap) ->
+    case mk_payload(invite_create, MsgMap) of
+        {ok, Payload} ->
+            BaseMsg = #{
+                <<"type">> => <<"invite_create">>,
+                <<"expiry_hours">> => maps:get(expiry_hours, Payload, 24)
+            },
+            Message =
+                case maps:get(meta, Payload, undefined) of
+                    undefined -> BaseMsg;
+                    Meta -> BaseMsg#{<<"meta">> => Meta}
+                end,
+            {ok, Message};
+        Error ->
+            Error
+    end.
+
+%% @doc Construct the `invite_list' message
+%%
+%% Requests all invites created by the authenticated user.
+%%
+%% @returns `{ok, Message}'
+-spec invite_list() -> validation_result().
+invite_list() ->
+    {ok, #{<<"type">> => <<"invite_list">>}}.
+
+%% @doc Construct the `invite_show' message
+%%
+%% Retrieves details for a specific invite.
+%%
+%% @param MsgMap Map containing:
+%%   - `invite_id' (binary): Invite identifier
+%% @returns `{ok, Message}' or `{error, Reason}'
+-spec invite_show(map()) -> validation_result().
+invite_show(MsgMap) ->
+    case mk_payload(invite_show, MsgMap) of
+        {ok, Payload} ->
+            {ok, #{
+                <<"type">> => <<"invite_show">>,
+                <<"invite_id">> => maps:get(invite_id, Payload)
+            }};
+        Error ->
+            Error
+    end.
+
+%% @doc Construct the `invite_revoke' message
+%%
+%% Revokes an unused invite token.
+%%
+%% @param MsgMap Map containing:
+%%   - `invite_id' (binary): Invite identifier to revoke
+%% @returns `{ok, Message}' or `{error, Reason}'
+-spec invite_revoke(map()) -> validation_result().
+invite_revoke(MsgMap) ->
+    case mk_payload(invite_revoke, MsgMap) of
+        {ok, Payload} ->
+            {ok, #{
+                <<"type">> => <<"invite_revoke">>,
+                <<"invite_id">> => maps:get(invite_id, Payload)
+            }};
+        Error ->
+            Error
+    end.
+
+%%% ============================================================================
+%%% Client to Server Messages - Certificate Management
+%%% ============================================================================
+
+%% @doc Construct the `cert_status_query' message
+%%
+%% Queries the server for GPG identity and certificate status.
+%%
+%% @returns `{ok, Message}'
+-spec cert_status_query() -> validation_result().
+cert_status_query() ->
+    {ok, #{<<"type">> => <<"cert_status_query">>}}.
+
+%% @doc Construct the `cert_renew' message
+%%
+%% Requests certificate renewal with a GPG-signed CSR.
+%%
+%% @param MsgMap Map containing:
+%%   - `csr' (binary): Base64-encoded Certificate Signing Request
+%%   - `gpg_sig' (binary): Base64-encoded GPG signature of CSR
+%%   - `force' (boolean, optional): Force renewal even if not near expiry
+%%   - `new_key' (boolean, optional): Whether a new key was generated
+%% @returns `{ok, Message}' or `{error, Reason}'
+-spec cert_renew(map()) -> validation_result().
+cert_renew(MsgMap) ->
+    case mk_payload(cert_renew, MsgMap) of
+        {ok, Payload} ->
+            BaseMsg = #{
+                <<"type">> => <<"cert_renew">>,
+                <<"csr">> => maps:get(csr, Payload),
+                <<"gpg_sig">> => maps:get(gpg_sig, Payload)
+            },
+            Msg1 =
+                case maps:get(force, Payload, undefined) of
+                    undefined -> BaseMsg;
+                    Force -> BaseMsg#{<<"force">> => Force}
+                end,
+            Message =
+                case maps:get(new_key, Payload, undefined) of
+                    undefined -> Msg1;
+                    NewKey -> Msg1#{<<"new_key">> => NewKey}
+                end,
+            {ok, Message};
+        Error ->
+            Error
+    end.
 
 %%% ============================================================================
 %%% Server to Client Messages - Responses
@@ -894,6 +1034,28 @@ mk_payload(message_sent, MsgMap) ->
         Success when is_boolean(Success) -> {ok, MsgMap};
         _ -> {error, invalid_success_field}
     end;
+mk_payload(invite_create, MsgMap) ->
+    %% expiry_hours is optional (defaults to 24), meta is optional
+    case maps:get(expiry_hours, MsgMap, undefined) of
+        undefined -> {ok, MsgMap};  % Will use default
+        Hours when is_integer(Hours), Hours > 0 -> {ok, MsgMap};
+        _ -> {error, invalid_expiry_hours}
+    end;
+mk_payload(invite_show, MsgMap) ->
+    case maps:get(invite_id, MsgMap, undefined) of
+        undefined -> {error, missing_invite_id};
+        InviteId when is_binary(InviteId) -> {ok, MsgMap};
+        _ -> {error, invalid_invite_id}
+    end;
+mk_payload(invite_revoke, MsgMap) ->
+    case maps:get(invite_id, MsgMap, undefined) of
+        undefined -> {error, missing_invite_id};
+        InviteId when is_binary(InviteId) -> {ok, MsgMap};
+        _ -> {error, invalid_invite_id}
+    end;
+mk_payload(cert_renew, MsgMap) ->
+    RequiredFields = [csr, gpg_sig],
+    validate_required_fields(RequiredFields, MsgMap);
 mk_payload(_, _) ->
     {error, unknown_message_type}.
 

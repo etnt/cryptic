@@ -109,6 +109,8 @@
     print_help/0,
     print_help/1,
     print_console_status/1,
+    print_cert_status/5,
+    print_ca_response/1,
     make_prompt/0,
     make_prompt/1,
     calculate_wrapped_lines/2,
@@ -1050,6 +1052,344 @@ print_info(Message) ->
 print_highlight(Message) ->
     io:format("~s\r\n", [?FG_WHITE_BG_BLUE(?BOLD("[***] " ++ Message))]).
 
+%% @doc Print CA operation response
+-spec print_ca_response(map()) -> ok.
+print_ca_response(Response) ->
+    Type = maps:get(<<"type">>, Response, <<"unknown">>),
+    
+    case Type of
+        %% Legacy invite responses
+        <<"invite_create_response">> ->
+            print_invite_create_response(Response);
+        <<"invite_list_response">> ->
+            print_invite_list_response(Response);
+        <<"invite_revoke_response">> ->
+            print_invite_revoke_response(Response);
+        <<"invite_show_response">> ->
+            print_invite_show_response(Response);
+        %% Admin user management responses
+        <<"register_user_response">> ->
+            print_register_user_response(Response);
+        <<"list_users_response">> ->
+            print_list_users_response(Response);
+        <<"get_user_info_response">> ->
+            print_get_user_info_response(Response);
+        <<"suspend_user_response">> ->
+            print_suspend_user_response(Response);
+        <<"revoke_user_response">> ->
+            print_revoke_user_response(Response);
+        <<"reactivate_user_response">> ->
+            print_reactivate_user_response(Response);
+        %% Certificate management responses
+        <<"list_certificates_response">> ->
+            print_list_certificates_response(Response);
+        <<"revoke_certificate_response">> ->
+            print_revoke_certificate_response(Response);
+        _ ->
+            %% Generic CA response display
+            print_info(io_lib:format("CA Response: ~p", [Response]))
+    end.
+
+%% @private Print invite creation response
+print_invite_create_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            InviteId = maps:get(<<"invite_id">>, Response, <<"unknown">>),
+            ExpiresAt = maps:get(<<"expires_at">>, Response, 0),
+            DateTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+            print_success("Invite created successfully"),
+            io:format("  Invite ID: ~s\r\n", [InviteId]),
+            io:format("  Expires:   ~s\r\n", [DateTime]);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to create invite: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print invite list response
+print_invite_list_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Invites = maps:get(<<"invites">>, Response, []),
+            print_success(io_lib:format("Found ~p invite(s)", [length(Invites)])),
+            lists:foreach(fun(Invite) ->
+                InviteId = maps:get(<<"invite_id">>, Invite, <<"unknown">>),
+                ExpiresAt = maps:get(<<"expires_at">>, Invite, 0),
+                Consumed = maps:get(<<"consumed">>, Invite, false),
+                Expired = maps:get(<<"expired">>, Invite, false),
+                Meta = maps:get(<<"meta">>, Invite, #{}),
+                Note = maps:get(<<"note">>, Meta, <<"">>),
+                
+                Status = if
+                    Consumed -> "CONSUMED";
+                    Expired -> "EXPIRED";
+                    true -> "ACTIVE"
+                end,
+                
+                DateTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+                
+                %% Print invite details
+                io:format("  ~s\r\n", [InviteId]),
+                io:format("    Status:  ~s\r\n", [Status]),
+                io:format("    Expires: ~s\r\n", [DateTime]),
+                case Note of
+                    <<>> -> ok;
+                    _ -> io:format("    Note:    ~s\r\n", [Note])
+                end,
+                io:format("\r\n")
+            end, Invites);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to list invites: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print invite revoke response
+print_invite_revoke_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            InviteId = maps:get(<<"invite_id">>, Response, <<"unknown">>),
+            print_success(io_lib:format("Invite revoked: ~s", [InviteId]));
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to revoke invite: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print invite show response
+print_invite_show_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Invite = maps:get(<<"invite">>, Response, #{}),
+            InviteId = maps:get(<<"invite_id">>, Invite, <<"unknown">>),
+            ExpiresAt = maps:get(<<"expires_at">>, Invite, 0),
+            Consumed = maps:get(<<"consumed">>, Invite, false),
+            Expired = maps:get(<<"expired">>, Invite, false),
+            Meta = maps:get(<<"meta">>, Invite, #{}),
+            Note = maps:get(<<"note">>, Meta, <<"">>),
+            
+            Status = if
+                Consumed -> "CONSUMED";
+                Expired -> "EXPIRED";
+                true -> "ACTIVE"
+            end,
+            
+            DateTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+            
+            print_success("Invite details:"),
+            io:format("  ID:      ~s\r\n", [InviteId]),
+            io:format("  Status:  ~s\r\n", [Status]),
+            io:format("  Expires: ~s\r\n", [DateTime]),
+            case Note of
+                <<>> -> ok;
+                _ -> io:format("  Note:    ~s\r\n", [Note])
+            end;
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to show invite: ~s - ~s", [Error, Msg]))
+    end.
+
+%%====================================================================
+%% Admin Response Formatters
+%%====================================================================
+
+%% @private Print register_user response
+print_register_user_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            GpgFp = maps:get(<<"gpg_fp">>, Response, <<"unknown">>),
+            RegisteredBy = maps:get(<<"registered_by">>, Response, <<"unknown">>),
+            print_success(io_lib:format("User registered: ~s", [GpgFp])),
+            io:format("  Registered by: ~s\r\n", [RegisteredBy]);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Registration failed: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print list_users response
+print_list_users_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Users = maps:get(<<"users">>, Response, []),
+            Count = maps:get(<<"count">>, Response, 0),
+            print_success(io_lib:format("Found ~p user(s)", [Count])),
+            io:format("\r\n"),
+            lists:foreach(fun(User) ->
+                GpgFp = maps:get(<<"gpg_fp">>, User, <<"unknown">>),
+                Status = maps:get(<<"status">>, User, <<"unknown">>),
+                RegisteredBy = maps:get(<<"registered_by">>, User, <<"unknown">>),
+                RegisteredAt = maps:get(<<"registered_at">>, User, 0),
+                LastSeen = maps:get(<<"last_seen">>, User, 0),
+                Metadata = maps:get(<<"metadata">>, User, #{}),
+                
+                %% Format timestamps
+                RegTime = calendar:system_time_to_rfc3339(RegisteredAt, [{unit, second}, {offset, "Z"}]),
+                LastSeenTime = calendar:system_time_to_rfc3339(LastSeen, [{unit, second}, {offset, "Z"}]),
+                
+                %% Print user details
+                io:format("  GPG Fingerprint: ~s\r\n", [GpgFp]),
+                io:format("    Status:        ~s\r\n", [Status]),
+                io:format("    Registered by: ~s\r\n", [RegisteredBy]),
+                io:format("    Registered at: ~s\r\n", [RegTime]),
+                io:format("    Last seen:     ~s\r\n", [LastSeenTime]),
+                
+                %% Print metadata if present
+                case maps:size(Metadata) of
+                    0 -> ok;
+                    _ ->
+                        io:format("    Metadata:\r\n"),
+                        maps:foreach(fun(K, V) ->
+                            io:format("      ~s: ~s\r\n", [K, V])
+                        end, Metadata)
+                end,
+                io:format("\r\n")
+            end, Users);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to list users: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print get_user_info response
+print_get_user_info_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            User = maps:get(<<"user">>, Response, #{}),
+            GpgFp = maps:get(<<"gpg_fp">>, User, <<"unknown">>),
+            Status = maps:get(<<"status">>, User, <<"unknown">>),
+            RegisteredBy = maps:get(<<"registered_by">>, User, <<"unknown">>),
+            RegisteredAt = maps:get(<<"registered_at">>, User, 0),
+            LastSeen = maps:get(<<"last_seen">>, User, 0),
+            Metadata = maps:get(<<"metadata">>, User, #{}),
+            
+            RegTime = calendar:system_time_to_rfc3339(RegisteredAt, [{unit, second}, {offset, "Z"}]),
+            LastSeenTime = calendar:system_time_to_rfc3339(LastSeen, [{unit, second}, {offset, "Z"}]),
+            
+            print_success("User information:"),
+            io:format("  GPG Fingerprint: ~s\r\n", [GpgFp]),
+            io:format("  Status:          ~s\r\n", [Status]),
+            io:format("  Registered by:   ~s\r\n", [RegisteredBy]),
+            io:format("  Registered at:   ~s\r\n", [RegTime]),
+            io:format("  Last seen:       ~s\r\n", [LastSeenTime]),
+            
+            case maps:size(Metadata) of
+                0 -> ok;
+                _ ->
+                    io:format("  Metadata:\r\n"),
+                    maps:foreach(fun(K, V) ->
+                        io:format("    ~s: ~s\r\n", [K, V])
+                    end, Metadata)
+            end;
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to get user info: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print suspend_user response
+print_suspend_user_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            GpgFp = maps:get(<<"gpg_fp">>, Response, <<"unknown">>),
+            print_success(io_lib:format("User suspended: ~s", [GpgFp]));
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to suspend user: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print revoke_user response
+print_revoke_user_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            GpgFp = maps:get(<<"gpg_fp">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"User revoked">>),
+            print_success(io_lib:format("~s: ~s", [Msg, GpgFp]));
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to revoke user: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print reactivate_user response
+print_reactivate_user_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            GpgFp = maps:get(<<"gpg_fp">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"User reactivated">>),
+            print_success(io_lib:format("~s: ~s", [Msg, GpgFp]));
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to reactivate user: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print list_certificates response
+print_list_certificates_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Certs = maps:get(<<"certificates">>, Response, []),
+            Count = maps:get(<<"count">>, Response, 0),
+            GpgFp = maps:get(<<"gpg_fp">>, Response, <<"unknown">>),
+            
+            print_success(io_lib:format("Found ~p certificate(s) for ~s", [Count, GpgFp])),
+            io:format("\r\n"),
+            lists:foreach(fun(Cert) ->
+                Serial = maps:get(<<"serial">>, Cert, <<"unknown">>),
+                Status = maps:get(<<"status">>, Cert, <<"unknown">>),
+                IssuedAt = maps:get(<<"issued_at">>, Cert, 0),
+                ExpiresAt = maps:get(<<"expires_at">>, Cert, 0),
+                
+                IssuedTime = calendar:system_time_to_rfc3339(IssuedAt, [{unit, second}, {offset, "Z"}]),
+                ExpiresTime = calendar:system_time_to_rfc3339(ExpiresAt, [{unit, second}, {offset, "Z"}]),
+                
+                io:format("  Serial: ~s\r\n", [Serial]),
+                io:format("    Status:  ~s\r\n", [Status]),
+                io:format("    Issued:  ~s\r\n", [IssuedTime]),
+                io:format("    Expires: ~s\r\n", [ExpiresTime]),
+                
+                %% Print revocation info if revoked
+                case Status of
+                    <<"revoked">> ->
+                        RevokedAt = maps:get(<<"revoked_at">>, Cert, undefined),
+                        RevokedBy = maps:get(<<"revoked_by">>, Cert, <<"unknown">>),
+                        Reason = maps:get(<<"revoked_reason">>, Cert, <<"No reason">>),
+                        case RevokedAt of
+                            undefined -> ok;
+                            _ ->
+                                RevokedTime = calendar:system_time_to_rfc3339(RevokedAt, [{unit, second}, {offset, "Z"}]),
+                                io:format("    Revoked: ~s\r\n", [RevokedTime]),
+                                io:format("    By:      ~s\r\n", [RevokedBy]),
+                                io:format("    Reason:  ~s\r\n", [Reason])
+                        end;
+                    _ -> ok
+                end,
+                io:format("\r\n")
+            end, Certs);
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to list certificates: ~s - ~s", [Error, Msg]))
+    end.
+
+%% @private Print revoke_certificate response
+print_revoke_certificate_response(Response) ->
+    case maps:get(<<"status">>, Response, undefined) of
+        <<"success">> ->
+            Serial = maps:get(<<"serial">>, Response, <<"unknown">>),
+            print_success(io_lib:format("Certificate revoked: ~s", [Serial]));
+        _ ->
+            Error = maps:get(<<"error">>, Response, <<"unknown">>),
+            Msg = maps:get(<<"message">>, Response, <<"">>),
+            print_error(io_lib:format("Failed to revoke certificate: ~s - ~s", [Error, Msg]))
+    end.
+
+%%====================================================================
+%% Engine Status Display
+%%====================================================================
+
 %% @doc Print engine status on alternate screen
 %% Takes a status map and displays it in a formatted view on the alternate screen buffer.
 %% This keeps the main message area clean and uncluttered.
@@ -1272,6 +1612,10 @@ print_help(Topic) ->
             print_history_help();
         "db" ->
             print_db_help();
+        "admin" ->
+            print_admin_help();
+        "cert" ->
+            print_cert_help();
         "line_edit" ->
             print_line_edit_help();
         "emoji" ->
@@ -1334,6 +1678,16 @@ print_general_help() ->
             ?FG_MAGENTA("(:h <query>)") ++ "\r\n"
     ),
     io:format(
+        ?FG_GREEN("  admin") ++ " " ++ ?FG_YELLOW("[register|list|status|...]") ++
+            " - Admin user management " ++
+            ?FG_MAGENTA("(:ar,:au)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert") ++ " " ++ ?FG_YELLOW("[status|renew]") ++
+            "       - Manage certificates " ++
+            ?FG_MAGENTA("(:cs,:cr)") ++ "\r\n"
+    ),
+    io:format(
         ?FG_GREEN("  db") ++ " " ++ ?FG_YELLOW("[enable|disable|status]") ++
             " - Control message storage\r\n"
     ),
@@ -1369,6 +1723,14 @@ print_general_help() ->
     io:format(
         ?FG_GREEN("  help history") ++
             "                - Message history queries\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help admin") ++
+            "                  - Admin user management\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  help cert") ++
+            "                   - Certificate management\r\n"
     ),
     io:format(
         ?FG_GREEN("  help db") ++
@@ -1754,8 +2116,6 @@ print_emoji_help() ->
             "╚═══════════════════════════════════════════════════════════════╝"
         ) ++ "\r\n\r\n"
     ),
-
-    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
     io:format(
         "  Cryptic automatically converts common ASCII emoticons to emoji\r\n"
     ),
@@ -1767,11 +2127,6 @@ print_emoji_help() ->
     ),
 
     io:format(?BOLD(?FG_CYAN("Available Emoticons:")) ++ "\r\n"),
-    io:format(
-        ?BOLD(
-            "─────────────────────────────────────────────────────────────────"
-        ) ++ "\r\n"
-    ),
     io:format(
         ?FG_GREEN("  :-)  :)") ++ "   → 😊  " ++
             ?FG_YELLOW("Smiling face\r\n")
@@ -1812,11 +2167,6 @@ print_emoji_help() ->
     io:format("\r\n"),
     io:format(?BOLD(?FG_CYAN("Examples:")) ++ "\r\n"),
     io:format(
-        ?BOLD(
-            "─────────────────────────────────────────────────────────────────"
-        ) ++ "\r\n"
-    ),
-    io:format(
         ?FG_GREEN("  send alice ") ++ ?FG_YELLOW("Hello! :-)") ++ "\r\n"
     ),
     io:format(
@@ -1831,11 +2181,6 @@ print_emoji_help() ->
 
     io:format(?BOLD(?FG_CYAN("Notes:")) ++ "\r\n"),
     io:format(
-        ?BOLD(
-            "─────────────────────────────────────────────────────────────────"
-        ) ++ "\r\n"
-    ),
-    io:format(
         "  • Emoji conversion happens automatically when messages are sent\r\n"
     ),
     io:format(
@@ -1848,6 +2193,137 @@ print_emoji_help() ->
         "  • Mix ASCII emoticons with text: " ++ ?FG_YELLOW("läget ;-)") ++
             " → läget 😉\r\n"
     ).
+
+
+%% @doc Print invite-specific help
+print_admin_help() ->
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              ADMIN COMMAND HELP                               "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  Admin commands allow you to manage user registrations via GPG\r\n"
+    ),
+    io:format(
+        "  public keys. Users send their GPG public keys, and admins\r\n"
+    ),
+    io:format(
+        "  register them to grant access to the Cryptic server.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin register") ++ " " ++ ?FG_YELLOW("<gpg_fp> <gpg_key_file>") ++
+            " - Register new user " ++ ?FG_MAGENTA("(:ar)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin list") ++
+            "                      - List all registered users " ++
+            ?FG_MAGENTA("(:al)") ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin status") ++ " " ++ ?FG_YELLOW("<gpg_fp>") ++
+            "           - Show user status and details\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin suspend") ++ " " ++ ?FG_YELLOW("<gpg_fp>") ++
+            "          - Suspend user access\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin revoke") ++ " " ++ ?FG_YELLOW("<gpg_fp>") ++
+            "           - Permanently revoke user\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin reactivate") ++ " " ++ ?FG_YELLOW("<gpg_fp>") ++
+            "       - Reactivate suspended user\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin certs") ++ " " ++ ?FG_YELLOW("<gpg_fp>") ++
+            "            - List user's certificates\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  admin revoke-cert") ++ " " ++ ?FG_YELLOW("<serial>") ++
+            "      - Revoke specific certificate\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("User Registration Workflow:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format("  1. New user exports GPG public key:\r\n"),
+    io:format(
+        ?FG_YELLOW("     $ cryptic-onboard export-gpg > bob.asc") ++ "\r\n"
+    ),
+    io:format("  2. User sends bob.asc to admin (email, etc.)\r\n"),
+    io:format("  3. Admin registers user:\r\n"),
+    io:format(
+        ?FG_YELLOW("     > admin register ABCD1234... bob.asc") ++ "\r\n"
+    ),
+    io:format("  4. User can now request certificate:\r\n"),
+    io:format(
+        ?FG_YELLOW("     $ cryptic-onboard request https://server:8443") ++ "\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Usage Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  admin register ABCD1234...BEEF alice.asc --note \"Alice from Sales\"") ++
+            "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :ar ABCD1234...BEEF alice.asc") ++
+            "  # Quick register\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  admin list") ++
+            "                         # List all users\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  admin status ABCD1234...BEEF") ++
+            "       # Check user status\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  admin suspend ABCD1234...BEEF") ++
+            "      # Temporarily suspend\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  admin certs ABCD1234...BEEF") ++
+            "        # List certificates\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  admin revoke-cert 4F3A2B1C") ++
+            "        # Revoke certificate\r\n"
+    ).
+
+
 
 %% @doc Print markdown formatting help
 print_markdown_help() ->
@@ -1868,7 +2344,6 @@ print_markdown_help() ->
             "╚═══════════════════════════════════════════════════════════════╝"
         ) ++ "\r\n\r\n"
     ),
-
     io:format(
         "  Simple markdown-style formatting is supported in messages.\r\n\r\n"
     ),
@@ -1903,6 +2378,119 @@ print_markdown_help() ->
     io:format("  • Applied automatically • Markers must be paired\r\n"),
     io:format(
         "  • Combines with emoji   • Empty pairs like ** ignored\r\n"
+    ).
+
+
+%% @doc Print cert-specific help
+print_cert_help() ->
+
+    %% Display header with border
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CERT COMMAND HELP                                "
+            ) ++ ?BOLD("║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
+    io:format(
+        "  Certificate commands allow you to check and renew your TLS\r\n"
+    ),
+    io:format(
+        "  client certificate used for mTLS authentication with the server.\r\n"
+    ),
+    io:format(
+        "  Certificates are short-lived (7 days default) and can be renewed.\r\n\r\n"
+    ),
+
+    io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert") ++ " or " ++ ?FG_MAGENTA(":cs") ++
+            "                - Show certificate status\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert status") ++ " or " ++ ?FG_MAGENTA(":cs") ++
+            "        - Show certificate status\r\n"
+    ),
+    io:format(
+        ?FG_GREEN("  cert renew") ++ " " ++ ?FG_YELLOW("[options]") ++
+            "   - Renew certificate " ++ ?FG_MAGENTA("(:cr)") ++ "\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Renew Options:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  --force") ++
+            "                      # Renew even if not near expiry\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  --new-key") ++
+            "                    # Generate new TLS key (re-key)\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Usage Examples:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  cert status") ++
+            "                    # Check certificate expiry\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :cs") ++
+            "                            # Quick status check\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  cert renew") ++
+            "                     # Renew with existing key\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  cert renew --new-key") ++
+            "           # Renew and generate new key\r\n"
+    ),
+    io:format(
+        ?FG_YELLOW("  :cr") ++
+            "                            # Quick renew\r\n"
+    ),
+
+    io:format("\r\n"),
+    io:format(?BOLD(?FG_CYAN("Auto-Renewal:")) ++ "\r\n"),
+    io:format(
+        ?BOLD(
+            "─────────────────────────────────────────────────────────────────"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        "  Certificates are automatically renewed at 50%% lifetime\r\n"
+    ),
+    io:format(
+        "  (typically 3.5 days for 7-day certificates). You can also\r\n"
+    ),
+    io:format(
+        "  manually renew using the commands above.\r\n"
     ).
 
 %% @doc Display console status information on alternate screen
@@ -1979,3 +2567,63 @@ print_console_status(Status) ->
 
     %% Return to main screen buffer
     io:format(?ALT_SCREEN_OFF).
+
+%% @doc Print certificate status with nice formatting
+-spec print_cert_status(
+    Serial :: string(),
+    Expiry :: string(),
+    Subject :: string(),
+    SAN :: string() | undefined,
+    Files :: {CertFile :: string(), KeyFile :: string()}
+) -> ok.
+print_cert_status(Serial, Expiry, Subject, SAN, {CertFile, KeyFile}) ->
+    %% Display header with border
+    io:format("\r\n"),
+    io:format(
+        ?BOLD(
+            "╔═══════════════════════════════════════════════════════════════╗"
+        ) ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD("║") ++
+            ?FG_CYAN(
+                "              CERTIFICATE STATUS                              "
+            ) ++ ?BOLD(" ║") ++ "\r\n"
+    ),
+    io:format(
+        ?BOLD(
+            "╚═══════════════════════════════════════════════════════════════╝"
+        ) ++ "\r\n\r\n"
+    ),
+
+    %% Status
+    io:format(?FG_GREEN("  Status:           ") ++ ?FG_GREEN("✓ Valid") ++ "\r\n\r\n"),
+
+    %% Certificate details
+    io:format(?FG_YELLOW("  Certificate Details:\r\n")),
+    io:format("    " ++ ?FG_CYAN(Serial) ++ "\r\n"),
+    io:format("    " ++ ?FG_CYAN(Expiry) ++ "\r\n"),
+    io:format("    " ++ ?FG_CYAN(Subject) ++ "\r\n"),
+    
+    %% SAN extensions (if present)
+    case SAN of
+        undefined -> 
+            ok;
+        SANValue ->
+            io:format("    " ++ ?FG_CYAN("Subject Alternative Names: " ++ SANValue) ++ "\r\n")
+    end,
+    io:format("\r\n"),
+
+    %% Local files
+    io:format(?FG_YELLOW("  Local Files:\r\n")),
+    io:format("    Certificate: " ++ ?FG_WHITE(CertFile) ++ "\r\n"),
+    io:format("    Private Key: " ++ ?FG_WHITE(KeyFile) ++ "\r\n\r\n"),
+
+    %% Footer
+    io:format(
+        ?BOLD(
+            "═══════════════════════════════════════════════════════════════"
+        ) ++ "\r\n"
+    ),
+    ok.
+

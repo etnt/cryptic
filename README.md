@@ -23,13 +23,16 @@ demonstrating modern cryptographic protocols for secure message exchange.
 * Implements the [X3DH](https://signal.org/docs/specifications/x3dh/) and
   the [Double-Ratchet](https://signal.org/docs/specifications/doubleratchet/)
   cryptographic protocols.
+* Admin-mediated GPG-based onboarding where users prove ownership with
+  GPG-signed CSRs to get certificates.
 
 **Cryptic** consists of:
 
 * A server that route messages between users, and holds on to encrypted messages
   until they can be delivered to the receiver.
-* A terminal client.
-* A NCurses terminal UI.
+* A terminal console client.
+* Local Sqlite3 database that stores historic messages (encrypted).
+* A wizard script to facilitate onboarding of new users.
 * Modular structure to make the core engines (X3DH & Double-Ratchet) available
   to be used in other contexts/applications.
 
@@ -63,17 +66,55 @@ Cryptic implements a secure messaging system using:
 > ./scripts/start-server.sh
 
 # In another terminal, start the UI client
-> ./scripts/cryptic_console -u alice
+> ./scripts/cryptic_console -u alice --enable-db
 
 # Specify the server and port to be used
-> ./scripts/cryptic_console -u alice -s cryptic.example.com -p 9999
+> ./scripts/cryptic_console -u alice --enable-db -s cryptic.example.com -p 9999
 ```
+
+## Onboard new users
+
+A new User has to be approved by an _admin user_. This is done by sending
+the User's GPG Public key and the corresponding GPG fingerprint to the 
+admin user. This process is taken care of by the `bin/cryptic-onboard` script.
+
+### ./bin/cryptic-onboard
+
+This is the Wizard menu system of the `./bin/cryptic-onboard` script.
+
+```
+   ╔═══════════════════════════════════════════════════════════════╗
+   ║           Welcome to Cryptic Onboarding Wizard                ║
+   ║                                                               ║
+   ║  This wizard will guide you through the complete process      ║
+   ║  of setting up your Cryptic secure messaging account.         ║
+   ╚═══════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What would you like to do?
+
+  1) Generate a new GPG key pair
+  2) Export GPG public key for admin registration
+  3) Request a TLS certificate from server
+  4) Check certificate status and expiration
+  5) Complete onboarding walkthrough (steps 1-3)
+  6) Show help and documentation
+  0) Exit
+
+Enter your choice [0-6]:
+```
+
+A new User follows the steps 1-3 and can then login to via the
+`./scripts/cryptic_console` client.
+
+To bootstrap the very first user, read [here](docs/GPG-BOOTSTRAP.md) .
 
 ## The Client
 
 So when you start the Client Console, you are immediately prompted for a
 passphrase; this passphrase is used for encrypting your keys stored on your
-local disk in your `$HOME/.cryptic` direcotry. The layout of this directory
+local disk in your `$HOME/.cryptic` directory. The layout of this directory
 looks like this:
 ```bash
 ❯ tree ~/.cryptic
@@ -192,26 +233,24 @@ terminal-notifier -title "Cryptic" -message "Cryptic message from: $1" -sound de
 # notify-send "Cryptic message from: $1"
 ```
 
-## Certificate Handling
-
-Read [here](docs/CERTIFICATE_HANDLING.md) to learn how to create certificates
-for new Clients and how to securely deliver them to the new Client.
-
 ## The Server
 
-The main idea of the Cryptic Server is to make it as _dumb_ as possible.
+The main functions of the Cryptic Server are to:
 
-It mainly functions as a relay point for messages routed between the Clients;
-but it also need to hold uploaded Client (Public) keys and pending encrypted
-messages, waiting to be delivered as soon as the receiving Client comes online.
+1. Relay messages routed between the Clients.
+2. Hold uploaded Client (Public) keys.
+3. Hold pending (encrypted) messages to be delivered when receiving Client comes online.
+4. Handle onboarding of new Clients.
+5. Issue new certificates (upon requests) to Clients.
 
-Nothing is stored on disk, hence if the Server goes down while holding
-pending messages, they are lost.
+Client keys and messages are not stored on disk, hence if the Server goes
+down while holding pending messages, they are lost.
 
 The Server can be run either via the `scripts/start-server.sh` script,
 or via a tailor made [docker container](docs/DOCKER.md) .
 
-## Features
+
+## Cryptic Features
 
 ### WebSocket mTLS Communication
 - **Real-time WebSocket messaging** with persistent connections for instant delivery
