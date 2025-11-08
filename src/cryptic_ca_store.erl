@@ -90,9 +90,25 @@ init(DbFile) ->
     case esqlite3:open(DbFile) of
         {ok, Conn} ->
             %% Set pragmas for better performance and safety
-            ok = esqlite3:exec(Conn, "PRAGMA journal_mode=WAL;"),
-            ok = esqlite3:exec(Conn, "PRAGMA synchronous=NORMAL;"),
-            ok = esqlite3:exec(Conn, "PRAGMA foreign_keys=ON;"),
+            %% These are optimizations, so we continue even if they fail
+            case esqlite3:exec(Conn, "PRAGMA journal_mode=WAL;") of
+                ok -> ok;
+                {error, WalError} ->
+                    ?error("Failed to set WAL mode: ~p, continuing without WAL", [WalError]),
+                    ok
+            end,
+            case esqlite3:exec(Conn, "PRAGMA synchronous=NORMAL;") of
+                ok -> ok;
+                {error, SyncError} ->
+                    ?error("Failed to set synchronous mode: ~p, using default", [SyncError]),
+                    ok
+            end,
+            case esqlite3:exec(Conn, "PRAGMA foreign_keys=ON;") of
+                ok -> ok;
+                {error, FkError} ->
+                    ?error("Failed to enable foreign keys: ~p, continuing without FK checks", [FkError]),
+                    ok
+            end,
 
             %% Create tables
             case create_tables(Conn) of
@@ -290,10 +306,29 @@ create_tables(Conn) ->
     ],
 
     try
-        ok = esqlite3:exec(Conn, GpgIdentitiesTable),
-        ok = esqlite3:exec(Conn, AuditLogTable),
-        ok = esqlite3:exec(Conn, CertificatesTable),
-        lists:foreach(fun(Idx) -> ok = esqlite3:exec(Conn, Idx) end, Indexes),
+        ?info("Creating gpg_identities table...", []),
+        case esqlite3:exec(Conn, GpgIdentitiesTable) of
+            ok -> ?info("gpg_identities table created", []);
+            {error, E1} -> ?error("Failed to create gpg_identities: ~p", [E1]), error({error, E1})
+        end,
+        ?info("Creating audit_log table...", []),
+        case esqlite3:exec(Conn, AuditLogTable) of
+            ok -> ?info("audit_log table created", []);
+            {error, E2} -> ?error("Failed to create audit_log: ~p", [E2]), error({error, E2})
+        end,
+        ?info("Creating certificates table...", []),
+        case esqlite3:exec(Conn, CertificatesTable) of
+            ok -> ?info("certificates table created", []);
+            {error, E3} -> ?error("Failed to create certificates: ~p", [E3]), error({error, E3})
+        end,
+        ?info("Creating indexes...", []),
+        lists:foreach(fun(Idx) -> 
+            case esqlite3:exec(Conn, Idx) of
+                ok -> ok;
+                {error, E4} -> ?error("Failed to create index: ~p for ~p", [E4, Idx]), error({error, E4})
+            end
+        end, Indexes),
+        ?info("All tables and indexes created successfully", []),
         ok
     catch
         ErrorType:ErrorReason:_Stack ->
