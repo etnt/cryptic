@@ -14,6 +14,7 @@ RUN apk add --no-cache \
     openssl-dev \
     ncurses-dev \
     libsodium-dev \
+    sqlite-dev \
     pkgconf
 
 # Set working directory
@@ -46,6 +47,9 @@ RUN apk add --no-cache \
     libstdc++ \
     libgcc \
     libsodium \
+    sqlite-libs \
+    gnupg \
+    su-exec \
     netcat-openbsd
 
 # Create cryptic user and group
@@ -57,12 +61,16 @@ WORKDIR /opt/cryptic
 # Copy the release from builder
 COPY --from=builder /buildroot/_build/prod/rel/cryptic ./
 
-# Create directories for runtime data
-RUN mkdir -p /opt/cryptic/certs /opt/cryptic/logs /opt/cryptic/data && \
+# Copy entrypoint script from scripts directory
+COPY scripts/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Create directories for runtime data (including CA DB and bootstrap area)
+RUN mkdir -p /opt/cryptic/certs /opt/cryptic/logs /opt/cryptic/data/ca /opt/cryptic/priv/ca/bootstrap && \
     chown -R cryptic:cryptic /opt/cryptic
 
-# Switch to cryptic user
-USER cryptic
+# Don't switch to cryptic user yet - entrypoint needs root to fix volume permissions
+# USER cryptic will be set by entrypoint after fixing permissions
 
 # Expose WebSocket TLS port
 EXPOSE 8443
@@ -73,11 +81,15 @@ ENV CRYPTIC_SERVER_HOST=0.0.0.0 \
     CRYPTIC_SERVER_CERT=/opt/cryptic/certs/server.crt \
     CRYPTIC_SERVER_KEY=/opt/cryptic/certs/server.key \
     CRYPTIC_CA_CERT=/opt/cryptic/certs/ca.crt \
+    CRYPTIC_CA_DB_FILE=/opt/cryptic/data/ca/cryptic_ca.db \
     CRYPTIC_EVENT_HANDLERS=cryptic_file_logger
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD nc -z localhost ${CRYPTIC_SERVER_PORT} || exit 1
+
+# Use entrypoint to ensure directories exist
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Start the server using the release
 CMD ["bin/cryptic", "foreground"]
