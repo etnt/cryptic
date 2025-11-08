@@ -1813,6 +1813,7 @@ handle_x3dh_message_async(FromUsername, MessagePayload, State) when
 ->
     % Check if we already have a session with this user
     Sessions = State#cryptic_engine_state.sessions,
+    
     case maps:get(FromUsername, Sessions, undefined) of
         undefined ->
             % No existing session - initialize from X3DH message
@@ -1837,16 +1838,17 @@ handle_x3dh_message_async(FromUsername, MessagePayload, State) when
         RatchetEnginePid ->
             % We already have a session - check if we should accept this X3DH message
             % This can happen when:
-            % 1. Both parties initiate simultaneously (race condition)
-            % 2. Receiver sends X3DH fallback reply (receiver_init -> sender_init upgrade)
+            % 1. Peer lost state and is resetting (Signal-style implicit detection)
+            % 2. Both parties initiated simultaneously (race condition)
+            % 3. Receiver is sending X3DH fallback reply (receiver_init -> sender_init upgrade)
 
-            % Get the current ratchet state
+            % Get the current ratchet state to determine the appropriate action
             case cryptic_ratchet_engine:get_state_info(RatchetEnginePid) of
                 StateInfo when is_map(StateInfo) ->
                     CurrentState = maps:get(current_state, StateInfo, unknown),
                     case CurrentState of
                         sender_init ->
-                            % We're in sender_init - peer is replying with X3DH fallback
+                            % Expected: peer is replying with X3DH fallback
                             % Process this X3DH message to extract session key and upgrade
                             ?dbg(
                                 "Received X3DH reply from ~s while in sender_init, processing for upgrade~n",
@@ -1872,14 +1874,91 @@ handle_x3dh_message_async(FromUsername, MessagePayload, State) when
                                     ),
                                     {error, Reason}
                             end;
+                        bidirectional ->
+                            % SIGNAL-STYLE IMPLICIT SESSION RESET:
+                            % Unexpected X3DH while bidirectional means peer has lost state
+                            % This is the standard way to handle session desynchronization
+                            log_info(
+                                "Received X3DH from ~s in bidirectional state - "
+                                "peer has lost session state, reinitializing (Signal protocol)",
+                                [FromUsername],
+                                State
+                            ),
+                            
+                            % Clean up the old session
+                            CleanedState = terminate_session_with_peer(
+                                FromUsername, RatchetEnginePid, State
+                            ),
+                            
+                            % Initialize fresh session from the X3DH message
+                            case
+                                initialize_receiver_session_from_x3dh(
+                                    FromUsername, MessagePayload, CleanedState
+                                )
+                            of
+                                {ok, Plaintext, UpdatedState} ->
+                                    % Notify UI about the session reset
+                                    CallbackModule = UpdatedState#cryptic_engine_state.callback_module,
+                                    Context = UpdatedState#cryptic_engine_state.callback_context,
+                                    SystemMsg = io_lib:format(
+                                        "Session with ~s was reset (peer reinitialized)",
+                                        [FromUsername]
+                                    ),
+                                    case CallbackModule:system_message(SystemMsg, Context) of
+                                        {ok, NewContext} ->
+                                            FinalState = UpdatedState#cryptic_engine_state{
+                                                callback_context = NewContext
+                                            },
+                                            deliver_message_to_ui_async(
+                                                FromUsername, Plaintext, FinalState
+                                            );
+                                        _ ->
+                                            deliver_message_to_ui_async(
+                                                FromUsername, Plaintext, UpdatedState
+                                            )
+                                    end;
+                                {error, Reason} ->
+                                    log_error(
+                                        "Failed to reinitialize session after reset from ~s: ~p",
+                                        [FromUsername, Reason],
+                                        CleanedState
+                                    ),
+                                    {error, Reason}
+                            end;
+                        receiver_init ->
+                            % X3DH in receiver_init could be simultaneous initiation
+                            % Treat as implicit reset to ensure clean state
+                            log_info(
+                                "Received X3DH from ~s in receiver_init state - "
+                                "treating as session reset (possible simultaneous initiation)",
+                                [FromUsername],
+                                State
+                            ),
+                            
+                            CleanedState = terminate_session_with_peer(
+                                FromUsername, RatchetEnginePid, State
+                            ),
+                            
+                            case
+                                initialize_receiver_session_from_x3dh(
+                                    FromUsername, MessagePayload, CleanedState
+                                )
+                            of
+                                {ok, Plaintext, UpdatedState} ->
+                                    deliver_message_to_ui_async(
+                                        FromUsername, Plaintext, UpdatedState
+                                    );
+                                {error, Reason} ->
+                                    {error, Reason}
+                            end;
                         _OtherState ->
-                            % In any other state, X3DH message is unexpected
+                            % Unknown state - log and reject
                             log_error(
-                                "Received X3DH message from ~s but session already exists in state ~p",
+                                "Received X3DH message from ~s in unexpected state ~p",
                                 [FromUsername, CurrentState],
                                 State
                             ),
-                            {error, session_already_exists}
+                            {error, {unexpected_x3dh, CurrentState}}
                     end;
                 _Error ->
                     log_error(
@@ -2235,76 +2314,41 @@ initialize_receiver_ratchet_session(
         % Start ratchet engine with our callback
         CallbackModule = State#cryptic_engine_state.callback_module,
         CallbackContext = State#cryptic_engine_state.callback_context,
-        Username = State#cryptic_engine_state.username,
 
         RatchetContext = CallbackContext#{
             peer_username => PeerUsername,
             callback_mod => CallbackModule
         },
 
-        %% Try to load existing session first
-        {RatchetEnginePid, SessionLoaded} =
-            case
-                CallbackModule:load_session_state(
-                    Username, l2b(PeerUsername), CallbackContext
-                )
-            of
-                {ok, SavedRatchetState, _UpdatedContext} ->
-                    % Session found - restore it
-                    log_info(
-                        "Restoring saved session for ~s", [PeerUsername], State
-                    ),
-                    {ok, Pid} = cryptic_ratchet_engine:start_link(
-                        ?MODULE, #{}, RatchetContext
-                    ),
-                    case
-                        cryptic_ratchet_engine:set_ratchet_state(
-                            Pid, SavedRatchetState
-                        )
-                    of
-                        ok ->
-                            {Pid, true};
-                        {error, _SetError} ->
-                            % Fall back to creating new session
-                            cryptic_ratchet_engine:stop(Pid),
-                            {ok, NewPid} = cryptic_ratchet_engine:start_link(
-                                ?MODULE, #{}, RatchetContext
-                            ),
-                            DHKeyPair = cryptic_nif:gen_keypair(),
-                            ok = cryptic_ratchet_engine:init_as_receiver(
-                                NewPid, SessionKey, DHKeyPair
-                            ),
-                            {NewPid, false}
-                    end;
-                {error, not_found, _UpdatedContext} ->
-                    % No saved session - create new one
-                    log_info(
-                        "No saved session for ~s, creating new",
-                        [PeerUsername],
-                        State
-                    ),
-                    {ok, Pid} = cryptic_ratchet_engine:start_link(
-                        ?MODULE, #{}, RatchetContext
-                    ),
-                    DHKeyPair = cryptic_nif:gen_keypair(),
-                    ok = cryptic_ratchet_engine:init_as_receiver(
-                        Pid, SessionKey, DHKeyPair
-                    ),
-                    {Pid, false}
-            end,
+        %% IMPORTANT: We're initializing from X3DH, which means:
+        %% 1. First-time session establishment, OR
+        %% 2. Peer has reset (lost their state)
+        %% In BOTH cases, we should NOT load old session from disk.
+        %% If peer lost state, using our old session will cause decrypt failures.
+        %% This is the implicit session reset detection.
+        
+        % Create fresh session - do NOT load from disk
+        log_info(
+            "Creating fresh receiver session for ~s (X3DH initialization)",
+            [PeerUsername],
+            State
+        ),
+        {ok, RatchetEnginePid} = cryptic_ratchet_engine:start_link(
+            ?MODULE, #{}, RatchetContext
+        ),
+        DHKeyPair = cryptic_nif:gen_keypair(),
+        ok = cryptic_ratchet_engine:init_as_receiver(
+            RatchetEnginePid, SessionKey, DHKeyPair
+        ),
 
         % If sender included their ratchet DH public key, activate sending chain
-        % (Only needed if we created a new session - loaded sessions are already bidirectional)
-        case {SessionLoaded, SenderRatchetDHPub} of
-            {true, _} ->
-                % Session was loaded, already in correct state
-                ?dbg("Session loaded from disk, skipping DH key setup~n", []);
-            {false, undefined} ->
+        case SenderRatchetDHPub of
+            undefined ->
                 ?dbg(
                     "No sender ratchet DH key provided, staying in receiver_init~n",
                     []
                 );
-            {false, _} ->
+            _ ->
                 ?dbg(
                     "Sender ratchet DH key provided, setting remote DH key~n",
                     []
@@ -2336,12 +2380,8 @@ initialize_receiver_ratchet_session(
             session_id = generate_session_id(),
             state = active,
             last_activity = erlang:timestamp(),
-            % Received first message (or restored from disk)
-            message_count =
-                if
-                    SessionLoaded -> 0;
-                    true -> 1
-                end,
+            % Fresh X3DH initialization - first message
+            message_count = 1,
             x3dh_completed = true
         },
 
@@ -2563,6 +2603,72 @@ update_session_activity(PeerUsername, State) ->
             ),
             State#cryptic_engine_state{
                 session_states = NewSessionStates
+            }
+    end.
+
+%% @private
+%% @doc Cleanly terminate a ratchet session with a peer
+%%
+%% This stops the ratchet engine process, removes the session from state,
+%% and optionally deletes the saved session file. Use this when you need
+%% to completely reset a session (e.g., when peer signals they've lost state).
+terminate_session_with_peer(PeerUsername, RatchetEnginePid, State) ->
+    % Stop the ratchet engine process
+    case is_process_alive(RatchetEnginePid) of
+        true ->
+            cryptic_ratchet_engine:stop(RatchetEnginePid);
+        false ->
+            ok
+    end,
+    
+    % Remove from active sessions
+    Sessions = State#cryptic_engine_state.sessions,
+    NewSessions = maps:remove(PeerUsername, Sessions),
+    
+    % Remove from session states
+    SessionStates = State#cryptic_engine_state.session_states,
+    NewSessionStates = maps:remove(PeerUsername, SessionStates),
+    
+    % Remove from key bundles (so we request fresh keys)
+    KeyBundles = State#cryptic_engine_state.key_bundles,
+    NewKeyBundles = maps:remove(PeerUsername, KeyBundles),
+    
+    % Optionally delete saved session file
+    CallbackModule = State#cryptic_engine_state.callback_module,
+    Context = State#cryptic_engine_state.callback_context,
+    Username = State#cryptic_engine_state.username,
+    
+    % Try to delete the session file (ignore errors)
+    try
+        case CallbackModule:delete_session_state(Username, PeerUsername, Context) of
+            {ok, UpdatedContext} ->
+                log_info(
+                    "Deleted saved session state for ~s during session reset",
+                    [PeerUsername],
+                    State
+                ),
+                State#cryptic_engine_state{
+                    sessions = NewSessions,
+                    session_states = NewSessionStates,
+                    key_bundles = NewKeyBundles,
+                    callback_context = UpdatedContext
+                };
+            {error, _Reason, UpdatedContext} ->
+                % Deletion failed, but continue with in-memory cleanup
+                State#cryptic_engine_state{
+                    sessions = NewSessions,
+                    session_states = NewSessionStates,
+                    key_bundles = NewKeyBundles,
+                    callback_context = UpdatedContext
+                }
+        end
+    catch
+        _:_ ->
+            % Callback doesn't support delete_session_state, just do in-memory cleanup
+            State#cryptic_engine_state{
+                sessions = NewSessions,
+                session_states = NewSessionStates,
+                key_bundles = NewKeyBundles
             }
     end.
 

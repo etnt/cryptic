@@ -98,7 +98,7 @@ setup_alice_bob_session() ->
 %% Step 2: Alice sends 3 messages (M1, M2, M3 with DH ratchet)
 %% Step 3: Messages stored encrypted on server
 %% Step 4: Bob comes back online and processes all messages
-bob_offline_alice_sends_messages_test() ->
+test_bob_offline_alice_sends_messages() ->
     ?debugMsg(
         "\n=== BOB OFFLINE ALICE SENDS MESSAGES TEST (DOUBLE_RATCHET_DETAILS.md) ==="
     ),
@@ -286,7 +286,7 @@ bob_offline_alice_sends_messages_test() ->
 
 %% @doc Test extended offline period with multiple DH ratchet steps
 %% This tests the resilience of the protocol over longer offline periods
-extended_offline_with_multiple_ratchets_test() ->
+test_extended_offline_with_multiple_ratchets() ->
     ?debugMsg("\n=== EXTENDED OFFLINE WITH MULTIPLE RATCHETS TEST ==="),
 
     {AliceState0, BobState0, _SharedRootKey} = setup_alice_bob_session(),
@@ -367,7 +367,7 @@ extended_offline_with_multiple_ratchets_test() ->
 
 %% @doc Test out-of-order message delivery with skipped message keys
 %% This implements the "out-of-order delivery works" mentioned in the document
-out_of_order_delivery_with_ratchet_test() ->
+test_out_of_order_delivery_with_ratchet() ->
     ?debugMsg("\n=== OUT-OF-ORDER DELIVERY WITH RATCHET TEST ==="),
 
     {AliceState0, BobState0, _SharedRootKey} = setup_alice_bob_session(),
@@ -446,7 +446,7 @@ out_of_order_delivery_with_ratchet_test() ->
 
 %% @doc Test bidirectional communication after Bob comes back online
 %% This implements the extended example from the document showing Bob's reply
-bidirectional_after_offline_test() ->
+test_bidirectional_after_offline() ->
     ?debugMsg("\n=== BIDIRECTIONAL AFTER OFFLINE TEST ==="),
 
     {AliceState0, BobState0, _SharedRootKey} = setup_alice_bob_session(),
@@ -525,12 +525,178 @@ bidirectional_after_offline_test() ->
     ?debugMsg("SUCCESS: Bidirectional communication after offline completed").
 
 %%%===================================================================
+%%% Session Reset Detection Tests (Implicit - Signal Protocol Style)
+%%%===================================================================
+
+%% @doc Test session reset detection when one party loses session state
+%% This implements the implicit detection based on ratchet state:
+%% - Admin and Bob establish bidirectional session
+%% - Bob deletes his session (simulating state loss)
+%% - Bob sends fresh X3DH message (only option without session)
+%% - Admin receives X3DH while in bidirectional state (unexpected)
+%% - Admin implicitly detects reset, terminates old session, initializes new one
+%% - Communication resumes successfully
+test_session_reset_implicit_detection() ->
+    ?debugMsg("\n=== SESSION RESET IMPLICIT DETECTION TEST ==="),
+
+    %% Phase 1: Establish bidirectional session between Admin and Bob
+    ?debugMsg("Phase 1: Establishing bidirectional session"),
+    {AdminState0, BobState0, _SharedRootKey} = setup_alice_bob_session(),
+
+    %% Exchange messages to reach bidirectional state
+    AdminMsg1 = <<"Admin: Hello Bob, are you there?">>,
+    {ok, EncAdminMsg1, AdminState1} = cryptic_double_ratchet:encrypt_message(
+        AdminMsg1, AdminState0
+    ),
+    {ok, _DecAdminMsg1, BobState1} = cryptic_double_ratchet:decrypt_message(
+        EncAdminMsg1, BobState0
+    ),
+
+    BobReply1 = <<"Bob: Yes, I'm here!">>,
+    {ok, EncBobReply1, BobState2} = cryptic_double_ratchet:encrypt_message(
+        BobReply1, BobState1
+    ),
+    {ok, _DecBobReply1, AdminState2} = cryptic_double_ratchet:decrypt_message(
+        EncBobReply1, AdminState1
+    ),
+
+    %% Verify both are in bidirectional state
+    AdminInfo1 = cryptic_double_ratchet:get_state_info(AdminState2),
+    BobInfo1 = cryptic_double_ratchet:get_state_info(BobState2),
+    ?assert(
+        maps:get(sending_chain_active, AdminInfo1) andalso
+        maps:get(receiving_chain_active, AdminInfo1),
+        "Admin should be in bidirectional state"
+    ),
+    ?assert(
+        maps:get(sending_chain_active, BobInfo1) andalso
+        maps:get(receiving_chain_active, BobInfo1),
+        "Bob should be in bidirectional state"
+    ),
+    ?debugFmt("Admin state: send_active=~p, recv_active=~p, dh_step=~p~n", [
+        maps:get(sending_chain_active, AdminInfo1),
+        maps:get(receiving_chain_active, AdminInfo1),
+        maps:get(dh_ratchet_step, AdminInfo1)
+    ]),
+    ?debugFmt("Bob state: send_active=~p, recv_active=~p, dh_step=~p~n", [
+        maps:get(sending_chain_active, BobInfo1),
+        maps:get(receiving_chain_active, BobInfo1),
+        maps:get(dh_ratchet_step, BobInfo1)
+    ]),
+
+    %% Phase 2: Bob loses his session state (simulated by dropping BobState2)
+    ?debugMsg("Phase 2: Bob loses session state (simulating file deletion)"),
+    %% Bob's session is now undefined - he must reinitialize with X3DH
+
+    %% Phase 3: Bob sends fresh X3DH message (only option without session)
+    ?debugMsg("Phase 3: Bob sends fresh X3DH message to reinitialize"),
+    %% Create new X3DH session for Bob (fresh root key, new DH keys)
+    NewSharedRootKey = crypto:strong_rand_bytes(32),
+    {NewBobDHPub, NewBobDHPriv} = cryptic_nif:gen_keypair(),
+    {NewAdminDHPub, _NewAdminDHPriv} = cryptic_nif:gen_keypair(),
+
+    %% Bob initializes as sender with fresh X3DH
+    {ok, FreshBobState0} = cryptic_double_ratchet:init_sender(
+        NewSharedRootKey, {NewBobDHPub, NewBobDHPriv}
+    ),
+    FreshBobState = cryptic_double_ratchet:set_remote_dh_key(
+        FreshBobState0, NewAdminDHPub
+    ),
+
+    %% Bob encrypts a message with fresh X3DH session
+    BobFreshMsg = <<"Bob: Sorry, I had to reinitialize">>,
+    {ok, EncBobFreshMsg, FreshBobState1} = cryptic_double_ratchet:encrypt_message(
+        BobFreshMsg, FreshBobState
+    ),
+
+    %% Verify this is an X3DH-style initial message (msg_number=0, dh_step=0)
+    ?assertEqual(0, maps:get(msg_number, EncBobFreshMsg), 
+                "Bob's fresh message should be msg_number=0"),
+    ?debugFmt("Bob's fresh X3DH message: msg_number=~p, dh_step=~p~n", [
+        maps:get(msg_number, EncBobFreshMsg),
+        maps:get(dh_step, EncBobFreshMsg)
+    ]),
+
+    %% Phase 4: Admin receives X3DH while in bidirectional state
+    %% This is the KEY DETECTION POINT - Admin implicitly detects session reset
+    ?debugMsg("Phase 4: Admin receives X3DH while in bidirectional state"),
+    ?debugMsg("         IMPLICIT DETECTION: Admin should recognize peer reinitialized"),
+
+    %% In the real implementation, cryptic_engine:handle_x3dh_message_async/3
+    %% would detect this scenario by checking:
+    %% - Current ratchet state is 'bidirectional' (unexpected for X3DH)
+    %% - This triggers terminate_session_with_peer/3
+    %% - Then initialize_receiver_session_from_x3dh/3 creates fresh session
+
+    %% Simulate the detection logic here:
+    CurrentAdminState = AdminState2,
+    CurrentAdminInfo = cryptic_double_ratchet:get_state_info(CurrentAdminState),
+    IsBidirectional = maps:get(sending_chain_active, CurrentAdminInfo) andalso
+                      maps:get(receiving_chain_active, CurrentAdminInfo),
+    
+    ?assert(IsBidirectional, 
+            "Admin MUST be in bidirectional state to trigger implicit reset detection"),
+    ?debugMsg("DETECTED: Receiving X3DH while in bidirectional state = session reset!"),
+
+    %% Phase 5: Admin terminates old session and initializes new one
+    ?debugMsg("Phase 5: Admin terminates old session and initializes new receiver session"),
+    %% In real code: terminate_session_with_peer would stop ratchet engine, clear memory, delete file
+    %% Here we simulate by creating a fresh receiver session for Admin
+
+    {ok, FreshAdminState0} = cryptic_double_ratchet:init_receiver(
+        NewSharedRootKey, {NewAdminDHPub, _NewAdminDHPriv}
+    ),
+    FreshAdminState = cryptic_double_ratchet:set_remote_dh_key(
+        FreshAdminState0, NewBobDHPub
+    ),
+
+    %% Admin decrypts Bob's fresh X3DH message with new session
+    {ok, DecBobFreshMsg, FreshAdminState1} = cryptic_double_ratchet:decrypt_message(
+        EncBobFreshMsg, FreshAdminState
+    ),
+    ?assertEqual(BobFreshMsg, DecBobFreshMsg, 
+                "Admin should decrypt Bob's fresh message with new session"),
+    ?debugMsg("SUCCESS: Admin decrypted fresh X3DH message with new session"),
+
+    %% Phase 6: Admin replies with new session keys
+    ?debugMsg("Phase 6: Admin replies using new session (Bob can now decrypt)"),
+    AdminReply = <<"Admin: No problem, session reestablished">>,
+    {ok, EncAdminReply, FreshAdminState2} = cryptic_double_ratchet:encrypt_message(
+        AdminReply, FreshAdminState1
+    ),
+
+    %% Bob decrypts Admin's reply with new session keys
+    {ok, DecAdminReply, FreshBobState2} = cryptic_double_ratchet:decrypt_message(
+        EncAdminReply, FreshBobState1
+    ),
+    ?assertEqual(AdminReply, DecAdminReply, 
+                "Bob should decrypt Admin's reply with new session"),
+    ?debugMsg("SUCCESS: Bob decrypted Admin's reply with new session keys"),
+
+    %% Phase 7: Verify bidirectional communication is restored
+    ?debugMsg("Phase 7: Verifying bidirectional communication is restored"),
+    BobFinalMsg = <<"Bob: Great, we're back in sync!">>,
+    {ok, EncBobFinalMsg, _FreshBobState3} = cryptic_double_ratchet:encrypt_message(
+        BobFinalMsg, FreshBobState2
+    ),
+    {ok, DecBobFinalMsg, _FreshAdminState3} = cryptic_double_ratchet:decrypt_message(
+        EncBobFinalMsg, FreshAdminState2
+    ),
+    ?assertEqual(BobFinalMsg, DecBobFinalMsg, 
+                "Bidirectional communication should work with new session"),
+
+    ?debugMsg("SUCCESS: Session reset with implicit detection completed"),
+    ?debugMsg("         - Admin detected unexpected X3DH in bidirectional state"),
+    ?debugMsg("         - Old session terminated, fresh session initialized"),
+    ?debugMsg("         - Communication resumed successfully").
+
+%%%===================================================================
 %%% Session State Persistence Tests
 %%%===================================================================
 
 %% @doc Test session state persistence as described in the document
 %% Verifies that Bob's session state contains all necessary components
-session_state_persistence_test() ->
+test_session_state_persistence() ->
     ?debugMsg("\n=== SESSION STATE PERSISTENCE TEST ==="),
 
     {AliceState0, BobState0, _SharedRootKey} = setup_alice_bob_session(),
@@ -618,7 +784,7 @@ session_state_persistence_test() ->
 
 %% @doc Test message key derivation along the chain as described in the document
 %% Verifies MK = KDF(CK), CK' = KDF'(CK) behavior
-message_key_derivation_test() ->
+test_message_key_derivation() ->
     ?debugMsg("\n=== MESSAGE KEY DERIVATION TEST ==="),
 
     {AliceState0, _BobState0, _SharedRootKey} = setup_alice_bob_session(),
@@ -701,13 +867,15 @@ force_alice_dh_ratchet_step(AliceState) ->
 double_ratchet_scenarios_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"Bob offline, Alice sends messages (DOUBLE_RATCHET_DETAILS.md Steps 1-4)",
-            fun bob_offline_alice_sends_messages_test/0},
+            fun test_bob_offline_alice_sends_messages/0},
         {"Extended offline with multiple ratchets",
-            fun extended_offline_with_multiple_ratchets_test/0},
+            fun test_extended_offline_with_multiple_ratchets/0},
         {"Out-of-order delivery with ratchet",
-            fun out_of_order_delivery_with_ratchet_test/0},
+            fun test_out_of_order_delivery_with_ratchet/0},
         {"Bidirectional communication after offline",
-            fun bidirectional_after_offline_test/0},
-        {"Session state persistence", fun session_state_persistence_test/0},
-        {"Message key derivation uniqueness", fun message_key_derivation_test/0}
+            fun test_bidirectional_after_offline/0},
+        {"Session reset with implicit detection (Signal Protocol style)",
+            fun test_session_reset_implicit_detection/0},
+        {"Session state persistence", fun test_session_state_persistence/0},
+        {"Message key derivation uniqueness", fun test_message_key_derivation/0}
     ]}.
