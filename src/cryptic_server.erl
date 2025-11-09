@@ -716,7 +716,7 @@ extract_gpg_from_san(SANValues) ->
     case lists:foldl(
         fun
             ({dNSName, DNSName}, Acc) ->
-                case binary:split(list_to_binary(DNSName), <<".">>) of
+                case binary:split(list_to_binary(DNSName), <<".">>, [global]) of
                     [GpgFp, <<"gpg">>, <<"cryptic">>, <<"local">>] 
                         when byte_size(GpgFp) =:= 40 ->
                         %% Found it! GPG fingerprint is 40 hex characters
@@ -768,11 +768,11 @@ verify_gpg_and_cert(GpgFp, OtpCert) ->
                                                 {error, {unknown_cert_status, _Other}}
                                         end;
                                     {error, not_found} ->
-                                        %% Certificate not in database - this shouldn't happen
-                                        %% but we'll allow it for backward compatibility
-                                        ?warning("Certificate ~s not found in database for user ~s", 
+                                        %% Certificate not in database - reject connection
+                                        %% All certificates issued by our CA should be in the database
+                                        ?error("Certificate ~s not found in database for user ~s - rejecting connection", 
                                                 [Serial, GpgFp]),
-                                        {ok, active};
+                                        {error, cert_not_in_database};
                                     {error, CertError} ->
                                         {error, {cert_lookup_failed, CertError}}
                                 end;

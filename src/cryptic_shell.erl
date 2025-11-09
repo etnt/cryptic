@@ -1218,23 +1218,25 @@ print_list_users_response(Response) ->
             io:format("\r\n"),
             lists:foreach(fun(User) ->
                 GpgFp = maps:get(<<"gpg_fp">>, User, <<"unknown">>),
+                Username = maps:get(<<"username">>, User, <<"unknown">>),
                 Status = maps:get(<<"status">>, User, <<"unknown">>),
                 RegisteredBy = maps:get(<<"registered_by">>, User, <<"unknown">>),
                 RegisteredAt = maps:get(<<"registered_at">>, User, 0),
                 LastSeen = maps:get(<<"last_seen">>, User, 0),
                 Metadata = maps:get(<<"metadata">>, User, #{}),
-                
+
                 %% Format timestamps
                 RegTime = calendar:system_time_to_rfc3339(RegisteredAt, [{unit, second}, {offset, "Z"}]),
                 LastSeenTime = calendar:system_time_to_rfc3339(LastSeen, [{unit, second}, {offset, "Z"}]),
-                
+
                 %% Print user details
                 io:format("  GPG Fingerprint: ~s\r\n", [GpgFp]),
+                io:format("    Username:      ~s\r\n", [Username]),
                 io:format("    Status:        ~s\r\n", [Status]),
                 io:format("    Registered by: ~s\r\n", [RegisteredBy]),
                 io:format("    Registered at: ~s\r\n", [RegTime]),
                 io:format("    Last seen:     ~s\r\n", [LastSeenTime]),
-                
+
                 %% Print metadata if present
                 case maps:size(Metadata) of
                     0 -> ok;
@@ -2215,17 +2217,6 @@ print_admin_help() ->
         ) ++ "\r\n\r\n"
     ),
 
-    io:format(?BOLD(?FG_CYAN("Description:")) ++ "\r\n"),
-    io:format(
-        "  Admin commands allow you to manage user registrations via GPG\r\n"
-    ),
-    io:format(
-        "  public keys. Users send their GPG public keys, and admins\r\n"
-    ),
-    io:format(
-        "  register them to grant access to the Cryptic server.\r\n\r\n"
-    ),
-
     io:format(?BOLD(?FG_CYAN("Commands:")) ++ "\r\n"),
     io:format(
         ?BOLD(
@@ -2267,27 +2258,6 @@ print_admin_help() ->
     ),
 
     io:format("\r\n"),
-    io:format(?BOLD(?FG_CYAN("User Registration Workflow:")) ++ "\r\n"),
-    io:format(
-        ?BOLD(
-            "─────────────────────────────────────────────────────────────────"
-        ) ++ "\r\n"
-    ),
-    io:format("  1. New user exports GPG public key:\r\n"),
-    io:format(
-        ?FG_YELLOW("     $ cryptic-onboard export-gpg > bob.asc") ++ "\r\n"
-    ),
-    io:format("  2. User sends bob.asc to admin (email, etc.)\r\n"),
-    io:format("  3. Admin registers user:\r\n"),
-    io:format(
-        ?FG_YELLOW("     > admin register ABCD1234... bob.asc") ++ "\r\n"
-    ),
-    io:format("  4. User can now request certificate:\r\n"),
-    io:format(
-        ?FG_YELLOW("     $ cryptic-onboard request https://server:8443") ++ "\r\n"
-    ),
-
-    io:format("\r\n"),
     io:format(?BOLD(?FG_CYAN("Usage Examples:")) ++ "\r\n"),
     io:format(
         ?BOLD(
@@ -2295,32 +2265,32 @@ print_admin_help() ->
         ) ++ "\r\n"
     ),
     io:format(
-        ?FG_YELLOW("  admin register ABCD1234...BEEF alice.asc --note \"Alice from Sales\"") ++
+        ?FG_YELLOW("  admin register ABCD1234... alice.asc --note \"Alice from Sales\"") ++
             "\r\n"
     ),
     io:format(
-        ?FG_YELLOW("  :ar ABCD1234...BEEF alice.asc") ++
-            "  # Quick register\r\n"
+        ?FG_YELLOW("  :ar ABCD1234... alice.asc") ++
+            "          # Quick register\r\n"
     ),
     io:format(
         ?FG_YELLOW("  admin list") ++
             "                         # List all users\r\n"
     ),
     io:format(
-        ?FG_YELLOW("  admin status ABCD1234...BEEF") ++
-            "       # Check user status\r\n"
+        ?FG_YELLOW("  admin status ABCD1234...") ++
+            "           # Check user status\r\n"
     ),
     io:format(
-        ?FG_YELLOW("  admin suspend ABCD1234...BEEF") ++
-            "      # Temporarily suspend\r\n"
+        ?FG_YELLOW("  admin suspend ABCD1234...") ++
+            "          # Temporarily suspend\r\n"
     ),
     io:format(
-        ?FG_YELLOW("  admin certs ABCD1234...BEEF") ++
-            "        # List certificates\r\n"
+        ?FG_YELLOW("  admin certs ABCD1234...") ++
+            "            # List certificates\r\n"
     ),
     io:format(
         ?FG_YELLOW("  admin revoke-cert 4F3A2B1C") ++
-            "        # Revoke certificate\r\n"
+            "         # Revoke certificate\r\n"
     ).
 
 

@@ -156,12 +156,44 @@ main(InitCfg) ->
     CertCfg = get_cert_config(InitCfg),
 
     %% Start WebSocket client
+    %% Temporarily suppress crash reports to avoid ugly output for connection errors
+    %% We suppress both SASL and the logger to prevent crash dumps
+    OldSASL = application:get_env(sasl, sasl_error_logger, tty),
+    application:set_env(sasl, sasl_error_logger, false),
+
+    %% Get current logger level and set to emergency (suppresses most output)
+    OldLoggerLevel = logger:get_primary_config(),
+    OldLevel = maps:get(level, OldLoggerLevel, notice),
+    logger:set_primary_config(level, emergency),
+
     WsCfg = CertCfg#{callback_mod => ?MODULE},
     WsClientPid =
         try cryptic_ws_client:start_link(WsCfg) of
             {ok, _WsClientPid} ->
+                %% Restore logging
+                application:set_env(sasl, sasl_error_logger, OldSASL),
+                logger:set_primary_config(level, OldLevel),
                 _WsClientPid;
+            {error, {connection_failed, Reason}} ->
+                %% Restore logging
+                application:set_env(sasl, sasl_error_logger, OldSASL),
+                logger:set_primary_config(level, OldLevel),
+                %% Connection failed during init - format error nicely
+                ErrorMsg = format_connection_error(Reason),
+                cryptic_shell:print_error(ErrorMsg),
+                halt(1);
+            {error, {bad_return_value, {stop, {connection_failed, Reason}}}} ->
+                %% Restore logging
+                application:set_env(sasl, sasl_error_logger, OldSASL),
+                logger:set_primary_config(level, OldLevel),
+                %% Format TLS/connection errors nicely (older format)
+                ErrorMsg = format_connection_error(Reason),
+                cryptic_shell:print_error(ErrorMsg),
+                halt(1);
             _Error ->
+                %% Restore logging
+                application:set_env(sasl, sasl_error_logger, OldSASL),
+                logger:set_primary_config(level, OldLevel),
                 cryptic_shell:print_error(
                     "Failed to start WebSocket client: " ++
                         lists:flatten(io_lib:format("~p~n", [_Error]))
@@ -169,6 +201,9 @@ main(InitCfg) ->
                 halt(1)
         catch
             error:Reason ->
+                %% Restore logging
+                application:set_env(sasl, sasl_error_logger, OldSASL),
+                logger:set_primary_config(level, OldLevel),
                 cryptic_shell:print_error(
                     "Failed to start WebSocket client: " ++
                         lists:flatten(io_lib:format("~p~n", [Reason]))
@@ -297,6 +332,28 @@ get_passphrase() ->
             ),
             halt(1)
     end.
+
+%% @doc Format connection errors in a user-friendly way
+-spec format_connection_error(term()) -> string().
+format_connection_error({down, {shutdown, {tls_alert, {handshake_failure, Msg}}}}) ->
+    %% TLS handshake failure - likely certificate rejected
+    case string:find(Msg, "Handshake Failure") of
+        nomatch -> 
+            "Connection failed: TLS handshake error - " ++ Msg;
+        _ ->
+            "Connection rejected: Your certificate has been revoked or is invalid.\n\r" ++
+            "Request a new certificate via the cryptic-onboarding script,\n\r" ++
+            "or contact your administrator for a new certificate."
+    end;
+format_connection_error({down, {shutdown, {tls_alert, {Alert, Msg}}}}) ->
+    %% Other TLS alerts
+    AlertStr = atom_to_list(Alert),
+    "Connection failed: TLS alert (" ++ AlertStr ++ "): " ++ Msg ++ "\n\r";
+format_connection_error({down, {shutdown, Reason}}) ->
+    "Connection failed during TLS handshake: " ++ 
+    lists:flatten(io_lib:format("~p", [Reason])) ++ "\n\r";
+format_connection_error(Reason) ->
+    "Connection failed: " ++ lists:flatten(io_lib:format("~p", [Reason])).
 
 %% @doc Setup event management
 -spec setup_event_management(Config :: map()) -> ok.

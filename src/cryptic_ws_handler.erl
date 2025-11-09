@@ -171,14 +171,17 @@
 %%          or {ok, Response, State} with 401 error for authentication failure
 init(Req, State) ->
     %%  Extract client certificate information during handshake
+    %% Note: Certificate revocation/expiration is already checked by the TLS layer
+    %% in cryptic_server:verify_peer/4, so by the time we reach this function,
+    %% the certificate has already been validated as active and not revoked.
     case get_client_identity(Req) of
         {ok, Username} ->
             ?info("Client ~s authenticated via certificate", [Username]),
-            
+
             %% Get database reference and peer certificate for admin operations
             {ok, DbRef} = application:get_env(cryptic, ca_db_ref),
             PeerCert = cowboy_req:cert(Req),
-            
+
             %% Extract GPG fingerprint from certificate for admin permission checks
             {GpgFp, Authenticated} =
                 case PeerCert of
@@ -199,7 +202,7 @@ init(Req, State) ->
                                 {_Fp = undefined, _Authenticated = false}
                         end
                 end,
-            
+
             {cowboy_websocket, Req, #{
                 username => Username,
                 gpg_fp => GpgFp,
@@ -770,7 +773,14 @@ handle_command(#{<<"type">> := <<"list_users">>} = Msg,
                          last_seen = LastSeen,
                          metadata = Meta
                         }) ->
+                          %% Look up username from certificates
+                          Username = case get_username_from_gpg_fp(DbRef, Fp) of
+                              {ok, Name} -> list_to_binary(Name);
+                              {error, not_found} -> <<"unknown">>
+                          end,
+                          
                           UserMap = #{gpg_fp => Fp,
+                                      username => Username,
                                       status => Status,
                                       registered_by => RegBy,
                                       registered_at => RegAt,
@@ -831,6 +841,8 @@ handle_command(#{<<"type">> := <<"get_user_info">>} = Command, _Username, State)
     handle_admin_command(get_user_info, Command, State);
 handle_command(#{<<"type">> := <<"list_certificates">>} = Command, _Username, State) ->
     handle_admin_command(list_certificates, Command, State);
+handle_command(#{<<"type">> := <<"revoke_certificate">>} = Command, _Username, State) ->
+    handle_admin_command(revoke_certificate, Command, State);
 
 handle_command(Command, Username, _State) ->
     ?debug("Unknown command from ~s: ~p", [Username, Command]),
@@ -1050,6 +1062,46 @@ execute_admin_command(list_certificates,
 
     end;
 execute_admin_command(list_certificates,
+                      _Command,
+                      #{authenticated := false}) ->
+    ErrorResp =
+        #{error => <<"unauthorized">>,
+          message => <<"Admin authentication required">>
+         },
+
+    {reply, ErrorResp};
+
+execute_admin_command(revoke_certificate,
+                      #{<<"serial">> := Serial,
+                        <<"reason">> := Reason},
+                      #{authenticated := true,
+                        gpg_fp := AdminFp,
+                        db_ref := DbRef}) ->
+    %% Revoke the certificate
+    case cryptic_ca_store:revoke_certificate(DbRef, Serial, AdminFp, Reason) of
+        ok ->
+            ?info("Admin ~s revoked certificate ~s: ~s", [AdminFp, Serial, Reason]),
+
+            Resp = #{
+                type => <<"revoke_certificate_response">>,
+                status => <<"success">>,
+                message => <<"Certificate revoked successfully">>,
+                serial => Serial,
+                reason => Reason
+            },
+            {reply, Resp};
+
+        {error, ErrorReason} ->
+            ?error("Failed to revoke certificate ~s: ~p", [Serial, ErrorReason]),
+            ErrorResp = #{
+                type => <<"revoke_certificate_response">>,
+                status => <<"error">>,
+                error => <<"revoke_failed">>,
+                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
+            },
+            {reply, ErrorResp}
+    end;
+execute_admin_command(revoke_certificate,
                       _Command,
                       #{authenticated := false}) ->
     ErrorResp =
@@ -1362,6 +1414,38 @@ terminate(_Reason, _Req, _State) ->
 %% -------------------------------------------------------------------
 %% H E L P E R S
 %% -------------------------------------------------------------------
+
+%% @doc Get username from GPG fingerprint by looking up certificates.
+%%
+%% Retrieves the most recent certificate for a GPG fingerprint and 
+%% extracts the username (CN) from it. This allows mapping from
+%% GPG fingerprint to human-readable username.
+%%
+%% @param DbRef Database connection reference
+%% @param GpgFp GPG fingerprint (binary)
+%% @returns {ok, Username} if found, {error, not_found} if no certificates
+-spec get_username_from_gpg_fp(term(), binary()) -> {ok, string()} | {error, not_found}.
+get_username_from_gpg_fp(DbRef, GpgFp) ->
+    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
+        {ok, [#certificate{cert_pem = CertPem} | _]} ->
+            %% Got at least one certificate, decode PEM and extract username
+            try
+                %% Decode PEM to DER
+                [{'Certificate', CertDER, not_encrypted}] = public_key:pem_decode(CertPem),
+                %% Extract username from certificate
+                case extract_username_from_cert(CertDER) of
+                    {ok, Username} -> {ok, Username};
+                    {error, _} -> {error, not_found}
+                end
+            catch
+                _:_ -> {error, not_found}
+            end;
+        {ok, []} ->
+            %% No certificates found
+            {error, not_found};
+        {error, _} ->
+            {error, not_found}
+    end.
 
 %% @doc Store identity keys for a user (5-step authentication flow).
 %%

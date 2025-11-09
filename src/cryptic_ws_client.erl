@@ -312,12 +312,17 @@ init({UIPid, Username, ServerHost, Config}) ->
                 key_file = Key,
                 ca_file = CA
             },
-            case connect_websocket(State) of
+            try connect_websocket(State) of
                 {ok, NewState} ->
                     {ok, NewState};
                 {error, Reason} ->
                     ?error("Failed to connect: ~p", [Reason]),
-                    {stop, {connection_failed, Reason}, State}
+                    %% Return {stop, Reason} (not {stop, Reason, State}) to avoid crash report
+                    {stop, {connection_failed, Reason}}
+            catch
+                Class:Error ->
+                    ?error("Exception during connect_websocket: ~p:~p", [Class, Error]),
+                    {stop, {connection_failed, {Class, Error}}}
             end
     end.
 
@@ -785,7 +790,7 @@ connect_websocket(State) ->
         ServerHost, State#state.server_port
     ]),
 
-    case gun:open(ServerHost, State#state.server_port, ConnOpts) of
+    try gun:open(ServerHost, State#state.server_port, ConnOpts) of
         {ok, ConnPid} ->
             ?info(
                 "Gun connection opened, awaiting TLS handshake (30s timeout)...",
@@ -813,6 +818,10 @@ connect_websocket(State) ->
         {error, Reason} ->
             ?error("Failed to open gun connection: ~p", [Reason]),
             {error, Reason}
+        catch
+            Class:Error ->
+                ?error("Exception during gun connection: ~p:~p", [Class, Error]),
+                {error, {Class, Error}}
     end.
 
 %% @private
@@ -849,7 +858,7 @@ dispatch_to_engine(ValidatedMessage, State) ->
         <<"csr_response">> -> true;
         _ -> false
     end,
-    
+
     case IsCAResponse of
         true ->
             %% Publish CA response to event bus for console
