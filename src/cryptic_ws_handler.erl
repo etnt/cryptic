@@ -180,19 +180,32 @@ init(Req, State) ->
             PeerCert = cowboy_req:cert(Req),
             
             %% Extract GPG fingerprint from certificate for admin permission checks
-            GpgFp = case PeerCert of
-                undefined -> undefined;
-                _ -> 
-                    case extract_gpg_from_cert_der(PeerCert) of
-                        {ok, Fp} -> Fp;
-                        {error, _} -> undefined
-                    end
-            end,
+            {GpgFp, Authenticated} =
+                case PeerCert of
+                    undefined -> undefined;
+                    _ ->
+                        case extract_gpg_from_cert_der(PeerCert) of
+                            {ok, Fp} ->
+                                case cryptic_ca_store:get_gpg_identity(DbRef,Fp)
+                                of
+                                    {ok, _Identity} ->
+                                        ?info("Authenticated with verified GPG"
+                                              " fingerprint: ~s", [Fp]),
+                                        {Fp, _Authenticated = true};
+                                    {error, _} ->
+                                        {Fp, _Authenticated=false}
+                                end;
+                            _ ->
+                                {_Fp = undefined, _Authenticated = false}
+                        end
+                end,
             
             {cowboy_websocket, Req, #{
                 username => Username,
                 gpg_fp => GpgFp,
-                db_ref => DbRef
+                db_ref => DbRef,
+                authenticated => Authenticated,
+                peer_cert => PeerCert
             }};
         {error, Reason} ->
             ?error("Client certificate authentication failed: ~p", [Reason]),
@@ -727,14 +740,84 @@ handle_command(
             },
             {reply, Response}
     end;
-handle_command(#{<<"type">> := <<"list_users">>}, _Username, _State) ->
-    Users = cryptic_lib:list_users(),
-    Response = #{
-        type => <<"users">>,
-        users => [list_to_binary(U) || U <- Users]
-    },
-    {reply, Response};
+handle_command(#{<<"type">> := <<"list_users">>} = Msg,
+               _Username,
+               #{authenticated := true,
+                 db_ref := DbRef} = _State) ->
+    case cryptic_ca_store:list_gpg_identities(DbRef) of
+        {ok, Identities} ->
+            %% Optional filter by status
+            FilteredIdentities =
+                case maps:get(<<"filter">>, Msg, undefined) of
+                    undefined -> Identities;
+                    FilterStatus ->
+                        lists:filter(
+                          fun(#gpg_identity{status = S}) ->
+                                  S =:= FilterStatus
+                          end,
+                          Identities
+                         )
+                end,
 
+            %% Convert to JSON-friendly format
+            Users =
+                lists:map(
+                  fun(#gpg_identity{
+                         gpg_fp = Fp,
+                         status = Status,
+                         registered_by = RegBy,
+                         registered_at = RegAt,
+                         last_seen = LastSeen,
+                         metadata = Meta
+                        }) ->
+                          UserMap = #{gpg_fp => Fp,
+                                      status => Status,
+                                      registered_by => RegBy,
+                                      registered_at => RegAt,
+                                      last_seen => LastSeen
+                                     },
+                          case Meta of
+                              undefined -> UserMap;
+                              _ ->
+                                  try
+                                      MetaMap = jsx:decode(Meta, [return_maps]),
+                                      UserMap#{metadata => MetaMap}
+                                  catch
+                                      _:_ -> UserMap
+                                  end
+                          end
+                  end,
+                  FilteredIdentities
+                 ),
+
+            SuccessResp = #{type => <<"list_users_response">>,
+                            status => <<"success">>,
+                            count => length(Users),
+                            users => Users
+                           },
+
+            {reply, SuccessResp};
+
+        {error, Reason} ->
+            ?error("Failed to list users: ~p", [Reason]),
+
+            ErrorResp =
+                #{type => <<"list_users_response">>,
+                  status => <<"error">>,
+                  error => <<"list_failed">>,
+                  message => iolist_to_binary(io_lib:format("~p", [Reason]))
+                 },
+
+            {reply, ErrorResp}
+    end;
+handle_command(#{<<"type">> := <<"list_users">>},
+               _Username,
+               #{authenticated := false} = _State) ->
+    ErrorResp =
+        jsx:encode(#{error => <<"unauthorized">>,
+                     message => <<"Authentication required">>
+                    }),
+    {reply, ErrorResp};
 %% Admin commands - require admin privileges
 handle_command(#{<<"type">> := <<"register_user">>} = Command, _Username, State) ->
     handle_admin_command(register_user, Command, State);
@@ -746,6 +829,8 @@ handle_command(#{<<"type">> := <<"reactivate_user">>} = Command, _Username, Stat
     handle_admin_command(reactivate_user, Command, State);
 handle_command(#{<<"type">> := <<"get_user_info">>} = Command, _Username, State) ->
     handle_admin_command(get_user_info, Command, State);
+handle_command(#{<<"type">> := <<"list_certificates">>} = Command, _Username, State) ->
+    handle_admin_command(list_certificates, Command, State);
 
 handle_command(Command, Username, _State) ->
     ?debug("Unknown command from ~s: ~p", [Username, Command]),
@@ -851,30 +936,128 @@ execute_admin_command(reactivate_user, #{
             }}
     end;
 
-execute_admin_command(get_user_info, #{
-    <<"gpg_fp">> := UserGpgFp
-}, #{db_ref := DbRef}) ->
-    case cryptic_ca_store:get_gpg_identity(DbRef, UserGpgFp) of
-        {ok, Identity} ->
-            {reply, #{
-                type => <<"user_info">>,
-                gpg_fp => Identity#gpg_identity.gpg_fp,
-                status => Identity#gpg_identity.status,
-                registered_by => Identity#gpg_identity.registered_by,
-                registered_at => Identity#gpg_identity.registered_at,
-                last_seen => Identity#gpg_identity.last_seen
-            }};
+execute_admin_command(get_user_info,
+                      #{<<"gpg_fp">> := GpgFp},
+                      #{authenticated := true,
+                        db_ref := DbRef}) ->
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, #gpg_identity{
+                status = Status,
+                registered_by = RegBy,
+                registered_at = RegAt,
+                last_seen = LastSeen,
+                metadata = Meta
+               }} ->
+            UserInfo = #{gpg_fp => GpgFp,
+                         status => Status,
+                         registered_by => RegBy,
+                         registered_at => RegAt,
+                         last_seen => LastSeen
+                        },
+
+            UserInfoWithMeta =
+                case Meta of
+                    undefined -> UserInfo;
+                    _ ->
+                        try
+                            MetaMap = jsx:decode(Meta, [return_maps]),
+                            UserInfo#{metadata => MetaMap}
+                        catch
+                            _:_ -> UserInfo
+                        end
+                end,
+
+            SuccessResp =
+                #{type => <<"get_user_info_response">>,
+                  status => <<"success">>,
+                  user => UserInfoWithMeta
+                 },
+
+            {reply, SuccessResp};
+
         {error, not_found} ->
-            {reply, #{
-                error => <<"user_not_found">>,
-                message => <<"User not registered">>
-            }};
+            ErrorResp =
+                #{type => <<"get_user_info_response">>,
+                  status => <<"error">>,
+                  error => <<"user_not_found">>,
+                  message => <<"GPG fingerprint not registered">>
+                 },
+
+            {reply, ErrorResp};
+
         {error, Reason} ->
-            {reply, #{
-                error => <<"query_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
-            }}
+            ?error("Failed to get user info for ~s: ~p", [GpgFp, Reason]),
+
+            ErrorResp =
+                #{type => <<"get_user_info_response">>,
+                  status => <<"error">>,
+                  error => <<"query_failed">>,
+                  message => iolist_to_binary(io_lib:format("~p", [Reason]))
+                 },
+
+            {reply, ErrorResp}
     end;
+execute_admin_command(get_user_info,
+                      _Command,
+                      #{authenticated := false}) ->
+    ErrorResp =
+        #{error => <<"invalid_request">>,
+          message => <<"Not GPG authenticated">>
+         },
+
+    {reply, ErrorResp};
+
+execute_admin_command(list_certificates,
+                      #{<<"gpg_fp">> := GpgFp},
+                      #{authenticated := true,
+                        db_ref := DbRef}) ->
+    %% List all certificates for the user
+    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
+        {ok, Certs} ->
+            CertList =
+                lists:map(
+                  fun(Cert) ->
+                          #{serial => Cert#certificate.serial,
+                            issued_at => Cert#certificate.issued_at,
+                            expires_at => Cert#certificate.expires_at,
+                            status => Cert#certificate.status,
+                            revoked_at => Cert#certificate.revoked_at,
+                            revoked_by => Cert#certificate.revoked_by,
+                            revoked_reason => Cert#certificate.revoked_reason
+                           }
+                  end, Certs),
+
+            Resp = #{type => <<"list_certificates_response">>,
+                     status => <<"success">>,
+                     gpg_fp => GpgFp,
+                     certificates => CertList,
+                     count => length(Certs)
+                    },
+
+            {reply, Resp};
+
+        {error, ErrorReason} ->
+            ?error("Failed to list certificates for ~s: ~p", [GpgFp, ErrorReason]),
+
+            ErrorResp =
+                #{type => <<"list_certificates_response">>,
+                  status => <<"error">>,
+                  error => <<"list_failed">>,
+                  message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
+                 },
+
+            {reply, ErrorResp}
+
+    end;
+execute_admin_command(list_certificates,
+                      _Command,
+                      #{authenticated := false}) ->
+    ErrorResp =
+        #{error => <<"unauthorized">>,
+          message => <<"Admin authentication required">>
+         },
+
+    {reply, ErrorResp};
 
 execute_admin_command(CommandType, _Command, _State) ->
     {reply, #{
