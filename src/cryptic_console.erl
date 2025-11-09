@@ -1286,13 +1286,25 @@ display_user_message(FromUsername, Message, Timestamp) ->
 
 %% @doc Display an async message without disrupting the prompt
 display_system_message(Message) ->
-    %% Clear current line and print system message
-    io:format("\r\n"),
-    cryptic_shell:print_info(binary_to_list(Message)),
-    %% Force flush output streams
-    io:format("~s", [""]),
-    %% Longer delay to ensure terminal has processed all ANSI sequences
-    timer:sleep(100).
+    %% Suppress certain expected error messages
+    ShouldSuppress = case binary:match(Message, <<"user not found">>) of
+        nomatch -> false;
+        _ -> true
+    end,
+
+    case ShouldSuppress of
+        true ->
+            %% Silently ignore "user not found" - expected when recipient isn't registered
+            ok;
+        false ->
+            %% Clear current line and print system message
+            io:format("\r\n"),
+            cryptic_shell:print_info(binary_to_list(Message)),
+            %% Force flush output streams
+            io:format("~s", [""]),
+            %% Longer delay to ensure terminal has processed all ANSI sequences
+            timer:sleep(100)
+    end.
 
 display_ca_response(Response) ->
     %% Delegate to cryptic_shell for proper formatting
@@ -1341,8 +1353,18 @@ display_websocket_message(#{<<"type">> := <<"message">>}) ->
 display_websocket_message(#{<<"type">> := <<"key_bundle">>}) ->
     %% Suppress key bundle messages - internal protocol data for key exchange
     ok;
+display_websocket_message(#{<<"type">> := <<"error">>, <<"message">> := <<"key-bundle-not-found">>}) ->
+    %% Silently ignore key-bundle-not-found - recipient hasn't uploaded keys yet
+    %% Message will be queued and delivered when they come online
+    ok;
 display_websocket_message(#{<<"type">> := <<"error">>, <<"message">> := ErrorMsg, <<"success">> := false}) ->
     %% Handle error messages from server
+    io:format("\r\n"),
+    cryptic_shell:print_error("Server error: " ++ binary_to_list(ErrorMsg)),
+    io:format("~s", [""]),
+    timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"error">>, <<"message">> := ErrorMsg}) ->
+    %% Handle error messages without success field
     io:format("\r\n"),
     cryptic_shell:print_error("Server error: " ++ binary_to_list(ErrorMsg)),
     io:format("~s", [""]),
@@ -1355,6 +1377,9 @@ display_websocket_message(#{<<"type">> := <<"user_registered">>, <<"gpg_fp">> :=
     io:format("  Registered by:   " ++ ?FG_YELLOW(binary_to_list(RegisteredBy)) ++ "\r\n"),
     io:format("~s", [""]),
     timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"welcome">>}) ->
+    %% Silently handle welcome message - already shown during connection
+    ok;
 display_websocket_message(Message) ->
     %% Generic handler for other websocket messages
     io:format("\r\n"),
@@ -1570,9 +1595,6 @@ execute_admin_revoke_cert(Serial, State) ->
             end
     end.
 
-%%====================================================================
-%% Invite Command Execution (Legacy - Deprecated - Removed)
-%%====================================================================
 
 %%%===================================================================
 %%% Certificate Command Implementations
@@ -1585,10 +1607,10 @@ execute_cert_status(State) ->
     ServerHost = State#console_state.server_host,
     ServerPort = State#console_state.server_port,
     CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
-    
+
     CertFile = CrypticDir ++ "/certificates/" ++ Username ++ ".crt",
     KeyFile = CrypticDir ++ "/certificates/" ++ Username ++ ".key",
-    
+
     %% Check if files exist
     case {filelib:is_file(CertFile), filelib:is_file(KeyFile)} of
         {true, true} ->
@@ -1600,7 +1622,7 @@ execute_cert_status(State) ->
     end.
 
 %% @doc Display certificate status information
-display_certificate_status(CertFile, KeyFile, State) ->
+display_certificate_status(CertFile, KeyFile, _State) ->
     %% Read certificate using OpenSSL command
     SerialCmd = "openssl x509 -in " ++ CertFile ++ " -noout -serial 2>/dev/null",
     ExpiryCmd = "openssl x509 -in " ++ CertFile ++ " -noout -enddate 2>/dev/null",
@@ -1611,7 +1633,7 @@ display_certificate_status(CertFile, KeyFile, State) ->
     Expiry = string:trim(os:cmd(ExpiryCmd)),
     Subject = string:trim(os:cmd(SubjectCmd)),
     SANRaw = string:trim(os:cmd(SANCmd)),
-    
+
     %% Parse SAN output to extract DNS names
     SAN = case SANRaw of
         "" -> undefined;
@@ -1624,42 +1646,28 @@ display_certificate_status(CertFile, KeyFile, State) ->
                 _ -> undefined
             end
     end,
-    
-    %% Use the new formatted print function
-    cryptic_shell:print_cert_status(Serial, Expiry, Subject, SAN, {CertFile, KeyFile}),
-    
-    %% Also query server for GPG status if connected
-    case State#console_state.ws_client_pid of
-        undefined ->
-            ok;
-        WsPid ->
-            {ok, Msg} = cryptic_messages:cert_status_query(),
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    ok;
-                {error, _Reason} ->
-                    ok
-            end
-    end.
+
+    cryptic_shell:print_cert_status(Serial, Expiry, Subject, SAN, {CertFile, KeyFile}).
+
 
 %% @doc Execute cert renew command
 execute_cert_renew(Opts, State) ->
     Force = maps:get(force, Opts, false),
     NewKey = maps:get(new_key, Opts, false),
-    
+
     cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
     cryptic_shell:print_info("Certificate Renewal"),
     cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-    
+
     %% Get paths
     Username = binary_to_list(State#console_state.username),
     ServerHost = State#console_state.server_host,
     ServerPort = State#console_state.server_port,
     CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
-    
+
     KeyFile = CrypticDir ++ "/certificates/" ++ Username ++ ".key",
     CSRFile = CrypticDir ++ "/certificates/" ++ Username ++ ".csr",
-    
+
     %% Step 1: Generate new key if requested
     case NewKey of
         true ->
@@ -1678,27 +1686,27 @@ execute_cert_renew(Opts, State) ->
                     throw({error, key_not_found})
             end
     end,
-    
+
     %% Step 2: Create CSR
     cryptic_shell:print_info("[2/4] Creating Certificate Signing Request..."),
-    
+
     %% Get GPG fingerprint from config (would need to be stored)
     GPG_FP = "PLACEHOLDER_FP",  %% TODO: Store this during registration
     SubjectStr = "/CN=" ++ GPG_FP ++ "@" ++ ServerHost,
-    
+
     GenCSRCmd = "openssl req -new -key " ++ KeyFile ++ 
                 " -subj \"" ++ SubjectStr ++ "\" -out " ++ CSRFile ++ " 2>/dev/null",
     os:cmd(GenCSRCmd),
     cryptic_shell:print_success("CSR created"),
-    
+
     %% Step 3: Sign CSR with GPG
     cryptic_shell:print_info("[3/4] Signing CSR with GPG key..."),
     cryptic_shell:print_warning("GPG signing not yet implemented"),
     %% TODO: Sign CSR with GPG key
-    
+
     %% Step 4: Send renewal request
     cryptic_shell:print_info("[4/4] Requesting certificate renewal..."),
-    
+
     case State#console_state.ws_client_pid of
         undefined ->
             cryptic_shell:print_error("Not connected to server");
@@ -1727,7 +1735,7 @@ execute_cert_renew(Opts, State) ->
                     )
             end
     end,
-    
+
     cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").
 
 %% @doc Cleanup resources
