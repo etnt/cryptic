@@ -63,6 +63,13 @@
 %% The function accepts both binary and string input and always returns
 %% a string with embedded ANSI escape sequences.
 %%
+%% Processing order: backticks are processed first and their content is
+%% protected from further processing (true verbatim). Then emoji replacement
+%% and markdown formatting (asterisks/underscores) are applied only to text
+%% segments, not code segments.
+%%
+%% Unpaired markers (start without end) are left unchanged in the output.
+%%
 %% @param Input The text to process (binary or string with Unicode support)
 %% @returns A string with markdown converted to ANSI formatting codes
 %%
@@ -70,12 +77,27 @@
 -spec process(binary() | string()) -> string().
 process(Input) ->
     Str = to_string(Input),
-    %% Process in order: backticks first (to avoid conflict with other markers),
-    %% then asterisks, then underscores
-    Str1 = process_backticks(Str),
-    Str2 = process_asterisks(Str1),
-    Str3 = process_underscores(Str2),
-    Str3.
+    %% Process backticks first, protecting content from further processing
+    %% Returns a list of {text, Text} | {code, Text} segments
+    Segments = process_backticks_segments(Str),
+    %% Process emoji, asterisks and underscores only on text segments
+    FinalSegments = lists:map(fun
+        ({code, CodeText}) -> 
+            %% Code segments are verbatim - already formatted, no further processing
+            %% This means emoji shortcuts like :) inside backticks stay literal
+            CodeText;
+        ({text, PlainText}) -> 
+            %% Text segments get emoji replacement first, then bold/italic processing
+            %% Convert to binary for emoji processing
+            PlainBin = unicode:characters_to_binary(PlainText),
+            EmojiText = cryptic_emoji:replace_all(PlainBin),
+            %% Convert back to string for markdown formatting
+            EmojiStr = unicode:characters_to_list(EmojiText),
+            Text1 = process_asterisks(EmojiStr),
+            Text2 = process_underscores(Text1),
+            Text2
+    end, Segments),
+    lists:flatten(FinalSegments).
 
 %% @private
 %% @doc Convert input to Unicode string format.
@@ -86,10 +108,64 @@ to_string(Str) when is_list(Str) ->
     Str.
 
 %% @private
-%% @doc Process backtick markers into reverse video formatting.
-%% Converts text enclosed in backticks to ANSI reverse video (code style).
-process_backticks(Str) ->
-    process_pattern(Str, $`, fun(Text) -> ?REVERSE(Text) end).
+%% @doc Process backtick markers and return segments.
+%% Returns a list of {text, Text} | {code, FormattedCode} tuples.
+%% Code segments are already formatted and should not be processed further.
+process_backticks_segments(Str) ->
+    process_backticks_segments(Str, [], [], text).
+
+%% State machine for backtick processing:
+%% text - accumulating normal text
+%% {code, Acc} - accumulating code content
+process_backticks_segments([], TextAcc, Segments, text) ->
+    %% End of string while in text mode
+    case TextAcc of
+        [] -> lists:reverse(Segments);
+        _ -> lists:reverse([{text, lists:reverse(TextAcc)} | Segments])
+    end;
+process_backticks_segments([], CodeAcc, Segments, {code, _}) ->
+    %% End of string with unpaired backtick - treat as literal
+    %% Add the opening backtick and accumulated content as text
+    %% CodeAcc is in reverse order, so reverse it first
+    UnpairedText = [$` | lists:reverse(CodeAcc)],
+    case Segments of
+        [] -> 
+            [{text, UnpairedText}];
+        [{text, PrevText} | Rest] ->
+            %% Merge with previous text segment
+            lists:reverse([{text, PrevText ++ UnpairedText} | Rest]);
+        [{code, _} | _] = AllSegs ->
+            %% Previous segment was code, add new text segment
+            lists:reverse([{text, UnpairedText} | AllSegs])
+    end;
+process_backticks_segments([$` | Rest], TextAcc, Segments, text) ->
+    %% Start of code section
+    NewSegments = case TextAcc of
+        [] -> Segments;
+        _ -> [{text, lists:reverse(TextAcc)} | Segments]
+    end,
+    process_backticks_segments(Rest, [], NewSegments, {code, []});
+process_backticks_segments([$` | Rest], CodeAcc, Segments, {code, _}) ->
+    %% End of code section
+    CodeText = lists:reverse(CodeAcc),
+    case CodeText of
+        [] ->
+            %% Empty code pair `` - treat as literal text
+            NewSegments = case Segments of
+                [{text, PrevText} | RestSegs] ->
+                    [{text, PrevText ++ "``"} | RestSegs];
+                _ ->
+                    [{text, "``"} | Segments]
+            end,
+            process_backticks_segments(Rest, [], NewSegments, text);
+        _ ->
+            %% Format code and add as code segment
+            FormattedCode = ?REVERSE(CodeText),
+            process_backticks_segments(Rest, [], [{code, FormattedCode} | Segments], text)
+    end;
+process_backticks_segments([Char | Rest], Acc, Segments, Mode) ->
+    %% Accumulate character
+    process_backticks_segments(Rest, [Char | Acc], Segments, Mode).
 
 %% @private
 %% @doc Process asterisk markers (`*bold*') into bold formatting.
@@ -109,10 +185,10 @@ process_underscores(Str) ->
 %%
 %% Processes a string looking for paired delimiters and applies formatting
 %% to the text between them. Handles edge cases like empty pairs and
-%% unpaired delimiters.
+%% unpaired delimiters (which are left as literal text).
 %%
 %% @param Str The string to process
-%% @param Delimiter The character to use as delimiter (e.g., $*, $_, backtick)
+%% @param Delimiter The character to use as delimiter (e.g., $*, $_)
 %% @param FormatFun Function to apply to delimited text
 %% @returns Processed string with formatting applied
 process_pattern(Str, Delimiter, FormatFun) ->
@@ -127,13 +203,21 @@ process_pattern(Str, Delimiter, FormatFun) ->
 %%   <li>`{start, Acc}' - Inside delimiters, accumulating text</li>
 %% </ul>
 %%
+%% If we reach end of string with unpaired delimiter, we restore it as literal text.
+%%
 %% @param Str Remaining string to process
 %% @param Delim The delimiter character
 %% @param FormatFun Formatting function to apply
 %% @param Acc Accumulator for processed output
 %% @param InDelim State: false or {start, TextAccumulator}
-process_pattern([], _Delim, _FormatFun, Acc, _InDelim) ->
+process_pattern([], _Delim, _FormatFun, Acc, false) ->
     lists:reverse(Acc);
+process_pattern([], Delim, _FormatFun, Acc, {start, StartAcc}) ->
+    %% Unpaired delimiter at end - restore as literal
+    %% StartAcc is reversed, so we need to reverse it and prepend the delimiter
+    RestoredText = [Delim | lists:reverse(StartAcc)],
+    %% Now append this to our accumulated output (which is also reversed)
+    lists:reverse(Acc) ++ RestoredText;
 process_pattern([Char | Rest], Delim, FormatFun, Acc, InDelim) when
     Char =:= Delim
 ->
@@ -146,7 +230,7 @@ process_pattern([Char | Rest], Delim, FormatFun, Acc, InDelim) when
             DelimitedText = lists:reverse(StartAcc),
             case DelimitedText of
                 [] ->
-                    %% Empty delimiter pair, keep as-is
+                    %% Empty delimiter pair, keep as literal (e.g., **)
                     process_pattern(
                         Rest, Delim, FormatFun, [Delim, Delim | Acc], false
                     );

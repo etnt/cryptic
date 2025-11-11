@@ -839,8 +839,9 @@ print_user_message(FromUser, BinMessage, Timestamp) when
     {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
-    EmojiMsg = cryptic_emoji:replace_all(BinMessage),
-    FormattedMsg = cryptic_markdown:process(EmojiMsg),
+    %% Integrated emoji + markdown processing (single pass)
+    %% This ensures emoji shortcuts inside backticks remain literal
+    FormattedMsg = cryptic_markdown:process(BinMessage),
     io:format(
         "~ts: \e[37m~ts\e[0m (~ts)\r\n",
         [
@@ -890,8 +891,9 @@ print_sent_message(ToUser, BinMessage, Timestamp) when
     {{_Year, _Month, _Day}, {Hour, Minute, Second}} =
         calendar:now_to_universal_time(Timestamp),
     TimeStr = io_lib:format("~2..0B:~2..0B:~2..0B", [Hour, Minute, Second]),
-    EmojiMsg = cryptic_emoji:replace_all(BinMessage),
-    FormattedMsg = cryptic_markdown:process(EmojiMsg),
+    %% Integrated emoji + markdown processing (single pass)
+    %% This ensures emoji shortcuts inside backticks remain literal
+    FormattedMsg = cryptic_markdown:process(BinMessage),
     io:format(
         "~ts \e[37m~ts\e[0m (~ts)\r\n",
         [
@@ -928,17 +930,15 @@ print_history_message(
             T when is_list(T) -> T
         end,
 
-    %% Process emoji shortcuts in the message
+    %% Process emoji shortcuts and markdown formatting in the message
+    %% Integrated processing ensures emoji inside backticks stay literal
     MessageBin =
         case Message of
             M when is_binary(M) -> M;
             M when is_list(M) -> unicode:characters_to_binary(M)
         end,
-    EmojiMessage = cryptic_emoji:replace_all(MessageBin),
-    %% Convert to string for ANSI color macros (which use ++)
-    MessageStr0 = unicode:characters_to_list(EmojiMessage),
-    %% Process markdown formatting
-    MessageStr = cryptic_markdown:process(MessageStr0),
+    %% Single-pass processing: markdown handles both emoji and formatting
+    MessageStr = cryptic_markdown:process(MessageBin),
 
     %% Format timestamp
     {{Year, Month, Day}, {Hour, Minute, Second}} = Timestamp,
