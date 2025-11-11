@@ -1223,6 +1223,7 @@ print_list_users_response(Response) ->
                 RegisteredBy = maps:get(<<"registered_by">>, User, <<"unknown">>),
                 RegisteredAt = maps:get(<<"registered_at">>, User, 0),
                 LastSeen = maps:get(<<"last_seen">>, User, 0),
+                IsOnline = maps:get(<<"online">>, User, false),
                 Metadata = maps:get(<<"metadata">>, User, #{}),
 
                 %% Format timestamps
@@ -1233,6 +1234,7 @@ print_list_users_response(Response) ->
                 io:format("  GPG Fingerprint: ~s\r\n", [GpgFp]),
                 io:format("    Username:      ~s\r\n", [Username]),
                 io:format("    Status:        ~s\r\n", [Status]),
+                io:format("    Is Online:     ~w\r\n", [IsOnline]),
                 io:format("    Registered by: ~s\r\n", [RegisteredBy]),
                 io:format("    Registered at: ~s\r\n", [RegTime]),
                 io:format("    Last seen:     ~s\r\n", [LastSeenTime]),
@@ -1264,6 +1266,7 @@ print_get_user_info_response(Response) ->
             RegisteredBy = maps:get(<<"registered_by">>, User, <<"unknown">>),
             RegisteredAt = maps:get(<<"registered_at">>, User, 0),
             LastSeen = maps:get(<<"last_seen">>, User, 0),
+            IsOnline = maps:get(<<"online">>, User, false),
             Metadata = maps:get(<<"metadata">>, User, #{}),
             
             RegTime = calendar:system_time_to_rfc3339(RegisteredAt, [{unit, second}, {offset, "Z"}]),
@@ -1272,6 +1275,7 @@ print_get_user_info_response(Response) ->
             print_success("User information:"),
             io:format("  GPG Fingerprint: ~s\r\n", [GpgFp]),
             io:format("  Status:          ~s\r\n", [Status]),
+            io:format("  Is Online:       ~w\r\n", [IsOnline]),
             io:format("  Registered by:   ~s\r\n", [RegisteredBy]),
             io:format("  Registered at:   ~s\r\n", [RegTime]),
             io:format("  Last seen:       ~s\r\n", [LastSeenTime]),

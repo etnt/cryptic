@@ -743,10 +743,77 @@ handle_command(
             },
             {reply, Response}
     end;
-handle_command(#{<<"type">> := <<"list_users">>} = Msg,
-               _Username,
-               #{authenticated := true,
-                 db_ref := DbRef} = _State) ->
+%% Admin commands - require admin privileges
+handle_command(#{<<"type">> := <<"list_users">>} = Command, _Username, State) ->
+    handle_admin_command(list_users, Command, State);
+handle_command(#{<<"type">> := <<"register_user">>} = Command, _Username, State) ->
+    handle_admin_command(register_user, Command, State);
+handle_command(#{<<"type">> := <<"suspend_user">>} = Command, _Username, State) ->
+    handle_admin_command(suspend_user, Command, State);
+handle_command(#{<<"type">> := <<"revoke_user">>} = Command, _Username, State) ->
+    handle_admin_command(revoke_user, Command, State);
+handle_command(#{<<"type">> := <<"reactivate_user">>} = Command, _Username, State) ->
+    handle_admin_command(reactivate_user, Command, State);
+handle_command(#{<<"type">> := <<"get_user_info">>} = Command, _Username, State) ->
+    handle_admin_command(get_user_info, Command, State);
+handle_command(#{<<"type">> := <<"list_certificates">>} = Command, _Username, State) ->
+    handle_admin_command(list_certificates, Command, State);
+handle_command(#{<<"type">> := <<"revoke_certificate">>} = Command, _Username, State) ->
+    handle_admin_command(revoke_certificate, Command, State);
+
+handle_command(Command, Username, _State) ->
+    ?debug("Unknown command from ~s: ~p", [Username, Command]),
+    {error, "Unknown command"}.
+
+%%%===================================================================
+%%% Admin Command Handlers
+%%%===================================================================
+
+%% @doc Handle admin commands with permission checking
+%% Checks if the user has admin privileges before executing the command
+handle_admin_command(CommandType, Command, #{gpg_fp := GpgFp, db_ref := DbRef} = State) ->
+    case is_admin(GpgFp, DbRef) of
+        true ->
+            execute_admin_command(CommandType, Command, State);
+        false ->
+            ?warning("Non-admin user attempted admin command: ~p", [GpgFp]),
+            {reply,
+             #{type => <<"error">>,
+               message => <<"Admin privileges required for this command">>
+            }}
+    end;
+handle_admin_command(_CommandType, _Command, _State) ->
+    {reply,
+     #{type => <<"error">>,
+       message => <<"Valid GPG certificate required for admin commands">>
+    }}.
+
+%% @doc Execute admin commands after permission check
+execute_admin_command(register_user, #{
+    <<"gpg_fp">> := UserGpgFp,
+    <<"gpg_pub">> := GpgPub
+} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
+    Metadata = maps:get(<<"metadata">>, Command, null),
+    
+    case cryptic_ca_store:register_user(DbRef, UserGpgFp, GpgPub, AdminFp, Metadata) of
+        ok ->
+            {reply, #{
+                type => <<"user_registered">>,
+                gpg_fp => UserGpgFp,
+                registered_by => AdminFp
+            }};
+        {error, Reason} ->
+            {reply,
+             #{type => <<"error">>,
+               message => iolist_to_binary(io_lib:format("~p", [Reason]))
+            }}
+    end;
+
+%% List users information
+execute_admin_command(list_users,
+                      #{<<"type">> := <<"list_users">>} = Msg,
+                      #{authenticated := true,
+                        db_ref := DbRef} = _State) ->
     case cryptic_ca_store:list_gpg_identities(DbRef) of
         {ok, Identities} ->
             %% Optional filter by status
@@ -778,13 +845,14 @@ handle_command(#{<<"type">> := <<"list_users">>} = Msg,
                               {ok, Name} -> list_to_binary(Name);
                               {error, not_found} -> <<"unknown">>
                           end,
-                          
+
                           UserMap = #{gpg_fp => Fp,
                                       username => Username,
                                       status => Status,
                                       registered_by => RegBy,
                                       registered_at => RegAt,
-                                      last_seen => LastSeen
+                                      last_seen => LastSeen,
+                                      online => is_online(Username)
                                      },
                           case Meta of
                               undefined -> UserMap;
@@ -820,133 +888,242 @@ handle_command(#{<<"type">> := <<"list_users">>} = Msg,
 
             {reply, ErrorResp}
     end;
-handle_command(#{<<"type">> := <<"list_users">>},
-               _Username,
-               #{authenticated := false} = _State) ->
+execute_admin_command(list_users,
+                      #{<<"type">> := <<"list_users">>},
+                       #{authenticated := false} = _State) ->
     ErrorResp =
-        jsx:encode(#{error => <<"unauthorized">>,
-                     message => <<"Authentication required">>
-                    }),
+        #{type => <<"error">>,
+          message => <<"Not authenticated">>
+         },
     {reply, ErrorResp};
-%% Admin commands - require admin privileges
-handle_command(#{<<"type">> := <<"register_user">>} = Command, _Username, State) ->
-    handle_admin_command(register_user, Command, State);
-handle_command(#{<<"type">> := <<"suspend_user">>} = Command, _Username, State) ->
-    handle_admin_command(suspend_user, Command, State);
-handle_command(#{<<"type">> := <<"revoke_user">>} = Command, _Username, State) ->
-    handle_admin_command(revoke_user, Command, State);
-handle_command(#{<<"type">> := <<"reactivate_user">>} = Command, _Username, State) ->
-    handle_admin_command(reactivate_user, Command, State);
-handle_command(#{<<"type">> := <<"get_user_info">>} = Command, _Username, State) ->
-    handle_admin_command(get_user_info, Command, State);
-handle_command(#{<<"type">> := <<"list_certificates">>} = Command, _Username, State) ->
-    handle_admin_command(list_certificates, Command, State);
-handle_command(#{<<"type">> := <<"revoke_certificate">>} = Command, _Username, State) ->
-    handle_admin_command(revoke_certificate, Command, State);
 
-handle_command(Command, Username, _State) ->
-    ?debug("Unknown command from ~s: ~p", [Username, Command]),
-    {error, "Unknown command"}.
+%% Temporarily suspend a user's access.
+execute_admin_command(suspend_user,
+                      #{<<"gpg_fp">> := GpgFp} = Msg,
+                      #{authenticated := true,
+                        gpg_fp := AdminFp,
+                        db_ref := DbRef} = _State) ->
 
-%%%===================================================================
-%%% Admin Command Handlers
-%%%===================================================================
+    Reason = maps:get(<<"reason">>, Msg, <<"No reason provided">>),
+    ?info("Admin ~s suspending user ~s: ~s", [AdminFp, GpgFp, Reason]),
 
-%% @doc Handle admin commands with permission checking
-%% Checks if the user has admin privileges before executing the command
-handle_admin_command(CommandType, Command, #{gpg_fp := GpgFp, db_ref := DbRef} = State) ->
-    case is_admin(GpgFp, DbRef) of
-        true ->
-            execute_admin_command(CommandType, Command, State);
-        false ->
-            ?warning("Non-admin user attempted admin command: ~p", [GpgFp]),
-            {reply, #{
-                error => <<"permission_denied">>,
-                message => <<"Admin privileges required for this command">>
-            }}
-    end;
-handle_admin_command(_CommandType, _Command, _State) ->
-    {reply, #{
-        error => <<"authentication_required">>,
-        message => <<"Valid GPG certificate required for admin commands">>
-    }}.
-
-%% @doc Execute admin commands after permission check
-execute_admin_command(register_user, #{
-    <<"gpg_fp">> := UserGpgFp,
-    <<"gpg_pub">> := GpgPub
-} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
-    Metadata = maps:get(<<"metadata">>, Command, null),
-    
-    case cryptic_ca_store:register_user(DbRef, UserGpgFp, GpgPub, AdminFp, Metadata) of
+    case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"suspended">>) of
         ok ->
-            {reply, #{
-                type => <<"user_registered">>,
-                gpg_fp => UserGpgFp,
-                registered_by => AdminFp
-            }};
+            Now = erlang:system_time(second),
+
+            %% Log audit event
+            AuditLog =
+                #audit_log{
+                   timestamp = Now,
+                   event_type = <<"user_suspended">>,
+                   gpg_fp = GpgFp,
+                   invite_id = undefined,
+                   details =
+                       jsx:encode(
+                         #{
+                           suspended_by => AdminFp,
+                           reason => Reason
+                          }),
+                   ip_address = undefined
+                  },
+            cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+            SuccessResp =
+                #{type => <<"suspend_user_response">>,
+                  status => <<"success">>,
+                  gpg_fp => GpgFp,
+                  new_status => <<"suspended">>,
+                  suspended_by => AdminFp,
+                  suspended_at => Now
+                 },
+
+            {reply, SuccessResp};
+
+        {error, Reason2} ->
+            ?error("Failed to suspend user ~s: ~p", [GpgFp, Reason2]),
+
+            ErrorResp =
+                #{type => <<"suspend_user_response">>,
+                  status => <<"error">>,
+                  error => <<"suspension_failed">>,
+                  message => iolist_to_binary(io_lib:format("~p", [Reason2]))
+                 },
+
+            {reply, ErrorResp}
+    end;
+execute_admin_command(suspend_user,
+                      _Msg,
+                      #{authenticated := false} = _State) ->
+
+    ErrorResp =
+        #{type => <<"error">>,
+          message => <<"Not authenticated">>
+         },
+
+    {reply, ErrorResp};
+
+%% Permanently revoke a user's access (irreversible).
+execute_admin_command(revoke_user,
+                      #{<<"gpg_fp">> := GpgFp} = Msg,
+                      #{authenticated := true,
+                        gpg_fp := AdminFp,
+                        db_ref := DbRef} = _State) ->
+
+    Reason = maps:get(<<"reason">>, Msg, <<"No reason provided">>),
+    ?info("Admin ~s revoking user ~s: ~s", [AdminFp, GpgFp, Reason]),
+
+    case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"revoked">>) of
+        ok ->
+            Now = erlang:system_time(second),
+
+            %% Log audit event
+            AuditLog =
+                #audit_log{
+                   timestamp = Now,
+                   event_type = <<"user_revoked">>,
+                   gpg_fp = GpgFp,
+                   invite_id = undefined,
+                   details =
+                       jsx:encode(
+                         #{
+                           suspended_by => AdminFp,
+                           reason => Reason
+                          }),
+                   ip_address = undefined
+                  },
+            cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+            SuccessResp =
+                #{type => <<"revoke_user_response">>,
+                  status => <<"success">>,
+                  gpg_fp => GpgFp,
+                  new_status => <<"revoked">>,
+                  suspended_by => AdminFp,
+                  suspended_at => Now
+                 },
+
+            {reply, SuccessResp};
+
+        {error, Reason2} ->
+            ?error("Failed to revoke user ~s: ~p", [GpgFp, Reason2]),
+
+            ErrorResp =
+                #{type => <<"revoke_user_response">>,
+                  status => <<"error">>,
+                  error => <<"refocation_failed">>,
+                  message => iolist_to_binary(io_lib:format("~p", [Reason2]))
+                 },
+
+            {reply, ErrorResp}
+    end;
+execute_admin_command(revoke_user,
+                      _Msg,
+                      #{authenticated := false} = _State) ->
+
+    ErrorResp =
+        #{type => <<"error">>,
+          message => <<"Not authenticated">>
+         },
+
+    {reply, ErrorResp};
+
+%% Reactivate a suspended user (does not work for revoked users).
+execute_admin_command(reactivate_user,
+                      #{<<"gpg_fp">> := GpgFp} = _Msg,
+                      #{authenticated := true,
+                        gpg_fp := AdminFp,
+                        db_ref := DbRef} = _State) ->
+    ?info("Admin ~s reactivating user ~s", [AdminFp, GpgFp]),
+
+    %% First check current status
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, #gpg_identity{status = <<"revoked">>}} ->
+            ErrorResp =
+                #{type => <<"reactivate_user_response">>,
+                  status => <<"error">>,
+                  error => <<"cannot_reactivate_revoked">>,
+                  message => <<"Revoked users cannot be reactivated. Please register a new GPG key.">>
+                 },
+            {reply, ErrorResp};
+
+        {ok, #gpg_identity{status = <<"active">>}} ->
+            InfoResp =
+                #{type => <<"reactivate_user_response">>,
+                  status => <<"success">>,
+                  gpg_fp => GpgFp,
+                  message => <<"User already active">>
+                 },
+            {reply, InfoResp};
+
+        {ok, _Identity} ->
+            %% User is suspended, reactivate
+            case cryptic_ca_store:update_user_status(DbRef,GpgFp,<<"active">>) of
+                ok ->
+                    Now = erlang:system_time(second),
+
+                    %% Log audit event
+                    AuditLog = #audit_log{
+                        timestamp = Now,
+                        event_type = <<"user_reactivated">>,
+                        gpg_fp = GpgFp,
+                        invite_id = undefined,
+                        details = jsx:encode(#{
+                            reactivated_by => AdminFp
+                        }),
+                        ip_address = undefined
+                    },
+                    cryptic_ca_store:insert_audit_log(DbRef, AuditLog),
+
+                    SuccessResp =
+                        #{type => <<"reactivate_user_response">>,
+                          status => <<"success">>,
+                          gpg_fp => GpgFp,
+                          new_status => <<"active">>,
+                          reactivated_by => AdminFp,
+                          reactivated_at => Now
+                         },
+                    {reply, SuccessResp};
+
+                {error, Reason} ->
+                    ?error("Failed to reactivate user ~s: ~p", [GpgFp, Reason]),
+                    ErrorResp =
+                        #{type => <<"reactivate_user_response">>,
+                          status => <<"error">>,
+                          error => <<"reactivation_failed">>,
+                          message => iolist_to_binary(io_lib:format("~p", [Reason]))
+                         },
+                    {reply, ErrorResp}
+            end;
+
+        {error, not_found} ->
+            ErrorResp =
+                #{type => <<"reactivate_user_response">>,
+                  status => <<"error">>,
+                  error => <<"user_not_found">>,
+                  message => <<"GPG fingerprint not registered">>
+                 },
+            {reply, ErrorResp};
+
         {error, Reason} ->
-            {reply, #{
-                error => <<"registration_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
-            }}
+            ?error("Failed to get user info for ~s: ~p", [GpgFp, Reason]),
+            ErrorResp =
+                #{type => <<"reactivate_user_response">>,
+                  status => <<"error">>,
+                  error => <<"query_failed">>,
+                  message => iolist_to_binary(io_lib:format("~p", [Reason]))
+                 },
+            {reply, ErrorResp}
     end;
+execute_admin_command(reactivate_user,
+                      _Msg,
+                      #{authenticated := false} = _State) ->
 
-execute_admin_command(suspend_user, #{
-    <<"gpg_fp">> := UserGpgFp
-} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
-    Reason = maps:get(<<"reason">>, Command, <<"No reason provided">>),
-    
-    case cryptic_ca_store:suspend_user(DbRef, UserGpgFp, AdminFp, Reason) of
-        ok ->
-            {reply, #{
-                type => <<"user_suspended">>,
-                gpg_fp => UserGpgFp,
-                suspended_by => AdminFp,
-                reason => Reason
-            }};
-        {error, ErrorReason} ->
-            {reply, #{
-                error => <<"suspension_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
-            }}
-    end;
+    ErrorResp =
+        #{type => <<"error">>,
+          message => <<"Not authenticated">>
+         },
 
-execute_admin_command(revoke_user, #{
-    <<"gpg_fp">> := UserGpgFp
-} = Command, #{gpg_fp := AdminFp, db_ref := DbRef}) ->
-    Reason = maps:get(<<"reason">>, Command, <<"No reason provided">>),
-    
-    case cryptic_ca_store:revoke_user(DbRef, UserGpgFp, AdminFp, Reason) of
-        ok ->
-            {reply, #{
-                type => <<"user_revoked">>,
-                gpg_fp => UserGpgFp,
-                revoked_by => AdminFp,
-                reason => Reason
-            }};
-        {error, ErrorReason} ->
-            {reply, #{
-                error => <<"revocation_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [ErrorReason]))
-            }}
-    end;
-
-execute_admin_command(reactivate_user, #{
-    <<"gpg_fp">> := UserGpgFp
-}, #{db_ref := DbRef}) ->
-    case cryptic_ca_store:reactivate_user(DbRef, UserGpgFp) of
-        ok ->
-            {reply, #{
-                type => <<"user_reactivated">>,
-                gpg_fp => UserGpgFp
-            }};
-        {error, Reason} ->
-            {reply, #{
-                error => <<"reactivation_failed">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
-            }}
-    end;
+    {reply, ErrorResp};
 
 execute_admin_command(get_user_info,
                       #{<<"gpg_fp">> := GpgFp},
@@ -1013,7 +1190,7 @@ execute_admin_command(get_user_info,
                       _Command,
                       #{authenticated := false}) ->
     ErrorResp =
-        #{error => <<"invalid_request">>,
+        #{type => <<"error">>,
           message => <<"Not GPG authenticated">>
          },
 
@@ -1065,7 +1242,7 @@ execute_admin_command(list_certificates,
                       _Command,
                       #{authenticated := false}) ->
     ErrorResp =
-        #{error => <<"unauthorized">>,
+        #{type => <<"error">>,
           message => <<"Admin authentication required">>
          },
 
@@ -1105,7 +1282,7 @@ execute_admin_command(revoke_certificate,
                       _Command,
                       #{authenticated := false}) ->
     ErrorResp =
-        #{error => <<"unauthorized">>,
+        #{type => <<"error">>,
           message => <<"Admin authentication required">>
          },
 
@@ -1738,4 +1915,12 @@ is_admin(GpgFp, DbRef) ->
             end;
         {error, _} ->
             false
+    end.
+
+is_online(User) when is_binary(User) ->
+    is_online(binary_to_list(User));
+is_online(User) when is_list(User) ->
+    case find_user_connection(User) of
+        {ok, _Pid} -> true;
+        not_found  -> false
     end.
