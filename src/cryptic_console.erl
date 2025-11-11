@@ -308,6 +308,16 @@ main(InitCfg) ->
 %%% Internal Functions
 %%%===================================================================
 
+%% @doc Send message to server via event bus
+%% Publishes a websocket_outbound event that will be picked up by cryptic_ws_client
+-spec send_to_server(Message :: map()) -> ok.
+send_to_server(Message) ->
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Message
+    }),
+    ok.
+
 %% @doc Prompt for and get the passphrase securely
 -spec get_passphrase() -> binary().
 get_passphrase() ->
@@ -1474,183 +1484,96 @@ notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
 %%====================================================================
 
 %% @doc Execute admin register command
-execute_admin_register(GpgFp, KeyFile, _Opts, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            %% Read the GPG public key file
-            case file:read_file(KeyFile) of
-                {ok, GpgPubKey} ->
-                    %% Send register_user command via WebSocket
-                    Msg = #{
-                        <<"type">> => <<"register_user">>,
-                        <<"gpg_fp">> => list_to_binary(GpgFp),
-                        <<"gpg_pub">> => GpgPubKey
-                    },
-                    case cryptic_ws_client:send_message(WsPid, Msg) of
-                        ok ->
-                            cryptic_shell:print_info("User registration request sent...");
-                        {error, Reason} ->
-                            cryptic_shell:print_error(
-                                "Failed to register user: " ++
-                                lists:flatten(io_lib:format("~p", [Reason]))
-                            )
-                    end;
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to read key file: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
+execute_admin_register(GpgFp, KeyFile, _Opts, _State) ->
+    %% Read the GPG public key file
+    case file:read_file(KeyFile) of
+        {ok, GpgPubKey} ->
+            %% Send register_user command via event bus
+            Msg =
+                #{<<"type">> => <<"register_user">>,
+                  <<"gpg_fp">> => list_to_binary(GpgFp),
+                  <<"gpg_pub">> => GpgPubKey
+                 },
+            send_to_server(Msg),
+            cryptic_shell:print_info("User registration request sent...");
+
+        {error, Reason} ->
+            cryptic_shell:print_error(
+              "Failed to read key file: " ++
+                  lists:flatten(io_lib:format("~p", [Reason]))
+             )
     end.
+
 
 %% @doc Execute admin list command
-execute_admin_list(State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            Msg = #{<<"type">> => <<"list_users">>},
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_info("Fetching user list...");
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to list users: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
-    end.
+execute_admin_list(_State) ->
+    Msg = #{<<"type">> => <<"list_users">>},
+    send_to_server(Msg),
+    cryptic_shell:print_info("Fetching user list...").
+
 
 %% @doc Execute admin status command
-execute_admin_status(GpgFp, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            Msg = #{
-                <<"type">> => <<"get_user_info">>,
-                <<"gpg_fp">> => list_to_binary(GpgFp)
-            },
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_info("Fetching user status...");
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to get user status: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
-    end.
+execute_admin_status(GpgFp, _State) ->
+    Msg =
+        #{<<"type">> => <<"get_user_info">>,
+          <<"gpg_fp">> => list_to_binary(GpgFp)
+         },
+    send_to_server(Msg),
+    cryptic_shell:print_info("Fetching user status...").
+
 
 %% @doc Execute admin suspend command
-execute_admin_suspend(GpgFp, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            Msg = #{
-                <<"type">> => <<"suspend_user">>,
-                <<"gpg_fp">> => list_to_binary(GpgFp)
-            },
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_success("User suspend request sent");
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to suspend user: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
-    end.
+execute_admin_suspend(GpgFp, _State) ->
+    Msg =
+        #{<<"type">> => <<"suspend_user">>,
+          <<"gpg_fp">> => list_to_binary(GpgFp)
+         },
+    send_to_server(Msg),
+    cryptic_shell:print_success("User suspend request sent").
+
 
 %% @doc Execute admin revoke command  
-execute_admin_revoke(GpgFp, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            Msg = #{
-                <<"type">> => <<"revoke_user">>,
-                <<"gpg_fp">> => list_to_binary(GpgFp)
-            },
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_success("User revoke request sent");
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to revoke user: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
-    end.
+execute_admin_revoke(GpgFp, _State) ->
+    Msg =
+        #{<<"type">> => <<"revoke_user">>,
+          <<"gpg_fp">> => list_to_binary(GpgFp)
+         },
+    send_to_server(Msg),
+    cryptic_shell:print_success("User revoke request sent").
+
 
 %% @doc Execute admin reactivate command
-execute_admin_reactivate(GpgFp, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            Msg = #{
-                <<"type">> => <<"reactivate_user">>,
-                <<"gpg_fp">> => list_to_binary(GpgFp)
-            },
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_success("User reactivate request sent");
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to reactivate user: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
-    end.
+execute_admin_reactivate(GpgFp, _State) ->
+    Msg =
+        #{<<"type">> => <<"reactivate_user">>,
+          <<"gpg_fp">> => list_to_binary(GpgFp)
+         },
+    send_to_server(Msg),
+    cryptic_shell:print_success("User reactivate request sent").
+
 
 %% @doc Execute admin list certificates command
-execute_admin_list_certs(GpgFp, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            Msg = #{
-                <<"type">> => <<"list_certificates">>,
-                <<"gpg_fp">> => list_to_binary(GpgFp)
-            },
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_info("Fetching certificates...");
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Failed to list certificates: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
-    end.
+execute_admin_list_certs(GpgFp, _State) ->
+    Msg =
+        #{<<"type">> => <<"list_certificates">>,
+          <<"gpg_fp">> => list_to_binary(GpgFp)
+         },
+    send_to_server(Msg),
+    cryptic_shell:print_info("Fetching certificates...").
+
 
 %% @doc Execute admin revoke certificate command
-execute_admin_revoke_cert(Serial, State) ->
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            %% Prompt for reason
-            Reason = cryptic_shell:get_line("Revocation reason: "),
-            Msg = #{
-                <<"type">> => <<"revoke_certificate">>,
-                <<"serial">> => list_to_binary(Serial),
-                <<"reason">> => list_to_binary(Reason)
-            },
-            case cryptic_ws_client:send_message(WsPid, Msg) of
-                ok ->
-                    cryptic_shell:print_success("Certificate revoke request sent");
-                {error, Error} ->
-                    cryptic_shell:print_error(
-                        "Failed to revoke certificate: " ++
-                        lists:flatten(io_lib:format("~p", [Error]))
-                    )
-            end
-    end.
+execute_admin_revoke_cert(Serial, _State) ->
+    %% Prompt for reason
+    Reason = cryptic_shell:get_line("Revocation reason: "),
+    Msg =
+        #{<<"type">> => <<"revoke_certificate">>,
+          <<"serial">> => list_to_binary(Serial),
+          <<"reason">> => list_to_binary(Reason)
+         },
+    send_to_server(Msg),
+    cryptic_shell:print_success("Certificate revoke request sent").
+
 
 
 %%%===================================================================
@@ -1764,33 +1687,21 @@ execute_cert_renew(Opts, State) ->
     %% Step 4: Send renewal request
     cryptic_shell:print_info("[4/4] Requesting certificate renewal..."),
 
-    case State#console_state.ws_client_pid of
-        undefined ->
-            cryptic_shell:print_error("Not connected to server");
-        WsPid ->
-            MsgData = #{
-                force => Force,
-                new_key => NewKey,
-                csr => <<"PLACEHOLDER_CSR">>,  %% TODO: Read actual CSR
-                gpg_sig => <<"PLACEHOLDER_SIG">>  %% TODO: Actual GPG signature
-            },
-            case cryptic_messages:cert_renew(MsgData) of
-                {ok, Msg} ->
-                    case cryptic_ws_client:send_message(WsPid, Msg) of
-                        ok ->
-                            cryptic_shell:print_success("Renewal request sent");
-                        {error, Reason} ->
-                            cryptic_shell:print_error(
-                                "Failed to renew certificate: " ++
-                                lists:flatten(io_lib:format("~p", [Reason]))
-                            )
-                    end;
-                {error, Reason} ->
-                    cryptic_shell:print_error(
-                        "Invalid cert renew parameters: " ++
-                        lists:flatten(io_lib:format("~p", [Reason]))
-                    )
-            end
+    MsgData =
+        #{force => Force,
+          new_key => NewKey,
+          csr => <<"PLACEHOLDER_CSR">>,  %% TODO: Read actual CSR
+          gpg_sig => <<"PLACEHOLDER_SIG">>  %% TODO: Actual GPG signature
+         },
+    case cryptic_messages:cert_renew(MsgData) of
+        {ok, Msg} ->
+            send_to_server(Msg),
+            cryptic_shell:print_success("Renewal request sent");
+        {error, Reason} ->
+            cryptic_shell:print_error(
+              "Invalid cert renew parameters: " ++
+                  lists:flatten(io_lib:format("~p", [Reason]))
+             )
     end,
 
     cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").
