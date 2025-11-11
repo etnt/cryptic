@@ -32,7 +32,8 @@ emojis() ->
         {<<":o"/utf8>>, ?EMOJI_SURPRISED},
         {<<":O"/utf8>>, ?EMOJI_SURPRISED},
         {<<":*"/utf8>>, ?EMOJI_KISS},
-        {<<":|"/utf8>>, ?EMOJI_NEUTRAL}
+        {<<":|"/utf8>>, ?EMOJI_NEUTRAL},
+        {unicode:characters_to_binary("https😕"), "https:/"}
     ].
 
 to_binary(Bin) when is_binary(Bin) -> Bin;
