@@ -1684,6 +1684,11 @@ print_general_help() ->
             ?FG_MAGENTA("(:h <query>)") ++ "\r\n"
     ),
     io:format(
+        ?FG_GREEN("  online") ++ " " ++
+            "                      - View online users " ++
+            ?FG_MAGENTA("(:on)") ++ "\r\n"
+    ),
+    io:format(
         ?FG_GREEN("  admin") ++ " " ++ ?FG_YELLOW("[register|list|status|...]") ++
             " - Admin user management " ++
             ?FG_MAGENTA("(:ar,:au)") ++ "\r\n"

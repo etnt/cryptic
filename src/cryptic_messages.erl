@@ -240,6 +240,7 @@
 
     % Client to Server - User & Message Management
     list_users/0,
+    online_users/0,
     get_messages/0,
     request_pending_messages/0,
 
@@ -281,6 +282,7 @@
     | x3dh
     | ratchet
     | list_users
+    | online_users
     | get_messages
     | request_pending_messages
     | invite_create
@@ -476,6 +478,18 @@ send_message_ratchet(MsgMap) ->
 -spec list_users() -> validation_result().
 list_users() ->
     {ok, #{<<"type">> => <<"list_users">>}}.
+
+%% @doc Construct the `online_users' message
+%%
+%% Requests a list of currently online users (usernames only).
+%% Unlike list_users, this is available to all authenticated users,
+%% not just admins, and does not include sensitive information like
+%% GPG fingerprints.
+%%
+%% @returns `{ok, Message}'
+-spec online_users() -> validation_result().
+online_users() ->
+    {ok, #{<<"type">> => <<"online_users">>}}.
 
 %% @doc Construct the `get_messages' message
 %%

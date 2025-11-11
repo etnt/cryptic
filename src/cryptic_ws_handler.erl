@@ -743,6 +743,18 @@ handle_command(
             },
             {reply, Response}
     end;
+%% @doc Handle request for online users list
+%%
+%% Returns a list of currently connected users (usernames only).
+%% This command is available to all authenticated users, unlike list_users
+%% which is admin-only and includes sensitive information.
+handle_command(#{<<"type">> := <<"online_users">>}, _Username, _State) ->
+    OnlineUsers = get_online_users(),
+    Response = #{
+        type => <<"online_users">>,
+        users => [list_to_binary(U) || U <- OnlineUsers]
+    },
+    {reply, Response};
 %% Admin commands - require admin privileges
 handle_command(#{<<"type">> := <<"list_users">>} = Command, _Username, State) ->
     handle_admin_command(list_users, Command, State);
@@ -1570,6 +1582,17 @@ find_user_connection(Username) ->
         [{Username, Pid}] -> {ok, Pid};
         [] -> not_found
     end.
+
+%% @doc Get list of currently online users
+%%
+%% Returns a list of usernames for all users who currently have
+%% an active WebSocket connection. This is used by the online_users
+%% command to show which users are available for messaging.
+%%
+%% @returns List of usernames (as strings)
+get_online_users() ->
+    AllConnections = ets:tab2list(?CONNECTION_TABLE),
+    [Username || {Username, _Pid} <- AllConnections].
 
 %% @doc Clean up user connection when WebSocket terminates
 %%

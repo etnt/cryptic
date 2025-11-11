@@ -606,6 +606,8 @@ parse_command(":cs") ->
     {cert_cmd, status};
 parse_command(":cr") ->
     {cert_cmd, renew, #{}};
+parse_command(":on") ->
+    {online_cmd};
 %% Full commands
 parse_command("help") ->
     {help};
@@ -633,6 +635,9 @@ parse_command("history") ->
     {history_cmd, {last_n, 10}};
 parse_command("history " ++ Args) ->
     parse_history_command(Args);
+%% Online users command
+parse_command("online") ->
+    {online_cmd};
 %% Admin commands
 parse_command("admin") ->
     {admin_cmd, list};
@@ -1035,6 +1040,9 @@ execute_command({history_cmd, {error, Msg}}, State) ->
 execute_command({history_cmd, Query}, State) ->
     execute_history_query(Query, State),
     State;
+execute_command({online_cmd}, State) ->
+    execute_online_users(State),
+    State;
 execute_command({admin_cmd, register, GpgFp, KeyFile, Opts}, State) ->
     execute_admin_register(GpgFp, KeyFile, Opts, State),
     State;
@@ -1390,6 +1398,25 @@ display_websocket_message(#{<<"type">> := <<"users">>, <<"users">> := Users}) ->
     ),
     io:format("~s", [""]),
     timer:sleep(100);
+display_websocket_message(#{<<"type">> := <<"online_users">>, <<"users">> := Users}) ->
+    %% Handle online users response
+    io:format("\r\n"),
+    case Users of
+        [] ->
+            cryptic_shell:print_info("No users currently online");
+        _ ->
+            cryptic_shell:print_info(
+                "Online users (" ++ integer_to_list(length(Users)) ++ "):"
+            ),
+            lists:foreach(
+                fun(Username) ->
+                    io:format("  " ++ ?FG_GREEN(binary_to_list(Username)) ++ "\r\n")
+                end,
+                Users
+            )
+    end,
+    io:format("~s", [""]),
+    timer:sleep(100);
 display_websocket_message(#{<<"type">> := <<"pending_messages_delivered">>, <<"count">> := Count}) ->
     %% Handle pending messages notification
     case Count of
@@ -1478,6 +1505,17 @@ notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
     %% Run notifier in a separate process to avoid blocking
     spawn(F).
 
+
+%%====================================================================
+%% Online Users Command Execution
+%%====================================================================
+
+%% @doc Execute online users command
+%% Requests the list of currently online users from the server
+execute_online_users(_State) ->
+    Msg = #{<<"type">> => <<"online_users">>},
+    send_to_server(Msg),
+    cryptic_shell:print_info("Fetching online users...").
 
 %%====================================================================
 %% Admin Command Execution
