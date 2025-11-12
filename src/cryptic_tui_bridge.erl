@@ -172,6 +172,7 @@ default_tui_filter() ->
         case Event of
             #{type := deliver_message} -> true;
             #{type := system_message} -> true;
+            #{type := ca_response} -> true;
             #{type := websocket_message} -> true;
             _ -> false
         end

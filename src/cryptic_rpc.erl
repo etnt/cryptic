@@ -3,9 +3,11 @@
 -include("cryptic.hrl").
 
 -export([history/1,
-        online_users/0,    
-        send_message/1,
-        send_to_bus/1
+         engine_status/0,
+         list_users/0,
+         online_users/0,
+         send_message/1,
+         send_to_bus/1
         ]).
 
 %% Get message history with PeerId
@@ -41,6 +43,32 @@ send_message(JsonMsg) ->
                     {error, Reason}
             end
     end.
+
+
+engine_status() ->
+    case get_engine_pid() of
+        undefined ->
+            ?error("~p: Cannot get engine status, Engine PID unknown~n", [?MODULE]),
+            {error, no_engine_pid};
+
+        EnginePid when is_pid(EnginePid) ->
+            ?dbg("~p: Returning engine status~n", [?MODULE]),
+            case cryptic_engine:get_engine_status(EnginePid) of
+                {ok, Status} ->
+                    {ok, jsx:encode(Status)};
+                {error, _Reason} = Error ->
+                    Error
+            end
+    end.
+
+
+list_users() ->
+    {ok, Msg} = cryptic_messages:list_users(),
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Msg
+    }),
+    ok.
 
 
 online_users() ->
