@@ -116,10 +116,6 @@
 main(InitCfg) ->
     process_flag(trap_exit, true),
 
-    %% For example, the TUI bridge want to get the engine_pid
-    %% so we must make us visible to it.
-    register(?MODULE, self()),
-
     %% Set UTF-8 encoding immediately for emoji support
     io:setopts(standard_io, [{encoding, utf8}]),
     io:setopts(group_leader(), [{encoding, utf8}]),
@@ -572,11 +568,6 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             %% Display the websocket message response
             display_websocket_message(Message),
             %% Continue waiting - the DOWN message will trigger restart
-            wait_for_input_or_messages(InputPid, MonitorRef, State);
-
-        {get_engine_pid, From}  ->
-            %% For example, from the TUI bridge process
-            From ! {engine_pid, State#console_state.engine_pid},
             wait_for_input_or_messages(InputPid, MonitorRef, State)
     end.
 

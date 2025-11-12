@@ -330,3 +330,23 @@ verbatim_protects_colon_sequences_test() ->
     ?assert(string:str(Result, "://") > 0),
     ?assert(string:str(Result, ":8080") > 0),
     ?assert(string:str(Result, ":command") > 0).
+
+%% Test handling of invalid UTF-8 sequences
+invalid_utf8_test() ->
+    %% Create a binary with invalid UTF-8: valid text "nur" followed by a single
+    %% byte that looks like it should be part of a multi-byte sequence
+    InvalidBin = <<"nur", 16#C3>>,  % 16#C3 alone is incomplete, needs another byte
+    %% Should not crash, should handle gracefully by adding replacement character
+    Result = cryptic_markdown:process(InvalidBin),
+    %% Should contain "nur" and a replacement character
+    ?assert(string:str(Result, "nur") > 0),
+    ?assert(string:str(Result, "�") > 0).
+
+incomplete_utf8_test() ->
+    %% Create incomplete UTF-8 sequence (this mimics what caused the crash)
+    %% Start of "å" (U+00E5) in UTF-8 is C3 A5, but provide only first byte
+    IncompleteBin = <<"test", 16#C3>>,
+    %% Should not crash
+    Result = cryptic_markdown:process(IncompleteBin),
+    ?assert(string:str(Result, "test") > 0),
+    ?assert(string:str(Result, "�") > 0).
