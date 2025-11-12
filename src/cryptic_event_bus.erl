@@ -216,6 +216,7 @@ handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 
 handle_call({subscribe, Pid, FilterFun}, _From, State=#state{subs = Subs}) ->
+    ?dbg("~p: new subscriber: ~p~n",[?MODULE, Pid]),
     case maps:is_key(Pid, Subs) of
         true ->
             {reply, ok, State};
@@ -227,6 +228,7 @@ handle_call({subscribe, Pid, FilterFun}, _From, State=#state{subs = Subs}) ->
     end;
 
 handle_call({unsubscribe, Pid}, _From, State=#state{subs = Subs}) ->
+    ?dbg("~p: unsubscribe: ~p~n",[?MODULE, Pid]),
     case maps:take(Pid, Subs) of
         {Entry, NewSubs} ->
             #{mon := Mon} = Entry,
@@ -251,6 +253,7 @@ handle_cast({publish, Event}, State=#state{subs = Subs}) ->
     %% Use try/catch around FilterFun to avoid crashing the bus.
     maps:fold(
       fun(Pid, Entry, Acc) ->
+          ?dbg("~p: publish to Pid=~p ?~n",[?MODULE,Pid]),
           FilterFun = maps:get(filter, Entry),
           %% Evaluate filter safely
           Deliver = case safe_eval_filter(FilterFun, Event) of
@@ -260,6 +263,7 @@ handle_cast({publish, Event}, State=#state{subs = Subs}) ->
                     end,
           case Deliver of
               true ->
+                  ?dbg("~p: publishing to Pid=~p !!~n",[?MODULE,Pid]),
                   catch Pid ! {event, Event},
                   Acc;
               false ->
@@ -275,6 +279,7 @@ handle_cast(_Other, State) ->
 
 %% handle_info catches DOWN messages for monitored subscribers and other signals
 handle_info({'DOWN', MonRef, process, Pid, _Reason}, State=#state{subs = Subs}) ->
+    ?dbg("~p: DOWN Pid=~p , Reason=~p~n",[?MODULE, Pid, _Reason]),
     case maps:find(Pid, Subs) of
         {ok, Entry} ->
             case maps:get(mon, Entry) =:= MonRef of

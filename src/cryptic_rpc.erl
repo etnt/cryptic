@@ -2,7 +2,11 @@
 
 -include("cryptic.hrl").
 
--export([history/1, send_message/1, subscribe/1]).
+-export([history/1,
+        online_users/0,    
+        send_message/1,
+        send_to_bus/1
+        ]).
 
 %% Get message history with PeerId
 history(_Peer) ->
@@ -11,12 +15,60 @@ history(_Peer) ->
 
 %% Send encrypted outbound message
 send_message(JsonMsg) ->
-    %%cryptic_event_bus:publish(Payload),
-    MsgMap = jsx:decode(JsonMsg, [return_maps]),
-    ?info("~p:send_message: Payload: ~p~n", [?MODULE, MsgMap]),
+    ?info("~p:send_message: JsonMsg: ~p~n", [?MODULE, JsonMsg]),
+    Msg = jsx:decode(JsonMsg, [return_maps]),
+    ?info("~p:send_message: Payload: ~p~n", [?MODULE, Msg]),
+
+    ToUser = maps:get(<<"to_user">>, Msg),
+    Plaintext = maps:get(<<"plaintext">>, Msg),
+
+    case get_engine_pid() of
+        undefined ->
+            ?error("~p: Cannot send message, Engine PID unknown~n", [?MODULE]),
+            {error, no_engine_pid};
+
+        EnginePid when is_pid(EnginePid) ->
+            ?dbg("~p: Sending message to Engine PID: ~p~n", [?MODULE, EnginePid]),
+            case cryptic_engine:send_message(EnginePid,
+                                             ToUser,
+                                            Plaintext)
+            of
+                ok ->
+                    ?info("~p: Message sent to Engine successfully~n", [?MODULE]),
+                    ok;
+                {error, Reason} ->
+                    ?error("~p: Failed to send message to Engine: ~p~n", [?MODULE, Reason]),
+                    {error, Reason}
+            end
+    end.
+
+
+online_users() ->
+    {ok, Msg} = cryptic_messages:online_users(),
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Msg
+    }),
     ok.
 
-%% Subscribe Rust client to events
-subscribe(Pid) ->
-    cryptic_event_bus:subscribe(Pid),
+
+send_to_bus(JsonMsg) ->
+    ?info("~p:send_to_bus: JsonMsg: ~p~n", [?MODULE, JsonMsg]),
+    Msg = jsx:decode(JsonMsg, [return_maps]),
+    ?info("~p:send_to_bus: Payload: ~p~n", [?MODULE, Msg]),
+
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Msg
+    }),
     ok.
+
+get_engine_pid() ->
+    cryptic_console ! {get_engine_pid, self()},
+    receive
+        {engine_pid, Pid} ->
+            Pid
+    after 3000 ->
+        ?error("~p: could not get the Engine Pid!~n", [?MODULE]),
+        undefined
+    end.
