@@ -2,18 +2,25 @@
 
 -include("cryptic.hrl").
 
--export([history/1,
-         engine_status/0,
+-export([engine_status/0,
          list_users/0,
          online_users/0,
          send_message/1,
-         send_to_bus/1
+         send_to_bus/1,
+         load_recent_messages/3,
+         load_messages_before/4,
+         load_messages_range/4
         ]).
 
-%% Get message history with PeerId
-history(_Peer) ->
-    %% SQLite query here
-    {ok, _Messages = []}.
+
+load_recent_messages(CurrentUser, Peer, Limit) ->
+    cryptic_tui_bridge:get_recent_messages(CurrentUser, Peer, Limit).
+
+load_messages_before(_CurrentUser, _Peer, _BeforeTimestamp, _Limit) ->
+    tbd.
+
+load_messages_range(_CurrentUser, _Peer, _StartTimestamp, _EndTimestamp) ->
+    tbd.    
 
 %% Send encrypted outbound message
 send_message(JsonMsg) ->

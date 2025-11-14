@@ -554,12 +554,12 @@ get_conversation(User1, User2, Limit, Passphrase) ->
             "SELECT from_user, to_user, encrypted_message, salt, nonce, timestamp, server_host, server_port "
             "FROM encrypted_messages "
             "WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?) "
-            "ORDER BY timestamp ASC "
+            "ORDER BY timestamp DESC "
             "LIMIT ?",
 
         case esqlite3:q(Conn, QuerySQL, [User1, User2, User2, User1, Limit]) of
             Rows when is_list(Rows) ->
-                Messages = lists:map(
+                RawMessages = lists:map(
                     fun(
                         [
                             From,
@@ -581,6 +581,7 @@ get_conversation(User1, User2, Limit, Passphrase) ->
                     end,
                     Rows
                 ),
+                Messages = lists:reverse(RawMessages),
                 {ok, Messages};
             _Other ->
                 {ok, []}

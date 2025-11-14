@@ -16,10 +16,11 @@
 -behaviour(gen_server).
 
 %% API
--export([start/1,
-         start/2,
+-export([start/3,
+         start/4,
          stop/1,
-         get_caller_node/0
+         get_caller_node/0,
+         get_recent_messages/3
         ]).
 
 %% gen_server callbacks
@@ -28,11 +29,16 @@
 
 -include("cryptic.hrl").
 
--record(state, {
-    rust_node :: atom() | undefined,
-    event_filter :: fun((map()) -> boolean()) | undefined,
-    engine_pid :: pid() | undefined
-}).
+-define(SERVER, ?MODULE).
+
+-record(state,
+        {
+         rust_node :: atom() | undefined,
+         username :: binary() | undefined,
+         passphrase :: binary() | undefined,
+         event_filter :: fun((map()) -> boolean()) | undefined,
+         engine_pid :: pid() | undefined
+        }).
 
 %%%===================================================================
 %%% API
@@ -40,16 +46,28 @@
 
 
 %% @doc Start the bridge with the Rust node name
--spec start(atom()) -> {ok, pid()} | {error, term()}.
-start(RustNode) when is_atom(RustNode) ->
-    start(RustNode, undefined).
+-spec start(atom(), binary(), binary()) -> {ok, pid()} | {error, term()}.
+start(RustNode, Username, Passphrase) when is_atom(RustNode) andalso
+                                           is_binary(Username) andalso
+                                           is_binary(Passphrase) ->
+    start(RustNode, Username, Passphrase, undefined).
 
 %% @doc Start the bridge with a custom event filter.
 %% If Filter is undefined, a default filter for TUI events is used.
--spec start(atom(), fun((map()) -> boolean()) | undefined) ->
+-spec start(atom(), binary(), binary(), fun((map()) -> boolean()) | undefined) ->
     {ok, pid()} | {error, term()}.
-start(RustNode, Filter) when is_atom(RustNode) ->
-    gen_server:start(?MODULE, [RustNode, Filter], []).
+start(RustNode, Username, Passphrase, Filter) when is_atom(RustNode) andalso
+                                                   is_binary(Username) andalso
+                                                   is_binary(Passphrase) ->
+    %% FIXME: A hardcoded Server name here means only one instance can run.
+    %% This could be improved by allowing multiple instances with unique names.
+    gen_server:start({local,?SERVER}, ?MODULE, [RustNode, Username, Passphrase, Filter], []).
+
+
+-spec get_recent_messages(binary(), binary(), non_neg_integer()) ->
+     {ok, binary()} | {error, term()}.
+get_recent_messages(CurrentUser, Peer, Limit) ->
+    gen_server:call(?SERVER, {get_recent_messages, CurrentUser, Peer, Limit}).
 
 %% @doc Get the calling process's node name.
 %% When called via RPC from Rust, this returns the Rust node's name.
@@ -76,11 +94,12 @@ stop(BridgePid) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init([RustNode, CustomFilter]) ->
+init([RustNode, Username, Passphrase, CustomFilter]) ->
     process_flag(trap_exit, true),
     ?info("~p(~p) Started , RustNode=~p , CustomFilter=~p~n",
           [?MODULE,self(),RustNode, CustomFilter]),
-    erlang:monitor_node(RustNode, true),
+    X = catch erlang:monitor_node(RustNode, true),
+    ?dbg("~p: monitor_node result: ~p~n", [?MODULE, X]),
 
     EnginePid = get_engine_pid(),
     ?dbg("~p: got Engine Pid: ~p~n", [?MODULE, EnginePid]),
@@ -91,18 +110,48 @@ init([RustNode, CustomFilter]) ->
                  F when is_function(F, 1) -> F;
                  _ ->  default_tui_filter()
     end,
-    
-    case cryptic_event_bus:subscribe(self(), Filter) of
-        ok ->
-            ?info("TUI Bridge started, subscribed to event bus",[]),
-            {ok, #state{rust_node    = RustNode,
-                        engine_pid   = EnginePid,
-                        event_filter = Filter}};
-        {error, Reason} ->
-            ?error("Failed to subscribe to event bus: ~p", [Reason]),
-            {stop, Reason}
+
+    try
+        case
+            cryptic_chat_storage:init_storage(binary_to_list(Username),
+                                              Passphrase)
+        of
+            ok ->
+                ok;
+            {error, StorageReason} ->
+                ?error("Failed initialise storage: ~p", [StorageReason]),
+                throw({stop, StorageReason})
+        end,
+        case cryptic_event_bus:subscribe(self(), Filter) of
+            ok ->
+                ?info("TUI Bridge started, subscribed to event bus",[]),
+                {ok, #state{rust_node    = RustNode,
+                            username     = Username,
+                            passphrase   = Passphrase,
+                            engine_pid   = EnginePid,
+                            event_filter = Filter}};
+            {error, Reason} ->
+                ?error("Failed to subscribe to event bus: ~p", [Reason]),
+                throw({stop, Reason})
+        end
+    catch
+        throw:{stop,StopReason} ->
+            {stop, StopReason}
     end.
 
+
+
+handle_call({get_recent_messages,CurrentUser,Peer,Limit} = R, _From, State) ->
+    ?dbg("~p:handle_call , ~p~n",[?MODULE,R]),
+    Reply =
+        cryptic_chat_storage:get_conversation(
+            binary_to_list(CurrentUser),
+            binary_to_list(Peer),
+            Limit,
+            State#state.passphrase),
+    ?dbg("~p:handle_call , Reply=~p~n",[?MODULE,Reply]),
+    {reply, Reply, State};
+%%
 handle_call(_Request, _From, State) ->
     ?dbg("~p:handle_call got: ~p~n",[?MODULE,_Request]),
     {reply, {error, unknown_request}, State}.
