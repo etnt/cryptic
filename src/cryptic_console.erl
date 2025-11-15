@@ -84,12 +84,13 @@
 
 -module(cryptic_console).
 
+%% API
+-export([main/1]).
+
 %% Include ANSI escape sequence macros for terminal formatting
 -include("cryptic_ansi.hrl").
 -include("cryptic.hrl").
-
-%% API
--export([main/1]).
+-include_lib("eunit/include/eunit.hrl").
 
 %% Internal state record
 -record(console_state, {
@@ -827,15 +828,60 @@ parse_admin_register(ArgsStr) ->
             {error, "Usage: admin register <gpg_fp> <key_file> [--note \"description\"]"}
     end.
 
+%% @doc Parse admin register options
+%% Examples:
+%%   "--name John Doe --team DevOps --note Admin user"
+%%   "--name John Doe --birthday 24 Dec --team Engineering"
+%%
 parse_admin_register_opts([], Acc) ->
     Acc;
-parse_admin_register_opts(["--note" | Rest], Acc) ->
-    %% Note takes all remaining words as value
-    Note = string:join(Rest, " "),
-    Acc#{note => Note};
+parse_admin_register_opts(["--" ++ SwitchName | Rest], Acc) ->
+    {Value, Remaining} = collect_value_until_switch(Rest),
+    Key = list_to_binary(SwitchName),
+    parse_admin_register_opts(Remaining, Acc#{Key => list_to_binary(Value)});
 parse_admin_register_opts([_Unknown | Rest], Acc) ->
-    %% Skip unknown options
+    %% Skip tokens that don't start with --
     parse_admin_register_opts(Rest, Acc).
+
+%% @doc Collect tokens until the next switch (starting with "--") or end of list
+collect_value_until_switch(Tokens) ->
+    collect_value_until_switch(Tokens, []).
+
+collect_value_until_switch([], Acc) ->
+    {string:join(lists:reverse(Acc), " "), []};
+collect_value_until_switch(["--" ++ _ | _] = Rest, Acc) ->
+    {string:join(lists:reverse(Acc), " "), Rest};
+collect_value_until_switch([Token | Rest], Acc) ->
+    collect_value_until_switch(Rest, [Token | Acc]).
+
+-ifdef(EUNIT).
+%% EUnit tests for parse_admin_register_opts/2
+parse_admin_register_opts_test_() ->
+    {"parse_admin_register_opts/2 tests",
+     [
+         ?_assertEqual(
+             #{<<"name">> => <<"John Doe">>,
+               <<"team">> => <<"DevOps">>,
+               <<"note">> => <<"Admin user">>},
+             parse_admin_register_opts(
+                 ["--name", "John", "Doe", "--team", "DevOps", "--note", "Admin", "user"],
+                 #{}
+             )
+         ),
+         ?_assertEqual(
+             #{<<"name">> => <<"John Doe">>,
+               <<"birthday">> => <<"24 Dec">>,
+               <<"team">> => <<"Engineering">>},
+             parse_admin_register_opts(
+                 ["--name", "John", "Doe", "--birthday", "24", "Dec", "--team", "Engineering"],
+                 #{}
+             )
+         )
+     ]}.
+
+-endif.
+
+
 
 %% @doc Parse cert renew options
 %% Examples:
@@ -1531,16 +1577,16 @@ execute_online_users(_State) ->
 %%====================================================================
 
 %% @doc Execute admin register command
-execute_admin_register(GpgFp, KeyFile, _Opts, _State) ->
+execute_admin_register(GpgFp, KeyFile, Opts, _State) ->
     %% Read the GPG public key file
     case file:read_file(KeyFile) of
         {ok, GpgPubKey} ->
             %% Send register_user command via event bus
-            Msg =
-                #{<<"type">> => <<"register_user">>,
-                  <<"gpg_fp">> => list_to_binary(GpgFp),
-                  <<"gpg_pub">> => GpgPubKey
-                 },
+            {ok, Msg} =
+                cryptic_messages:register_user(
+                  list_to_binary(GpgFp),
+                  GpgPubKey,
+                  Opts),
             send_to_server(Msg),
             cryptic_shell:print_info("User registration request sent...");
 
@@ -1571,40 +1617,28 @@ execute_admin_status(GpgFp, _State) ->
 
 %% @doc Execute admin suspend command
 execute_admin_suspend(GpgFp, _State) ->
-    Msg =
-        #{<<"type">> => <<"suspend_user">>,
-          <<"gpg_fp">> => list_to_binary(GpgFp)
-         },
+    {ok, Msg} = cryptic_messages:suspend_user(list_to_binary(GpgFp)),
     send_to_server(Msg),
     cryptic_shell:print_success("User suspend request sent").
 
 
 %% @doc Execute admin revoke command  
 execute_admin_revoke(GpgFp, _State) ->
-    Msg =
-        #{<<"type">> => <<"revoke_user">>,
-          <<"gpg_fp">> => list_to_binary(GpgFp)
-         },
+    {ok, Msg} = cryptic_messages:revoke_user(list_to_binary(GpgFp)),
     send_to_server(Msg),
     cryptic_shell:print_success("User revoke request sent").
 
 
 %% @doc Execute admin reactivate command
 execute_admin_reactivate(GpgFp, _State) ->
-    Msg =
-        #{<<"type">> => <<"reactivate_user">>,
-          <<"gpg_fp">> => list_to_binary(GpgFp)
-         },
+    {ok, Msg} = cryptic_messages:reactivate_user(list_to_binary(GpgFp)),
     send_to_server(Msg),
     cryptic_shell:print_success("User reactivate request sent").
 
 
 %% @doc Execute admin list certificates command
 execute_admin_list_certs(GpgFp, _State) ->
-    Msg =
-        #{<<"type">> => <<"list_certificates">>,
-          <<"gpg_fp">> => list_to_binary(GpgFp)
-         },
+    {ok, Msg} = cryptic_messages:list_certificates(list_to_binary(GpgFp)),
     send_to_server(Msg),
     cryptic_shell:print_info("Fetching certificates...").
 

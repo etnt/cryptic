@@ -2,7 +2,12 @@
 
 -include("cryptic.hrl").
 
--export([engine_status/0,
+-export([admin_register/2,
+         admin_suspend/1,
+         admin_reactivate/1,
+         admin_revoke/1,
+         admin_list_certificates/1,
+         engine_status/0,
          list_users/0,
          online_users/0,
          send_message/1,
@@ -11,6 +16,75 @@
          load_messages_before/4,
          load_messages_range/4
         ]).
+
+
+%%@doc Send register_user command via event bus
+-spec admin_register(binary(), binary()) -> ok | {error, term()}.
+admin_register(Fingerprint, KeyFilename) when is_binary(Fingerprint) andalso
+                                              is_binary(KeyFilename) ->
+    case file:read_file(KeyFilename) of
+        {ok, GpgPubKey} ->
+
+            {ok, Msg} =
+                cryptic_messages:register_user(
+                  Fingerprint,
+                  GpgPubKey),
+
+            cryptic_event_bus:publish(
+              #{type => websocket_outbound,
+                message => Msg
+               }),
+            ok;
+
+        {error, _Reason} = Error ->
+            Error
+    end.
+
+
+%%@doc Send suspend_user command via event bus
+-spec admin_suspend(binary()) -> ok | {error, term()}.
+admin_suspend(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:suspend_user(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+%%@doc Send reactivate_user command via event bus
+-spec admin_reactivate(binary()) -> ok | {error, term()}.
+admin_reactivate(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:reactivate_user(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+%%@doc Send revoke_user command via event bus
+-spec admin_revoke(binary()) -> ok | {error, term()}.
+admin_revoke(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:revoke_user(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+%%@doc Send list_certificates command via event bus
+-spec admin_list_certificates(binary()) -> ok | {error, term()}.
+admin_list_certificates(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:list_certificates(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
 
 
 load_recent_messages(CurrentUser, Peer, Limit) ->
