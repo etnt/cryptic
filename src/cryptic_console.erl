@@ -1294,10 +1294,44 @@ send_message_to_user(ToUsername, Message, State, ShowConfirmation) ->
             ?dbg("Sending message to ~s: ~s~n", [ToUsername, Message]),
             case cryptic_engine:send_message(EnginePid, ToUsername, Message) of
                 ok ->
+                    Timestamp = erlang:timestamp(),
+                    
+                    %% Save outgoing message to storage if database is enabled
+                    case State of
+                        #console_state{
+                            username = FromUsername,
+                            server_host = ServerHost,
+                            server_port = ServerPort,
+                            passphrase = Passphrase,
+                            db_enabled = true
+                        } when Passphrase =/= undefined ->
+                            DateTime = calendar:now_to_datetime(Timestamp),
+                            case
+                                cryptic_chat_storage:save_encrypted_message(
+                                    binary_to_list(FromUsername),
+                                    binary_to_list(ToUsername),
+                                    ServerHost,
+                                    ServerPort,
+                                    Message,
+                                    DateTime,
+                                    Passphrase
+                                )
+                            of
+                                ok ->
+                                    ?dbg("Outgoing message saved to storage~n", []);
+                                {error, SaveReason} ->
+                                    ?error(
+                                        "Failed to save outgoing message: ~p~n",
+                                        [SaveReason]
+                                    )
+                            end;
+                        _ ->
+                            ok
+                    end,
+                    
                     %% Display sent message confirmation with timestamp if requested
                     case ShowConfirmation of
                         true ->
-                            Timestamp = erlang:timestamp(),
                             cryptic_shell:print_sent_message(
                                 ToUsername, Message, Timestamp
                             );
