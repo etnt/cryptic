@@ -87,6 +87,9 @@
 %% API
 -export([main/1]).
 
+%% Used by cryptic_rpc
+-export([parse_admin_register_opts/2]).
+
 %% Include ANSI escape sequence macros for terminal formatting
 -include("cryptic_ansi.hrl").
 -include("cryptic.hrl").

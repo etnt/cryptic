@@ -3,6 +3,7 @@
 -include("cryptic.hrl").
 
 -export([admin_register/2,
+         admin_register/3,
          admin_suspend/1,
          admin_reactivate/1,
          admin_revoke/1,
@@ -22,13 +23,24 @@
 -spec admin_register(binary(), binary()) -> ok | {error, term()}.
 admin_register(Fingerprint, KeyFilename) when is_binary(Fingerprint) andalso
                                               is_binary(KeyFilename) ->
+    admin_register(Fingerprint, KeyFilename, _Metadata = <<"">>).
+
+%%@doc Send register_user command via event bus
+-spec admin_register(binary(), binary(), binary()) -> ok | {error, term()}.
+admin_register(Fingerprint, KeyFilename, Metadata)
+  when is_binary(Fingerprint) andalso
+       is_binary(KeyFilename) andalso
+       is_binary(Metadata) ->
+
     case file:read_file(KeyFilename) of
         {ok, GpgPubKey} ->
-
+            Mtoks = string:tokens(binary_to_list(Metadata), " "),
+            Opts = cryptic_console:parse_admin_register_opts(Mtoks, #{}),
             {ok, Msg} =
                 cryptic_messages:register_user(
                   Fingerprint,
-                  GpgPubKey),
+                  GpgPubKey,
+                  Opts),
 
             cryptic_event_bus:publish(
               #{type => websocket_outbound,
