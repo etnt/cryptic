@@ -88,11 +88,27 @@ process(Input) ->
             CodeText;
         ({text, PlainText}) -> 
             %% Text segments get emoji replacement first, then bold/italic processing
-            %% Convert to binary for emoji processing
-            PlainBin = unicode:characters_to_binary(PlainText),
+            %% Convert to binary for emoji processing (with error handling)
+            PlainBin = case unicode:characters_to_binary(PlainText) of
+                Bin when is_binary(Bin) -> 
+                    Bin;
+                {error, Converted, _RestData} ->
+                    %% Invalid UTF-8 - use what we could convert
+                    iolist_to_binary([Converted, "�"]);
+                {incomplete, Converted, _RestData} ->
+                    %% Incomplete UTF-8 - use what we could convert
+                    iolist_to_binary([Converted, "�"])
+            end,
             EmojiText = cryptic_emoji:replace_all(PlainBin),
-            %% Convert back to string for markdown formatting
-            EmojiStr = unicode:characters_to_list(EmojiText),
+            %% Convert back to string for markdown formatting (with error handling)
+            EmojiStr = case unicode:characters_to_list(EmojiText) of
+                List when is_list(List) ->
+                    List;
+                {error, Converted2, _RestData2} ->
+                    Converted2 ++ "�";
+                {incomplete, Converted2, _RestData2} ->
+                    Converted2 ++ "�"
+            end,
             Text1 = process_asterisks(EmojiStr),
             Text2 = process_underscores(Text1),
             Text2
@@ -102,8 +118,18 @@ process(Input) ->
 %% @private
 %% @doc Convert input to Unicode string format.
 %% Handles both binary (UTF-8 encoded) and string inputs.
+%% Handles invalid UTF-8 by replacing bad sequences with Unicode replacement character.
 to_string(Bin) when is_binary(Bin) ->
-    unicode:characters_to_list(Bin);
+    case unicode:characters_to_list(Bin) of
+        List when is_list(List) ->
+            List;
+        {error, Converted, _RestData} ->
+            %% Invalid UTF-8 - return what we could convert and add replacement char
+            Converted ++ "�";
+        {incomplete, Converted, _RestData} ->
+            %% Incomplete UTF-8 - return what we could convert and add replacement char
+            Converted ++ "�"
+    end;
 to_string(Str) when is_list(Str) ->
     Str.
 

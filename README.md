@@ -1070,6 +1070,12 @@ AeadKey = cryptic_lib:derive_aead_key_ephemeral(SharedSecret, EphemeralPubKey),
 AeadKey = cryptic_lib:derive_aead_key_simple(SharedSecret),
 ```
 
+## References
+
+The [X3DH Key Agreement Protocol](https://signal.org/docs/specifications/x3dh/)
+The [Double Ratchet Algorithm](https://signal.org/docs/specifications/doubleratchet/)
+The Messaging Layer Security (MLS) Protocol - [RFC 9420](https://datatracker.ietf.org/doc/rfc9420/)
+
 ## License
 
 Mozilla Public License Version 2.0

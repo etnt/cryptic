@@ -934,8 +934,17 @@ print_history_message(
     %% Integrated processing ensures emoji inside backticks stay literal
     MessageBin =
         case Message of
-            M when is_binary(M) -> M;
-            M when is_list(M) -> unicode:characters_to_binary(M)
+            M when is_binary(M) -> 
+                M;
+            M when is_list(M) -> 
+                case unicode:characters_to_binary(M) of
+                    Bin when is_binary(Bin) -> 
+                        Bin;
+                    {error, Converted, _RestData} ->
+                        iolist_to_binary([Converted, "�"]);
+                    {incomplete, Converted, _RestData} ->
+                        iolist_to_binary([Converted, "�"])
+                end
         end,
     %% Single-pass processing: markdown handles both emoji and formatting
     MessageStr = cryptic_markdown:process(MessageBin),

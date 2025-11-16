@@ -2,21 +2,194 @@
 
 -include("cryptic.hrl").
 
--export([history/1, send_message/1, subscribe/1]).
+-export([admin_register/2,
+         admin_register/3,
+         admin_suspend/1,
+         admin_reactivate/1,
+         admin_revoke/1,
+         admin_list_certificates/1,
+         engine_status/0,
+         list_users/0,
+         online_users/0,
+         send_message/1,
+         send_to_bus/1,
+         load_recent_messages/3,
+         load_messages_before/4,
+         load_messages_range/4
+        ]).
 
-%% Get message history with PeerId
-history(_Peer) ->
-    %% SQLite query here
-    {ok, _Messages = []}.
+
+%%@doc Send register_user command via event bus
+-spec admin_register(binary(), binary()) -> ok | {error, term()}.
+admin_register(Fingerprint, KeyFilename) when is_binary(Fingerprint) andalso
+                                              is_binary(KeyFilename) ->
+    admin_register(Fingerprint, KeyFilename, _Metadata = <<"">>).
+
+%%@doc Send register_user command via event bus
+-spec admin_register(binary(), binary(), binary()) -> ok | {error, term()}.
+admin_register(Fingerprint, KeyFilename, Metadata)
+  when is_binary(Fingerprint) andalso
+       is_binary(KeyFilename) andalso
+       is_binary(Metadata) ->
+
+    case file:read_file(KeyFilename) of
+        {ok, GpgPubKey} ->
+            Mtoks = string:tokens(binary_to_list(Metadata), " "),
+            Opts = cryptic_console:parse_admin_register_opts(Mtoks, #{}),
+            {ok, Msg} =
+                cryptic_messages:register_user(
+                  Fingerprint,
+                  GpgPubKey,
+                  Opts),
+
+            cryptic_event_bus:publish(
+              #{type => websocket_outbound,
+                message => Msg
+               }),
+            ok;
+
+        {error, _Reason} = Error ->
+            Error
+    end.
+
+
+%%@doc Send suspend_user command via event bus
+-spec admin_suspend(binary()) -> ok | {error, term()}.
+admin_suspend(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:suspend_user(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+%%@doc Send reactivate_user command via event bus
+-spec admin_reactivate(binary()) -> ok | {error, term()}.
+admin_reactivate(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:reactivate_user(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+%%@doc Send revoke_user command via event bus
+-spec admin_revoke(binary()) -> ok | {error, term()}.
+admin_revoke(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:revoke_user(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+%%@doc Send list_certificates command via event bus
+-spec admin_list_certificates(binary()) -> ok | {error, term()}.
+admin_list_certificates(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, Msg} = cryptic_messages:list_certificates(Fingerprint),
+
+    cryptic_event_bus:publish(
+      #{type => websocket_outbound,
+        message => Msg
+       }),
+    ok.
+
+
+
+load_recent_messages(CurrentUser, Peer, Limit) ->
+    cryptic_tui_bridge:get_recent_messages(CurrentUser, Peer, Limit).
+
+load_messages_before(_CurrentUser, _Peer, _BeforeTimestamp, _Limit) ->
+    tbd.
+
+load_messages_range(_CurrentUser, _Peer, _StartTimestamp, _EndTimestamp) ->
+    tbd.    
 
 %% Send encrypted outbound message
 send_message(JsonMsg) ->
-    %%cryptic_event_bus:publish(Payload),
-    MsgMap = jsx:decode(JsonMsg, [return_maps]),
-    ?info("~p:send_message: Payload: ~p~n", [?MODULE, MsgMap]),
+    ?info("~p:send_message: JsonMsg: ~p~n", [?MODULE, JsonMsg]),
+    Msg = jsx:decode(JsonMsg, [return_maps]),
+    ?info("~p:send_message: Payload: ~p~n", [?MODULE, Msg]),
+
+    ToUser = maps:get(<<"to_user">>, Msg),
+    Plaintext = maps:get(<<"plaintext">>, Msg),
+
+    case get_engine_pid() of
+        undefined ->
+            ?error("~p: Cannot send message, Engine PID unknown~n", [?MODULE]),
+            {error, no_engine_pid};
+
+        EnginePid when is_pid(EnginePid) ->
+            ?dbg("~p: Sending message to Engine PID: ~p~n", [?MODULE, EnginePid]),
+            case cryptic_engine:send_message(EnginePid,
+                                             ToUser,
+                                            Plaintext)
+            of
+                ok ->
+                    ?info("~p: Message sent to Engine successfully~n", [?MODULE]),
+                    ok;
+                {error, Reason} ->
+                    ?error("~p: Failed to send message to Engine: ~p~n", [?MODULE, Reason]),
+                    {error, Reason}
+            end
+    end.
+
+
+engine_status() ->
+    case get_engine_pid() of
+        undefined ->
+            ?error("~p: Cannot get engine status, Engine PID unknown~n", [?MODULE]),
+            {error, no_engine_pid};
+
+        EnginePid when is_pid(EnginePid) ->
+            ?dbg("~p: Returning engine status~n", [?MODULE]),
+            case cryptic_engine:get_engine_status(EnginePid) of
+                {ok, Status} ->
+                    {ok, jsx:encode(Status)};
+                {error, _Reason} = Error ->
+                    Error
+            end
+    end.
+
+
+list_users() ->
+    {ok, Msg} = cryptic_messages:list_users(),
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Msg
+    }),
     ok.
 
-%% Subscribe Rust client to events
-subscribe(Pid) ->
-    cryptic_event_bus:subscribe(Pid),
+
+online_users() ->
+    {ok, Msg} = cryptic_messages:online_users(),
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Msg
+    }),
     ok.
+
+
+send_to_bus(JsonMsg) ->
+    ?info("~p:send_to_bus: JsonMsg: ~p~n", [?MODULE, JsonMsg]),
+    Msg = jsx:decode(JsonMsg, [return_maps]),
+    ?info("~p:send_to_bus: Payload: ~p~n", [?MODULE, Msg]),
+
+    cryptic_event_bus:publish(#{
+        type => websocket_outbound,
+        message => Msg
+    }),
+    ok.
+
+get_engine_pid() ->
+    cryptic_console ! {get_engine_pid, self()},
+    receive
+        {engine_pid, Pid} ->
+            Pid
+    after 3000 ->
+        ?error("~p: could not get the Engine Pid!~n", [?MODULE]),
+        undefined
+    end.

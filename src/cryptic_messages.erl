@@ -243,12 +243,12 @@
     online_users/0,
     get_messages/0,
     request_pending_messages/0,
-
-    % Client to Server - Invite Management
-    invite_create/1,
-    invite_list/0,
-    invite_show/1,
-    invite_revoke/1,
+    register_user/2,
+    register_user/3,
+    reactivate_user/1,
+    revoke_user/1,
+    suspend_user/1,
+    list_certificates/1,
 
     % Client to Server - Certificate Management
     cert_status_query/0,
@@ -282,13 +282,10 @@
     | x3dh
     | ratchet
     | list_users
+    | register_user
     | online_users
     | get_messages
     | request_pending_messages
-    | invite_create
-    | invite_list
-    | invite_show
-    | invite_revoke
     | cert_status_query
     | cert_renew
     | welcome
@@ -470,6 +467,71 @@ send_message_ratchet(MsgMap) ->
 %%% Client to Server Messages - User & Message Management
 %%% ============================================================================
 
+%% @doc Construct the `register_user' message
+%%
+%% Requests the registration of a user.
+%%
+%% @returns `{ok, Message}'
+-spec register_user(binary(), binary()) -> validation_result().
+register_user(Fingerprint, GPGKey) when is_binary(Fingerprint) andalso
+                                        is_binary(GPGKey) ->
+    register_user(Fingerprint, GPGKey, #{}).
+
+-spec register_user(binary(), binary(), map()) -> validation_result().
+register_user(Fingerprint, GPGKey, Opts) when is_binary(Fingerprint) andalso
+                                              is_binary(GPGKey) andalso
+                                              is_map(Opts) ->
+    {ok, #{<<"type">> => <<"register_user">>,
+           <<"gpg_fp">> => Fingerprint,
+           <<"gpg_pub">> => GPGKey,
+           <<"metadata">> => jsx:encode(Opts)
+          }}.
+
+%% @doc Construct the `suspend_user' message
+%%
+%% Requests the suspension of a user.
+%%
+%% @returns `{ok, Message}'
+-spec suspend_user(binary()) -> validation_result().
+suspend_user(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, #{<<"type">> => <<"suspend_user">>,
+           <<"gpg_fp">> => Fingerprint
+          }}.
+
+%% @doc Construct the `reactivate_user' message
+%%
+%% Requests the reactivation of a user.
+%%
+%% @returns `{ok, Message}'
+-spec reactivate_user(binary()) -> validation_result().
+reactivate_user(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, #{<<"type">> => <<"reactivate_user">>,
+           <<"gpg_fp">> => Fingerprint
+          }}.
+
+%% @doc Construct the `revoke_user' message
+%%
+%% Requests the revocation of a user.
+%%
+%% @returns `{ok, Message}'
+-spec revoke_user(binary()) -> validation_result().
+revoke_user(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, #{<<"type">> => <<"revoke_user">>,
+           <<"gpg_fp">> => Fingerprint
+          }}.
+
+%% @doc Construct the `list_certificates' message
+%%
+%% Requests the certificates of a user.
+%%
+%% @returns `{ok, Message}'
+-spec list_certificates(binary()) -> validation_result().
+list_certificates(Fingerprint) when is_binary(Fingerprint) ->
+    {ok, #{<<"type">> => <<"list_certificates">>,
+           <<"gpg_fp">> => Fingerprint
+          }}.
+
+
 %% @doc Construct the `list_users' message
 %%
 %% Requests a list of all registered users.
@@ -512,82 +574,6 @@ get_messages() ->
 request_pending_messages() ->
     {ok, #{<<"type">> => <<"request_pending_messages">>}}.
 
-%%% ============================================================================
-%%% Client to Server Messages - Invite Management
-%%% ============================================================================
-
-%% @doc Construct the `invite_create' message
-%%
-%% Creates a new GPG-signed invite token for onboarding new users.
-%%
-%% @param MsgMap Map containing:
-%%   - `expiry_hours' (integer): Hours until invite expires (default 24)
-%%   - `meta' (map, optional): Metadata like #{note => &lt;&lt;"text">>}
-%% @returns `{ok, Message}' or `{error, Reason}'
--spec invite_create(map()) -> validation_result().
-invite_create(MsgMap) ->
-    case mk_payload(invite_create, MsgMap) of
-        {ok, Payload} ->
-            BaseMsg = #{
-                <<"type">> => <<"invite_create">>,
-                <<"expiry_hours">> => maps:get(expiry_hours, Payload, 24)
-            },
-            Message =
-                case maps:get(meta, Payload, undefined) of
-                    undefined -> BaseMsg;
-                    Meta -> BaseMsg#{<<"meta">> => Meta}
-                end,
-            {ok, Message};
-        Error ->
-            Error
-    end.
-
-%% @doc Construct the `invite_list' message
-%%
-%% Requests all invites created by the authenticated user.
-%%
-%% @returns `{ok, Message}'
--spec invite_list() -> validation_result().
-invite_list() ->
-    {ok, #{<<"type">> => <<"invite_list">>}}.
-
-%% @doc Construct the `invite_show' message
-%%
-%% Retrieves details for a specific invite.
-%%
-%% @param MsgMap Map containing:
-%%   - `invite_id' (binary): Invite identifier
-%% @returns `{ok, Message}' or `{error, Reason}'
--spec invite_show(map()) -> validation_result().
-invite_show(MsgMap) ->
-    case mk_payload(invite_show, MsgMap) of
-        {ok, Payload} ->
-            {ok, #{
-                <<"type">> => <<"invite_show">>,
-                <<"invite_id">> => maps:get(invite_id, Payload)
-            }};
-        Error ->
-            Error
-    end.
-
-%% @doc Construct the `invite_revoke' message
-%%
-%% Revokes an unused invite token.
-%%
-%% @param MsgMap Map containing:
-%%   - `invite_id' (binary): Invite identifier to revoke
-%% @returns `{ok, Message}' or `{error, Reason}'
--spec invite_revoke(map()) -> validation_result().
-invite_revoke(MsgMap) ->
-    case mk_payload(invite_revoke, MsgMap) of
-        {ok, Payload} ->
-            {ok, #{
-                <<"type">> => <<"invite_revoke">>,
-                <<"invite_id">> => maps:get(invite_id, Payload)
-            }};
-        Error ->
-            Error
-    end.
 
 %%% ============================================================================
 %%% Client to Server Messages - Certificate Management
