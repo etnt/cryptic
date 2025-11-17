@@ -98,7 +98,7 @@ init([RustNode, Username, Passphrase, CustomFilter]) ->
     process_flag(trap_exit, true),
     ?info("~p(~p) Started , RustNode=~p , CustomFilter=~p~n",
           [?MODULE,self(),RustNode, CustomFilter]),
-    X = catch erlang:monitor_node(RustNode, true),
+    erlang:monitor_node(RustNode, true),
 
     %% Inform the cryptic_console since it may be running
     %% as a detached node and need to have the Passphrase!
