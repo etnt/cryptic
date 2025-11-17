@@ -40,6 +40,25 @@ An ****external TUI**** (Terminal User Interface) exist, written in Rust, that
 connects via the Erlang distribution protocol as a hidden node.
 See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
+### Running the TUI Client in Docker
+
+The TUI client can be run in a Docker container to connect to any Cryptic server:
+
+```bash
+# Quick start - connect to a server
+TUI_USERNAME=alice \
+CRYPTIC_SERVER_HOST=relay.example.com \
+CRYPTIC_SERVER_PORT=8443 \
+docker-compose run --rm cryptic-tui
+```
+
+**See detailed guides:**
+- 📖 [Quick Start Guide](QUICKSTART-DOCKER-TUI.md) - Step-by-step setup
+- 📖 [Simple Docker TUI Guide](docs/DOCKER-TUI-SIMPLE.md) - Quick reference
+- 📖 [Docker TUI Summary](DOCKER-TUI-SUMMARY.md) - Architecture overview
+
+**Prerequisites**: Use `bin/cryptic-onboard` to set up your client identity (GPG key + certificate) before running the Docker client. The client connects to an existing Cryptic server - you don't need to build or run the server yourself.
+
 ## Documentation
 
 📚 **[Complete API Documentation](https://etnt.github.io/cryptic/)** - Comprehensive EDoc-generated documentation

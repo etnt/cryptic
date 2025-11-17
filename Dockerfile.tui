@@ -1,0 +1,158 @@
+# Multi-stage Dockerfile for Cryptic TUI Client
+# Builds a containerized terminal UI that connects to Cryptic Erlang nodes
+# Uses the bin/cryptic script with --tui mode to run both Erlang backend and Rust UI
+#
+# TEMPORARY REQUIREMENT:
+# The cryptic-tui repository must be cloned as a sibling directory to this repo.
+# Directory structure:
+#   parent/
+#     ├── cryptic/      (this repo)
+#     └── cryptic-tui/  (TUI repo from git@github.com:etnt/cryptic-tui.git)
+#
+# Once cryptic-tui is publicly released, this will be updated to clone from GitHub.
+
+# Stage 1: Build Rust TUI
+FROM rust:1.83-alpine AS rust-builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    openssl-dev \
+    openssl-libs-static \
+    git
+
+# Install Rust nightly (required for edition2024 feature used by erl_dist crate)
+RUN rustup install nightly && rustup default nightly
+
+WORKDIR /build
+
+# Build argument for cryptic-tui source
+# Options:
+#   - "git" (default when public): Will clone from GitHub (not yet available)
+#   - "local": Copy from ../cryptic-tui directory (for local development)
+ARG TUI_SOURCE=local
+
+# Copy cryptic-tui source (from parent context)
+# The build context is the parent directory, so cryptic-tui/ is accessible
+COPY cryptic-tui/Cargo.toml cryptic-tui/Cargo.lock ./
+COPY cryptic-tui/src ./src
+
+# Build release binary with static linking for alpine
+RUN cargo build --release
+
+# Stage 2: Build Erlang client (full application with engine, ws_client, etc.)
+FROM erlang:28.1-alpine AS erlang-builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    git \
+    make \
+    gcc \
+    g++ \
+    libc-dev \
+    openssl-dev \
+    ncurses-dev \
+    libsodium-dev \
+    sqlite-dev \
+    pkgconf
+
+WORKDIR /buildroot
+
+# Copy rebar files first for dependency caching
+COPY cryptic/rebar.config cryptic/rebar.lock ./
+
+# Get dependencies
+RUN rebar3 get-deps
+
+# Copy source code from cryptic/ directory
+COPY cryptic/ .
+
+# Build NIF
+RUN cd c_src && \
+    make clean && \
+    UNAME_ARCH=aarch64 make
+
+# Clean any existing builds (important: removes any Mach-O binaries from Mac)
+RUN rebar3 clean -a
+
+# Compile Erlang application (not a release, we'll run from _build/default)
+# This will compile NIFs for Linux/Alpine
+RUN rebar3 compile
+
+# Stage 3: Runtime image
+# IMPORTANT: Must use same Erlang version as builder (28.1) for BEAM compatibility
+FROM erlang:28.1-alpine
+
+# Install runtime dependencies (including sqlite-libs for esqlite NIF)
+RUN apk add --no-cache \
+    ncurses-libs \
+    ncurses-terminfo-base \
+    libstdc++ \
+    libgcc \
+    libsodium \
+    sqlite-libs \
+    gnupg \
+    bash \
+    su-exec
+
+# Create cryptic user and group
+RUN addgroup -S cryptic && adduser -S cryptic -G cryptic
+
+# Set working directory
+WORKDIR /opt/cryptic
+
+# Copy Erlang compiled application from erlang-builder (_build/default structure)
+COPY --from=erlang-builder /buildroot/_build/default /opt/cryptic/_build/default
+
+# Copy source files (needed by bin/cryptic script)
+COPY --from=erlang-builder /buildroot/src /opt/cryptic/src
+COPY --from=erlang-builder /buildroot/include /opt/cryptic/include
+COPY --from=erlang-builder /buildroot/priv /opt/cryptic/priv
+COPY --from=erlang-builder /buildroot/rebar.config /opt/cryptic/
+
+# Copy scripts (including bin/cryptic launcher)
+COPY --from=erlang-builder /buildroot/bin /opt/cryptic/bin
+COPY --from=erlang-builder /buildroot/scripts /opt/cryptic/scripts
+
+# Copy Rust TUI binary from rust-builder
+COPY --from=rust-builder /build/target/release/cryptic-tui /usr/local/bin/
+
+# Make scripts executable
+RUN chmod +x /opt/cryptic/bin/* /opt/cryptic/scripts/*.sh
+
+
+# Create directories for runtime data (do NOT create /home/cryptic/.erlang.cookie as a directory)
+RUN mkdir -p \
+    /home/cryptic/.cryptic/logs \
+    /home/cryptic/.cryptic/certificates && \
+    chown -R cryptic:cryptic /home/cryptic /opt/cryptic
+
+# Set up Erlang cookie
+RUN echo -n "cryptic_secret_cookie" > /home/cryptic/.erlang.cookie && \
+    chmod 400 /home/cryptic/.erlang.cookie && \
+    chown cryptic:cryptic /home/cryptic/.erlang.cookie
+
+# Set environment variables (matching bin/cryptic script options)
+ENV CRYPTIC_USERNAME=${CRYPTIC_USERNAME:-"docker-client"} \
+    CRYPTIC_SERVER_HOST=${CRYPTIC_SERVER_HOST:-"cryptic-server"} \
+    CRYPTIC_SERVER_PORT=${CRYPTIC_SERVER_PORT:-"8443"} \
+    CRYPTIC_ENABLE_DB=${CRYPTIC_ENABLE_DB:-"false"} \
+    CRYPTIC_NODE_NAME=${CRYPTIC_NODE_NAME:-"localhost"} \
+    CRYPTIC_TUI_MODE=${CRYPTIC_TUI_MODE:-"true"} \
+    CRYPTIC_INTERACTIVE=${CRYPTIC_INTERACTIVE:-"false"} \
+    HOME=/home/cryptic \
+    TERM=xterm-256color \
+    PATH=/opt/cryptic/bin:$PATH
+
+# Expose EPMD port and dynamic port range for distributed Erlang
+EXPOSE 4369 9000-9100
+
+# Switch to cryptic user
+USER cryptic
+
+# Set working directory to user home
+WORKDIR /home/cryptic
+
+# Default: start using bin/cryptic with --tui mode
+# The script will handle starting both Erlang backend and Rust TUI
+CMD ["/opt/cryptic/bin/cryptic", "--tui"]

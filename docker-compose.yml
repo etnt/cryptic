@@ -60,6 +60,81 @@ services:
       retries: 3
       start_period: 10s
 
+  # Cryptic TUI Client (interactive terminal UI)
+  # NOTE: Requires cryptic-tui repository as sibling directory during build
+  # See QUICKSTART-DOCKER-TUI.md for setup instructions
+  cryptic-tui:
+    build:
+      context: ..  # Parent directory to access both cryptic/ and cryptic-tui/
+      dockerfile: cryptic/Dockerfile.tui
+    image: cryptic-tui:latest
+    container_name: cryptic-tui
+    
+    # Interactive mode with TTY
+    stdin_open: true
+    tty: true
+    
+    # Environment variables (map to bin/cryptic script options)
+    environment:
+      # Username for authentication (required)
+      # Set via TUI_USERNAME environment variable when running
+      - CRYPTIC_USERNAME=${TUI_USERNAME:-alice}
+      
+      # Server connection details (can be overridden)
+      # Default to localhost which maps to host machine via extra_hosts
+      # Override with CRYPTIC_SERVER_HOST=cryptic-server for Docker server
+      # or CRYPTIC_SERVER_HOST=relay.example.com for remote server
+      - CRYPTIC_SERVER_HOST=${CRYPTIC_SERVER_HOST:-localhost}
+      - CRYPTIC_SERVER_PORT=${CRYPTIC_SERVER_PORT:-8443}
+      
+      # Erlang node configuration
+      - CRYPTIC_NODE_NAME=${CRYPTIC_NODE_NAME:-localhost}
+      
+      # Enable encrypted message storage (optional)
+      - CRYPTIC_ENABLE_DB=${CRYPTIC_ENABLE_DB:-false}
+      
+      # TUI mode flags (handled by bin/cryptic --tui)
+      - CRYPTIC_TUI_MODE=true
+      - CRYPTIC_INTERACTIVE=false
+      
+      # Terminal configuration
+      - TERM=xterm-256color
+    
+    # Volume mounts for cryptographic keys, database, and logs
+    volumes:
+      # CRITICAL: Mount entire .cryptic directory for persistent storage
+      # This directory contains ALL user data:
+      # - certificates/          mTLS client certificates
+      # - keys.encrypted         Encrypted X3DH identity keys
+      # - sessions/*.session     Double Ratchet session states (encrypted)
+      # - cryptic_chat.db        SQLite message history (if --enable-db)
+      # - logs/                  Application logs
+      #
+      # MUST be read-write because:
+      # - cryptic_lib saves/loads encrypted identity keys
+      # - cryptic_engine updates session states after each message
+      # - cryptic_chat_storage writes to SQLite database
+      # - Application writes log files
+      - ${HOME}/.cryptic:/home/cryptic/.cryptic
+      
+      # Mount Erlang cookie (read-only is fine, never modified)
+      - ${HOME}/.erlang.cookie:/home/cryptic/.erlang.cookie:ro
+    
+    # NOTE: No depends_on - client can connect to any server (local or remote)
+    # If connecting to local cryptic-server, start it separately first
+    
+    # Network configuration (only needed if connecting to local server)
+    networks:
+      - cryptic-network
+    
+    # Map localhost in container to host machine (for Mac/Windows Docker Desktop)
+    # This allows container to connect to server running on host's localhost:8443
+    extra_hosts:
+      - "localhost:host-gateway"
+    
+    # Don't auto-restart (this is an interactive client)
+    restart: "no"
+
 # Named volumes for persistent data
 volumes:
   cryptic-logs:
@@ -68,6 +143,7 @@ volumes:
     driver: local
   cryptic-data:
     driver: local
+  # Note: cryptic-tui-logs removed - using host ~/.cryptic mount instead
 
 # Network configuration
 networks:

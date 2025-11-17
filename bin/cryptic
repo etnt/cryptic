@@ -105,10 +105,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Check required parameters
+# Allow USERNAME to come from environment variable CRYPTIC_USERNAME if not set via -u flag
 if [ -z "$USERNAME" ]; then
-    echo "Error: username is required"
-    echo ""
-    usage
+    if [ -n "$CRYPTIC_USERNAME" ]; then
+        USERNAME="$CRYPTIC_USERNAME"
+    else
+        echo "Error: username is required"
+        echo ""
+        usage
+    fi
 fi
 
 # Set node host if not specified (just the hostname part, not full node name)
@@ -146,8 +151,11 @@ for dir in "$REPO_ROOT"/_build/default/lib/*/ebin; do
     fi
 done
 
-# Note: We do NOT add -sname here because the Erlang application
-# will start distribution itself based on CRYPTIC_NODE_NAME
+# Add node name for distributed Erlang
+# For TUI mode, the node MUST be named before starting in detached mode
+# so the TUI can connect to it
+FULL_NODE_NAME="${USERNAME}@${NODE_NAME}"
+ERL_ARGS+=(-sname "$USERNAME")
 
 # Add appropriate shell mode flags
 if [ "$TUI_MODE" = "true" ]; then
