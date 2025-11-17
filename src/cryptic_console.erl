@@ -107,48 +107,41 @@
     input_buffer_table :: ets:tid() | undefined,
     notifier :: string() | undefined,
     passphrase :: binary() | undefined,
-    % Whether encrypted message storage is enabled
-    db_enabled :: boolean()
+    %% Whether encrypted message storage is enabled
+    db_enabled :: boolean(),
+    %% Are we using an external TUI?
+    tui_mode = false :: boolean()
 }).
 
 %%%===================================================================
-%%% API Functions
+%%% Api Functions
 %%%===================================================================
+
 
 %% @doc Main entry point for the console
 -spec main(Config :: map()) -> ok.
 main(InitCfg) ->
     process_flag(trap_exit, true),
 
-    %% For example, the TUI bridge want to get the engine_pid
-    %% so we must make us visible to it.
-    register(?MODULE, self()),
-
-    %% Set UTF-8 encoding immediately for emoji support
-    io:setopts(standard_io, [{encoding, utf8}]),
-    io:setopts(group_leader(), [{encoding, utf8}]),
-
-    cryptic_shell:print_info("Cryptic Console starting..."),
-    ok = application:load(cryptic),
-
-    cryptic_event_bus:start_link(),
-
-    Username = maps:get(username, InitCfg),
-
-    %% Initialize the enhanced shell first
-    case
-        cryptic_shell:start_shell(#{
-            verbose => maps:get(verbose, InitCfg, false)
-        })
-    of
-        ok ->
+     %% Initialize the enhanced shell only if not in TUI mode
+    case is_tui_mode(InitCfg) of
+        true ->
+            %% In TUI mode, skip shell initialization
+            %% The external cryptic-tui will handle all UI
             ok;
-        {error, ShellError} ->
-            cryptic_shell:print_warning(
-                "Enhanced shell unavailable, using basic mode: " ++
-                    lists:flatten(io_lib:format("~p", [ShellError]))
-            )
+        false ->
+            %% Initialize the enhanced shell for interactive mode
+            case cryptic_shell:start_shell(InitCfg) of
+                ok ->
+                    ok;
+                {error, _ShellError} ->
+                    ?error("Failed to start cryptic shell, stopping...~n",[]),
+                    init:stop(1)
+            end
     end,
+
+    %% Prompt for passphrase early
+    Passphrase = get_passphrase(maps:get(tui_mode, InitCfg, false)),
 
     %% Initialize alias storage
     case cryptic_alias:initialize() of
@@ -159,8 +152,10 @@ main(InitCfg) ->
             ok
     end,
 
+    %% Start the Event bus
+    cryptic_event_bus:start_link(),
+
     %% Now continue with initialization
-    setup_event_management(InitCfg),
     CertCfg = get_cert_config(InitCfg),
 
     %% Start WebSocket client
@@ -219,14 +214,12 @@ main(InitCfg) ->
                 halt(1)
         end,
 
-    %% Prompt for passphrase early, before initializing cryptic engine
-    Passphrase = get_passphrase(),
-
     %% Check if database storage is enabled (from config map or application env)
     DbEnabled = maps:get(
         enable_db, InitCfg, application:get_env(cryptic, enable_db, false)
     ),
     %% Initialize message storage only if enabled
+    Username = maps:get(username, InitCfg),
     case DbEnabled of
         true ->
             case
@@ -265,12 +258,14 @@ main(InitCfg) ->
     ok = cryptic_event_bus:subscribe(ConsolePid, ConsoleFilter),
 
     %% Start cryptic engine with passphrase and WebSocket client PID
+    %% In TUI mode, pass the flag so engine knows to defer key loading
     EngineCfg = CertCfg#{
         callback_mod => cryptic_console_callbacks,
         username => Username,
         passphrase => Passphrase,
         ws_client_pid => WsClientPid,
-        console_pid => ConsolePid
+        console_pid => ConsolePid,
+        tui_mode => maps:get(tui_mode, InitCfg, false)
     },
     {ok, EnginePid} = cryptic_engine:start_link(EngineCfg),
 
@@ -302,15 +297,23 @@ main(InitCfg) ->
         input_buffer_table = InputBufferTable,
         notifier = maps:get(notifier, InitCfg, undefined),
         passphrase = Passphrase,
-        db_enabled = DbEnabled
+        db_enabled = DbEnabled,
+        tui_mode = maps:get(tui_mode, InitCfg, false)
     },
 
-    cryptic_shell:print_success(
-        "Cryptic Console ready. Type 'help' for commands."
-    ),
-
-    %% Start command loop
-    command_loop(State).
+    %% Start command loop or wait in TUI mode
+    case is_tui_mode(InitCfg) of
+        true ->
+            %% In TUI mode, don't start the command loop
+            %% Just wait for messages and keep the process alive
+            tui_wait_loop(State);
+        false ->
+            %% Interactive mode - start command loop
+            cryptic_shell:print_success(
+                "Cryptic Console ready. Type 'help' for commands."
+            ),
+            command_loop(State)
+    end.
 
 %%%===================================================================
 %%% Internal Functions
@@ -327,8 +330,16 @@ send_to_server(Message) ->
     ok.
 
 %% @doc Prompt for and get the passphrase securely
--spec get_passphrase() -> binary().
-get_passphrase() ->
+-spec get_passphrase(boolean()) -> binary().
+get_passphrase(true = _TUImode) ->
+    receive
+        {set_passphrase, Passphrase} ->
+            Passphrase
+    after 30000 ->
+        ?error("~p: No passphrase received, stopping...~ n",[?MODULE]),
+        init:stop(1)
+    end;
+get_passphrase(false = TUImode) ->
     case cryptic_shell:get_password("Enter passphrase: ") of
         eof ->
             cryptic_shell:print_error("Passphrase required. Exiting..."),
@@ -339,7 +350,7 @@ get_passphrase() ->
                     io:format(
                         "Empty passphrase not allowed. Please try again.\r\n"
                     ),
-                    get_passphrase();
+                    get_passphrase(TUImode);
                 _ ->
                     list_to_binary(Passphrase)
             end;
@@ -373,39 +384,13 @@ format_connection_error({down, {shutdown, Reason}}) ->
 format_connection_error(Reason) ->
     "Connection failed: " ++ lists:flatten(io_lib:format("~p", [Reason])).
 
-%% @doc Setup event management
--spec setup_event_management(Config :: map()) -> ok.
-setup_event_management(Config) ->
-    Username = maps:get(username, Config),
-
-    %% Start the event manager for logging
-    case gen_event:start_link({local, cryptic_event_manager}) of
-        {ok, _} ->
-            ok;
-        {error, {already_started, _}} ->
-            ok;
-        {error, Reason} ->
-            io:format("Failed to start event manager: ~p~n", [Reason]),
-            throw(event_manager)
-    end,
-
-    %% Set up event handlers for UI client with client configuration
-    EventCfg = Config#{
-        log_type => client,
-        log_dir => "logs",
-        username => Username
-    },
-    case cryptic_event_manager:setup_event_handlers(EventCfg) of
-        ok ->
-            ok;
-        {error, SetupReason} ->
-            io:format("Failed to setup event handlers: ~p~n", [SetupReason])
-    end.
 
 %%% @doc Get certificate configuration
 -spec get_cert_config(Cfg :: map()) -> map().
 get_cert_config(Cfg) ->
     Username = binary_to_list(maps:get(username, Cfg)),
+    CrypticDir = maps:get(cryptic_dir, Cfg),
+
     ServerHost =
         case maps:get(server_host, Cfg) of
             S when is_binary(S) -> binary_to_list(S);
@@ -413,7 +398,7 @@ get_cert_config(Cfg) ->
             _ -> "localhost"
         end,
     ServerPort = maps:get(server_port, Cfg, 8443),
-    CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
+
     %% Create certificate configuration using environment variables
     CertFile =
         case os:getenv("CRYPTIC_CLIENT_CERT") of
@@ -449,6 +434,7 @@ command_loop(State) ->
 
     %% Wait for either input or messages
     wait_for_input_or_messages(InputPid, MonitorRef, State).
+
 
 %% @doc Spawn an input process to get user input asynchronously
 %% The input process will wait for user input and send the result back
@@ -581,7 +567,105 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
         {get_engine_pid, From}  ->
             %% For example, from the TUI bridge process
             From ! {engine_pid, State#console_state.engine_pid},
+            wait_for_input_or_messages(InputPid, MonitorRef, State);
+
+        Other ->
+            ?dbg("cryptic_console received unknown message: ~p~n", [Other]),
             wait_for_input_or_messages(InputPid, MonitorRef, State)
+
+    end.
+
+%% @doc Wait loop for TUI mode - just handle messages, no input
+%% In TUI mode, the external cryptic-tui handles all user interaction
+%% This loop keeps the backend alive and processes events
+tui_wait_loop(State) ->
+    receive
+        {event, #{type := system_message, message := Message}} ->
+            ?dbg("TUI backend received system message: ~s~n", [Message]),
+            tui_wait_loop(State);
+        {event, #{type := deliver_message, from := FromUsername, message := Message, timestamp := Timestamp}} ->
+            ?dbg("TUI backend received message from ~s~n", [FromUsername]),
+            %% Save message to storage if database is enabled
+            case State of
+                #console_state{
+                    username = ToUsername,
+                    server_host = ServerHost,
+                    server_port = ServerPort,
+                    passphrase = Passphrase,
+                    db_enabled = true
+                } when Passphrase =/= undefined, Passphrase =/= <<"tui-mode-placeholder">> ->
+                    DateTime = calendar:now_to_datetime(Timestamp),
+                    case
+                        cryptic_chat_storage:save_encrypted_message(
+                            FromUsername,
+                            binary_to_list(ToUsername),
+                            ServerHost,
+                            ServerPort,
+                            Message,
+                            DateTime,
+                            Passphrase
+                        )
+                    of
+                        ok ->
+                            ?dbg("Message saved to storage~n", []);
+                        {error, Reason} ->
+                            ?dbg("Failed to save message: ~p~n", [Reason])
+                    end;
+                _ ->
+                    ok
+            end,
+            tui_wait_loop(State);
+        {event, #{type := websocket_message, message := _Message}} ->
+            ?dbg("TUI backend received websocket message (ignoring - TUI subscribes directly)~n", []),
+            %% TUI already subscribes to event bus directly, no need to re-publish
+            tui_wait_loop(State);
+        {get_engine_pid, From}  ->
+            %% For the TUI bridge process to get engine PID
+            From ! {engine_pid, State#console_state.engine_pid},
+            tui_wait_loop(State);
+        {set_passphrase, From, Passphrase} ->
+            %% TUI has received passphrase from user, initialize engine with it
+            ?dbg("TUI backend received passphrase, initializing engine...~n", []),
+            EnginePid = State#console_state.engine_pid,
+            case cryptic_engine:initialize_with_passphrase(EnginePid, Passphrase) of
+                ok ->
+                    ?dbg("Engine initialized successfully~n", []),
+                    %% Update state with real passphrase
+                    NewState = State#console_state{passphrase = Passphrase},
+                    %% Initialize database with real passphrase if enabled
+                    case State#console_state.db_enabled of
+                        true ->
+                            Username = State#console_state.username,
+                            case cryptic_chat_storage:init_storage(
+                                binary_to_list(Username), Passphrase
+                            ) of
+                                ok ->
+                                    ?dbg("Message storage initialized~n", []);
+                                {error, StorageReason} ->
+                                    ?dbg("Failed to initialize message storage: ~p~n", [StorageReason])
+                            end;
+                        false ->
+                            ok
+                    end,
+                    From ! {passphrase_set, ok},
+                    tui_wait_loop(NewState);
+                {error, Reason} ->
+                    ?dbg("Failed to initialize engine: ~p~n", [Reason]),
+                    From ! {passphrase_set, {error, Reason}},
+                    tui_wait_loop(State)
+            end;
+
+        {'EXIT', _Pid, Reason} ->
+            ?dbg("TUI backend exiting: ~p~n", [Reason]),
+            ok;
+
+        {tui_node_down, TuiNode} ->
+            ?info("cryptic_console: TUI node down: ~p , stopping...~n",[TuiNode]),
+            init:stop();
+
+        Other ->
+            ?dbg("cryptic_console (tui)  received unknown message: ~p~n", [Other]),
+            tui_wait_loop(State)
     end.
 
 %% @doc Parse user commands
@@ -1833,13 +1917,8 @@ cleanup(State) ->
     case State#console_state.input_buffer_table of
         undefined -> ok;
         Table -> ets:delete(Table)
-    end,
-
-    %% Note: We don't stop the engine or ws_client here as they might be shared
-    %% or managed by the parent process
-    case State#console_state.verbose of
-        true ->
-            io:format("Cleanup complete\r\n");
-        false ->
-            ok
     end.
+
+
+is_tui_mode(#{tui_mode := TuiMode}) ->
+    TuiMode.

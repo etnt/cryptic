@@ -99,17 +99,19 @@ init([RustNode, Username, Passphrase, CustomFilter]) ->
     ?info("~p(~p) Started , RustNode=~p , CustomFilter=~p~n",
           [?MODULE,self(),RustNode, CustomFilter]),
     X = catch erlang:monitor_node(RustNode, true),
-    ?dbg("~p: monitor_node result: ~p~n", [?MODULE, X]),
+
+    %% Inform the cryptic_console since it may be running
+    %% as a detached node and need to have the Passphrase!
+    inform_cryptic_console({set_passphrase, Passphrase}),
 
     EnginePid = get_engine_pid(),
-    ?dbg("~p: got Engine Pid: ~p~n", [?MODULE, EnginePid]),
 
     %% Subscribe to event bus with appropriate filter
     Filter = case CustomFilter of
                  undefined -> default_tui_filter();
                  F when is_function(F, 1) -> F;
                  _ ->  default_tui_filter()
-    end,
+             end,
 
     try
         case
@@ -182,6 +184,7 @@ handle_info({event, EventMap}, #state{rust_node = RustTarget} = State) ->
 %%
 handle_info({nodedown, Node}, #state{rust_node = Node} = State) ->
     ?dbg("~p:handle_info got nodedown from: ~p~n",[?MODULE,Node]),
+    inform_cryptic_console({tui_node_down, Node}),
     {stop, nodedown, State};
 %%
 handle_info(_Info, State) ->
@@ -199,6 +202,19 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%% Inform the cryptic_console that the TUI node went down
+%% so that it can decide if this node should terminate as well.
+inform_cryptic_console(Msg) ->
+    case whereis(cryptic_console) of
+        Pid when is_pid(Pid) ->
+            ?dbg("cryptic_tui_bridge: informing cryptic_console(~p): ~p~n",[Pid, Msg]),
+            Pid ! Msg;
+        _ ->
+            ?dbg("cryptic_tui_bridge: cryptic_console process not found~n",[]),
+            ok
+    end.
+
 
 get_engine_pid() ->
     cryptic_console ! {get_engine_pid, self()},
