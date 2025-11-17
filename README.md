@@ -70,17 +70,17 @@ Cryptic implements a secure messaging system using:
 > ./scripts/start-server.sh
 
 # In another terminal, start the console client (new standard Erlang method)
-> ./scripts/cryptic_client -u alice --enable-db
+> ./bin/cryptic -u alice --enable-db
 
 # Specify the server and port to be used
-> ./scripts/cryptic_client -u alice --enable-db -s cryptic.example.com -p 9443
+> ./bin/cryptic -u alice --enable-db -s cryptic.example.com -p 9443
 
 # Start with TUI mode (detached backend + external UI)
 # See: https://github.com/etnt/cryptic-tui
-> ./scripts/cryptic_client -u alice --tui
+> ./bin/cryptic -u alice --tui
 
 # Connect to TUI backend via remote shell
-> erl -sname admin -remsh alice@$(hostname -s)
+> erl -sname admin -remsh alice@localhost
 ```
 
 ## Onboard new users

@@ -1,3 +1,187 @@
 #!/bin/bash
+# Cryptic Console Launcher
+# Wrapper script for starting Cryptic console with standard erl command
 
-erl -pa _build/default/lib/*/ebin -eval "cryptic_cecho_ui:start()." -noinput
+# Default values
+USERNAME=""
+SERVER_HOST="localhost"
+SERVER_PORT="8443"
+NOTIFIER=""
+ENABLE_DB="false"
+TUI_MODE="false"
+NODE_NAME="localhost"
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Function to show usage
+usage() {
+    cat << EOF
+Usage: $0 [options]
+
+Options:
+  -u, --username <user>        Username (required)
+  -s, --server-host <host>     Server hostname (default: localhost)
+  -p, --server-port <port>     Server port (default: 8443)
+  -n, --notifier <path>        Path to notification script (optional)
+  --enable-db                  Enable encrypted message storage
+  --tui                        Start with TUI (detached backend + terminal UI)
+  --name <hostname>            Hostname for Erlang node (default: localhost)
+                               Full node name will be <username>@<hostname>
+  -h, --help                   Show this help
+
+Examples:
+  # Interactive mode (console in current terminal)
+  $0 -u alice
+
+  # Interactive mode with database enabled
+  $0 -u alice --enable-db
+
+  # TUI mode (detached backend + separate terminal UI)
+  $0 -u alice --tui
+
+  # TUI mode with custom hostname
+  $0 -u alice --tui --name myhost
+  # Creates node: alice@myhost
+
+  # With custom server
+  $0 -u alice -s example.com -p 9443
+
+  # Connect to running backend (when started with --tui)
+  erl -sname admin -remsh alice@localhost
+
+EOF
+    exit 0
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -u|--username)
+            USERNAME="$2"
+            shift 2
+            ;;
+        -s|--server-host)
+            SERVER_HOST="$2"
+            shift 2
+            ;;
+        -p|--server-port)
+            SERVER_PORT="$2"
+            shift 2
+            ;;
+        -n|--notifier)
+            NOTIFIER="$2"
+            shift 2
+            ;;
+        --enable-db)
+            ENABLE_DB="true"
+            shift
+            ;;
+        --tui)
+            TUI_MODE="true"
+            shift
+            ;;
+        --name)
+            NODE_NAME="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Check required parameters
+if [ -z "$USERNAME" ]; then
+    echo "Error: username is required"
+    echo ""
+    usage
+fi
+
+# Set node host if not specified (just the hostname part, not full node name)
+if [ -z "$NODE_NAME" ]; then
+    NODE_NAME="localhost"
+fi
+
+# Pass configuration via environment variables to avoid shell quoting issues
+export CRYPTIC_USERNAME="$USERNAME"
+export CRYPTIC_SERVER_HOST="$SERVER_HOST"
+export CRYPTIC_SERVER_PORT="$SERVER_PORT"
+export CRYPTIC_ENABLE_DB="$ENABLE_DB"
+export CRYPTIC_NODE_NAME="$NODE_NAME"
+
+if [ -n "$NOTIFIER" ]; then
+    export CRYPTIC_NOTIFIER="$NOTIFIER"
+fi
+
+# Set interactive mode based on TUI flag
+if [ "$TUI_MODE" = "true" ]; then
+    export CRYPTIC_INTERACTIVE="false"
+    export CRYPTIC_TUI_MODE="true"
+else
+    export CRYPTIC_INTERACTIVE="true"
+    export CRYPTIC_TUI_MODE="false"
+fi
+
+# Build erl command (no config on command line, read from env vars)
+ERL_ARGS=()
+
+# Add code paths - expand glob explicitly
+for dir in "$REPO_ROOT"/_build/default/lib/*/ebin; do
+    if [ -d "$dir" ]; then
+        ERL_ARGS+=(-pa "$dir")
+    fi
+done
+
+# Note: We do NOT add -sname here because the Erlang application
+# will start distribution itself based on CRYPTIC_NODE_NAME
+
+# Add appropriate shell mode flags
+if [ "$TUI_MODE" = "true" ]; then
+    # TUI mode: detached backend, no shell
+    ERL_ARGS+=(-detached)
+    # In detached mode, we need to set heart for monitoring
+    ERL_ARGS+=(-heart)
+else
+    # Interactive mode: no Erlang shell, let cryptic_console handle I/O
+    ERL_ARGS+=(-noshell)
+fi
+
+# Add startup module
+ERL_ARGS+=(-s cryptic_console_starter start)
+
+# Show command in verbose mode
+if [ "$VERBOSE" = "true" ] || [ "$CRYPTIC_DEBUG" = "true" ]; then
+    echo "Executing: erl ${ERL_ARGS[@]}"
+    echo "Environment:"
+    echo "  CRYPTIC_USERNAME=$CRYPTIC_USERNAME"
+    echo "  CRYPTIC_SERVER_HOST=$CRYPTIC_SERVER_HOST"
+    echo "  CRYPTIC_SERVER_PORT=$CRYPTIC_SERVER_PORT"
+    echo "  CRYPTIC_ENABLE_DB=$CRYPTIC_ENABLE_DB"
+    echo "  CRYPTIC_NOTIFIER=$CRYPTIC_NOTIFIER"
+    echo "  CRYPTIC_INTERACTIVE=$CRYPTIC_INTERACTIVE"
+fi
+
+# Start the Erlang backend
+if [ "$TUI_MODE" = "true" ]; then
+    echo "Starting Cryptic backend in detached mode..."
+    erl "${ERL_ARGS[@]}"
+    
+    # Give the backend a moment to start
+    sleep 2
+    
+    # Build the full node name for checking/connecting
+    FULL_NODE_NAME="${USERNAME}@${NODE_NAME}"
+    
+    # Start the TUI application (assumed to be in PATH)
+    exec cryptic-tui --node "$FULL_NODE_NAME"
+
+else
+    # Interactive console mode
+    exec erl "${ERL_ARGS[@]}"
+fi
