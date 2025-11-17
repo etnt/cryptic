@@ -21,7 +21,7 @@ usage() {
 Usage: $0 [options]
 
 Options:
-  -u, --username <user>        Username (required)
+  -u, --username <user>        Username (required for client mode)
   -s, --server-host <host>     Server hostname (default: localhost)
   -p, --server-port <port>     Server port (default: 8443)
   -n, --notifier <path>        Path to notification script (optional)
@@ -29,9 +29,13 @@ Options:
   --tui                        Start with TUI (detached backend + terminal UI)
   --name <hostname>            Hostname for Erlang node (default: localhost)
                                Full node name will be <username>@<hostname>
+  --onboard                    Run the onboarding wizard (generate keys, get certificate)
   -h, --help                   Show this help
 
 Examples:
+  # Run onboarding wizard to set up GPG keys and get certificate
+  $0 --onboard
+
   # Interactive mode (console in current terminal)
   $0 -u alice
 
@@ -85,6 +89,10 @@ while [[ $# -gt 0 ]]; do
         --name)
             NODE_NAME="$2"
             shift 2
+            ;;
+        --onboard)
+            # Run the onboarding wizard
+            exec "${SCRIPT_DIR}/cryptic-onboard"
             ;;
         -h|--help)
             usage

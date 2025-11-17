@@ -200,11 +200,18 @@ select_gpg_key() {
         i=$((i + 1))
     done <<< "$GPG_KEYS_RAW"
     echo "  $i) Generate new GPG key"
+    local cancel_num=$((i + 1))
+    echo "  $cancel_num) Cancel and go back"
     echo ""
     read -p "Select key number [1]: " key_num
     key_num=${key_num:-1}
 
-    if [ "$key_num" -eq "$i" ]; then
+    if [ "$key_num" -eq "$cancel_num" ]; then
+        # User wants to cancel
+        SELECTED_GPG_FP=""
+        SELECTED_GPG_EMAIL=""
+        return 1  # Return error code to indicate cancellation
+    elif [ "$key_num" -eq "$i" ]; then
         generate_gpg_key
         SELECTED_GPG_EMAIL="$GENERATED_GPG_EMAIL"
         SELECTED_GPG_FP=$(gpg --with-colons --fingerprint "$SELECTED_GPG_EMAIL" 2>/dev/null | \
@@ -220,6 +227,7 @@ select_gpg_key() {
     else
         error "Invalid selection: $key_num"
     fi
+    return 0  # Success
 }
 
 #
@@ -235,10 +243,17 @@ cmd_export_gpg() {
     echo ""
 
     # Step 1: Select GPG key
-    select_gpg_key
+    if ! select_gpg_key; then
+        echo ""
+        info "Operation cancelled."
+        return 0
+    fi
 
+    # Defensive guard in case selection returned without setting globals
     if [ -z "$SELECTED_GPG_FP" ]; then
-        error "No GPG key selected"
+        echo ""
+        info "Operation cancelled."
+        return 0
     fi
 
     GPG_FP="$SELECTED_GPG_FP"
@@ -366,7 +381,11 @@ cmd_request() {
                     warn "Invalid or incomplete user config."
                 fi
                 echo ""
-                select_gpg_key
+                if ! select_gpg_key; then
+                    echo ""
+                    info "Operation cancelled."
+                    return 0
+                fi
                 GPG_FP="$SELECTED_GPG_FP"
                 GPG_EMAIL="$SELECTED_GPG_EMAIL"
                 USERNAME=$(echo "$GPG_EMAIL" | sed 's/@.*//')
@@ -379,7 +398,11 @@ cmd_request() {
             echo "  Fingerprint: $GPG_FP"
         else
             warn "Config not found for user: $USERNAME"
-            select_gpg_key
+            if ! select_gpg_key; then
+                echo ""
+                info "Operation cancelled."
+                return 0
+            fi
             GPG_FP="$SELECTED_GPG_FP"
             GPG_EMAIL="$SELECTED_GPG_EMAIL"
             USERNAME=$(echo "$GPG_EMAIL" | sed 's/@.*//')
@@ -394,7 +417,11 @@ cmd_request() {
         warn "No saved identities found. Run 'cryptic-onboard export-gpg' first."
         echo ""
         info "Continuing without saved configuration..."
-        select_gpg_key
+        if ! select_gpg_key; then
+            echo ""
+            info "Operation cancelled."
+            return 0
+        fi
 
         if [ -z "$SELECTED_GPG_FP" ]; then
             error "No GPG key selected"
@@ -874,13 +901,20 @@ show_wizard() {
             draw_box "Export GPG Public Key"
             echo ""
             cmd_export_gpg
-            echo ""
-            info "Next steps:"
-            echo "  1. Send the exported file to your Cryptic administrator"
-            echo "  2. Wait for admin confirmation that your key is registered"
-            echo "  3. Come back and select option 3 to request a certificate"
-            echo ""
-            read -p "Press Enter to continue..."
+            
+            # If cancelled (no error, just returns), go back immediately
+            if [ $? -eq 0 ]; then
+                # Check if actually completed or just cancelled
+                if [ -n "$GPG_FP" ]; then
+                    echo ""
+                    info "Next steps:"
+                    echo "  1. Send the exported file to your Cryptic administrator"
+                    echo "  2. Wait for admin confirmation that your key is registered"
+                    echo "  3. Come back and select option 3 to request a certificate"
+                    echo ""
+                    read -p "Press Enter to continue..."
+                fi
+            fi
             show_wizard
             ;;
         3)
