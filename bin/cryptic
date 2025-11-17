@@ -177,12 +177,9 @@ fi
 
 # Start the Erlang backend
 if [ "$TUI_MODE" = "true" ]; then
-    echo "Starting Cryptic backend in detached mode..."
+    echo -n "Starting Cryptic backend in detached mode..."
     erl "${ERL_ARGS[@]}"
-    
-    # Give the backend a moment to start
-    sleep 2
-    
+
     # Build the full node name for checking/connecting
     FULL_NODE_NAME="${USERNAME}@${NODE_NAME}"
     
