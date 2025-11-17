@@ -35,6 +35,10 @@ demonstrating modern cryptographic protocols for secure message exchange.
 * A wizard script to facilitate onboarding of new users.
 * Modular structure to make the core engines (X3DH & Double-Ratchet) available
   to be used in other contexts/applications.
+  
+An ****external TUI**** (Terminal User Interface) exist, written in Rust, that
+connects via the Erlang distribution protocol as a hidden node.
+See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
 ## Documentation
 
@@ -65,11 +69,18 @@ Cryptic implements a secure messaging system using:
 # Start the server with WebSocket support
 > ./scripts/start-server.sh
 
-# In another terminal, start the UI client
-> ./scripts/cryptic_console -u alice --enable-db
+# In another terminal, start the console client (new standard Erlang method)
+> ./scripts/cryptic_client -u alice --enable-db
 
 # Specify the server and port to be used
-> ./scripts/cryptic_console -u alice --enable-db -s cryptic.example.com -p 9999
+> ./scripts/cryptic_client -u alice --enable-db -s cryptic.example.com -p 9443
+
+# Start with TUI mode (detached backend + external UI)
+# See: https://github.com/etnt/cryptic-tui
+> ./scripts/cryptic_client -u alice --tui
+
+# Connect to TUI backend via remote shell
+> erl -sname admin -remsh alice@$(hostname -s)
 ```
 
 ## Onboard new users

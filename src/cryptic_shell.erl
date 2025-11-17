@@ -797,6 +797,14 @@ redraw_from_cursor(#line_state{buffer = Buffer, cursor = Cursor}) ->
 %% @doc Password input loop with masking
 password_loop(Acc) ->
     case io:get_chars(standard_io, "", 1) of
+        {error, enotsup} ->
+            %% Terminal doesn't support character-by-character input
+            %% Fall back to line-based input
+            io:format("\r\n[WARN] Character masking not supported, password will be visible\r\n"),
+            case io:get_line(standard_io, "") of
+                eof -> lists:reverse(Acc);
+                Line -> string:trim(Line, trailing, "\r\n")
+            end;
         "\n" ->
             io:format("\r\n"),
             lists:reverse(Acc);
