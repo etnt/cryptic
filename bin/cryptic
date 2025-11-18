@@ -2,14 +2,15 @@
 # Cryptic Console Launcher
 # Wrapper script for starting Cryptic console with standard erl command
 
-# Default values
-USERNAME=""
-SERVER_HOST="localhost"
-SERVER_PORT="8443"
-NOTIFIER=""
-ENABLE_DB="false"
-TUI_MODE="false"
-NODE_NAME="localhost"
+# Default values (can be overridden by environment variables or command-line flags)
+# Command-line flags take precedence over environment variables
+USERNAME="${CRYPTIC_USERNAME:-}"
+SERVER_HOST="${CRYPTIC_SERVER_HOST:-localhost}"
+SERVER_PORT="${CRYPTIC_SERVER_PORT:-8443}"
+NOTIFIER="${CRYPTIC_NOTIFIER:-}"
+ENABLE_DB="${CRYPTIC_ENABLE_DB:-false}"
+TUI_MODE="unset"  # Will be set from env or flag
+NODE_NAME="${CRYPTIC_NODE_NAME:-localhost}"
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -119,6 +120,12 @@ fi
 # Set node host if not specified (just the hostname part, not full node name)
 if [ -z "$NODE_NAME" ]; then
     NODE_NAME="localhost"
+fi
+
+# Determine TUI mode: command-line flag takes precedence over environment variable
+if [ "$TUI_MODE" = "unset" ]; then
+    # No --tui flag was passed, check environment variable
+    TUI_MODE="${CRYPTIC_TUI_MODE:-false}"
 fi
 
 # Pass configuration via environment variables to avoid shell quoting issues

@@ -1,14 +1,593 @@
 # Docker Deployment Guide
 
-This guide explains how to deploy the Cryptic server using Docker and Docker Compose.
+This guide explains how to deploy the Cryptic client and or the
+[server](#the-server) using Docker and Docker Compose.
 
-## Overview
+## The Client
+
+The Cryptic TUI (Terminal User Interface) client can run in Docker to
+connect to a Cryptic server. This approach provides a consistent,
+containerized environment for the client without requiring local
+Erlang/Rust installation.
+
+### Architecture Overview
+
+The Docker TUI client uses the existing `bin/cryptic --tui` script,
+which automatically:
+1. Starts an Erlang backend node.
+2. Launches the Rust TUI binary.
+3. Manages lifecycle, authentication, and graceful shutdown.
+
+```
+┌─────────────────────────────────────────┐
+│  Docker Container: cryptic-tui          │
+│                                         │
+│  bin/cryptic --tui                      │
+│  ├─> Erlang Node (backend)              │
+│  │   ├─ cryptic_engine                  │
+│  │   ├─ cryptic_ws_client               │
+│  │   └─ cryptic_tui_bridge              │
+│  │                                      │
+│  └─> Rust TUI (frontend)                │
+│      └─ Connects via dist Erlang        │
+└─────────────────────────────────────────┘
+           │
+           │ WebSocket mTLS (over network/internet)
+           ▼
+┌─────────────────────────────────────────┐
+│  Cryptic Server (managed elsewhere)     │
+│  (WebSocket server on port 8443)        │
+└─────────────────────────────────────────┘
+```
+
+### Prerequisites
+
+1. **Docker** (version 20.10 or later)
+   ```bash
+   docker --version
+   ```
+
+2. **Docker Compose** (version 2.0 or later)
+   ```bash
+   docker compose version
+   ```
+
+3. **User Identity Setup** - You need to set up your Cryptic identity first.
+   You can run the onboarding process from within the Docker container:
+   ```bash
+   docker compose run --rm cryptic-tui sh -c "cryptic --onboard"
+   ```
+   This creates your certificates and keys in `~/.cryptic/<username>/<server>_<port>/`
+
+4. **cryptic-tui Repository** (temporary requirement) - The Docker build
+   requires the `cryptic-tui` repository to be available as a sibling directory:
+   ```
+   parent-directory/
+   ├── cryptic/           ← This repository
+   └── cryptic-tui/       ← Clone of git@github.com:etnt/cryptic-tui.git
+   ```
+
+   Clone it:
+   ```bash
+   cd /path/to/your/projects
+   git clone git@github.com:etnt/cryptic-tui.git
+   ```
+
+   **Note**: Once `cryptic-tui` is publicly released on GitHub, the
+   Dockerfile will be updated to clone it automatically, eliminating
+   this manual step.
+
+### Quick Start
+
+1. **Ensure cryptic-tui is cloned** (see Prerequisites above):
+   ```bash
+   ls ../cryptic-tui/  # Should show the cryptic-tui repository
+   ```
+
+2. **Build the Docker image**:
+   ```bash
+   docker compose build cryptic-tui
+   ```
+
+3. **Connect to a server**:
+   ```bash
+   CRYPTIC_USERNAME=alice \
+   CRYPTIC_SERVER_HOST=relay.example.com \
+   CRYPTIC_SERVER_PORT=8443 \
+   CRYPTIC_ENABLE_DB=true \
+   docker compose run --rm cryptic-tui
+   ```
+
+4. **For local development** (connecting to localhost server):
+   ```bash
+   CRYPTIC_USERNAME=alice \
+   CRYPTIC_SERVER_HOST=cryptic-server \
+   CRYPTIC_ENABLE_DB=true \
+   docker compose run --rm cryptic-tui
+   ```
+
+### Configuration
+
+#### Environment Variables
+
+Configure the client using these environment variables (mapped to `bin/cryptic` script options):
+
+| Docker Env Variable | Script Option | Default | Description |
+|---------------------|---------------|---------|-------------|
+| `CRYPTIC_USERNAME` | `-u, --username` | `alice` | Your username |
+| `CRYPTIC_SERVER_HOST` | `-s, --server-host` | `localhost` | Server hostname |
+| `CRYPTIC_SERVER_PORT` | `-p, --server-port` | `8443` | Server port |
+| `CRYPTIC_NODE_NAME` | `--name` | `localhost` | Erlang node hostname |
+| `CRYPTIC_ENABLE_DB` | `--enable-db` | `false` | Enable message history |
+| `CRYPTIC_DEBUG` | (internal flag) | `false` | Enable verbose debug logging |
+| `ERLANG_COOKIE` | (Erlang cookie) | (auto-generated) | Erlang distributed cookie for node authentication |
+
+**Note on Erlang Cookie**: If not provided, the entrypoint script will generate a random cookie and display it. For connecting to other Erlang nodes, you must set the same `ERLANG_COOKIE` value across all nodes.
+
+**Example with custom settings**:
+
+
+#### Volume Mounts - Critical for Persistence
+
+The container mounts the entire `~/.cryptic` directory (read-write):
+
+```yaml
+volumes:
+  - ~/.cryptic:/home/cryptic/.cryptic
+```
+
+**Note**: The `.erlang.cookie` file is NOT mounted from the host. It's automatically generated inside the container by the entrypoint script and is only used for intra-container distributed Erlang communication between the Erlang backend node and the Rust TUI process.
+
+This directory contains **all persistent storage**:
+- **Certificates**: `<username>/<server>_<port>/certificates/*.{crt,key}`
+- **Identity Keys**: `<username>/<server>_<port>/keys.encrypted` (X3DH keys)
+- **Session States**: `<username>/<server>_<port>/sessions/*.session` (Double Ratchet)
+- **Message Database**: `<username>/messages.db` (if `--enable-db`)
+- **Logs**: `logs/cryptic-tui.log.*`
+
+**Why read-write?** The Erlang backend needs to:
+- Load and save encrypted identity keys
+- Update Double Ratchet session states after each message
+- Write to SQLite database (if message history enabled)
+- Append to log files
+
+**Permission note**: 
+- On macOS/Windows Docker Desktop, file permissions work automatically
+- On Linux, ensure your user owns `~/.cryptic/` or the container's UID (100) can write to it
+
+### Docker Image Details
+
+#### Multi-Stage Build
+
+The `Dockerfile.tui` uses three stages:
+
+1. **Rust builder stage** (based on `rust:1.83-alpine`):
+   - Compiles the Rust TUI binary from `../cryptic-tui/`
+   - Produces a statically linked executable
+
+2. **Erlang builder stage** (based on `erlang:28.1-alpine`):
+   - Installs rebar3
+   - Compiles the Erlang application
+   - Builds the `cryptic_nif.so` native library with libsodium
+   - Creates a production release
+
+3. **Runtime stage** (based on `alpine:latest`):
+   - Minimal base image with OpenSSL, libsodium, and ncurses
+   - Non-root user (`cryptic:cryptic`)
+   - Includes both Erlang release and Rust TUI binary
+   - Configured for interactive terminal mode
+   - Uses `docker-tui-entrypoint.sh` for initialization
+
+The entrypoint script (`docker-tui-entrypoint.sh`) handles:
+- Fixing permissions on mounted `~/.cryptic` directory
+- Setting up or generating Erlang cookie (`.erlang.cookie`)
+- Checking for required certificates (with helpful error messages)
+- Displaying connection information
+- Launching `cryptic --tui` with proper environment
+
+#### Key Design Decisions
+
+1. **Entrypoint script**: Uses `docker-tui-entrypoint.sh` for setup (permission fixes, Erlang cookie, certificate checks)
+2. **Reuse existing launcher**: Calls `cryptic --tui` for actual TUI launch
+3. **Environment over args**: Maps script flags to Docker environment variables
+4. **Standard structure**: Follows same directory layout as local installation
+5. **Server hostname flexibility**: Can connect to any server (local or remote)
+6. **Interactive mode**: Requires `stdin_open: true` and `tty: true` for terminal UI
+7. **Client-only focus**: Client doesn't need to build or manage the server
+8. **User-friendly feedback**: Provides helpful error messages and connection info on startup
+
+### Common Operations
+
+#### Building the Image
+
+Build the Docker image:
+```bash
+docker compose build cryptic-tui
+```
+
+Build without cache (fresh build):
+```bash
+docker compose build --no-cache cryptic-tui
+```
+
+#### Running the Client
+
+Run interactively (recommended):
+```bash
+CRYPTIC_USERNAME=alice docker compose run --rm cryptic-tui
+```
+
+Run with custom server:
+```bash
+CRYPTIC_USERNAME=alice \
+CRYPTIC_SERVER_HOST=relay.example.com \
+docker compose run --rm cryptic-tui
+```
+
+Enable message history:
+```bash
+CRYPTIC_USERNAME=alice \
+CRYPTIC_ENABLE_DB=true \
+docker compose run --rm cryptic-tui
+```
+
+#### Accessing the Container
+
+Open a shell in the container (for debugging):
+```bash
+docker compose run --rm cryptic-tui /bin/sh
+```
+
+Run the client manually (inside container):
+```bash
+docker compose run --rm cryptic-tui /bin/sh
+# Inside container:
+cryptic --tui -u alice -s cryptic-server -p 8443
+```
+
+Run in console mode (no TUI):
+```bash
+docker compose run --rm cryptic-tui cryptic -u alice -s cryptic-server
+```
+
+Run the onboarding script (no TUI):
+```bash
+docker compose run --rm cryptic-tui cryptic --onboard
+```
+
+**NOTE** When running the onboarding script with **--onboard** , then you
+have to continue through all steps 1-3, i.e generate GPG keys (1),
+export your key (2) and send it to the administrator of the server,
+request a certificate (3) (when registered). Else, you will loose your
+GPG key if you exit the container half-way through and you have to repeat
+the process again. Not until your certificate has been received will it be
+stored on your shared ~/.cryptic volume.
+
+#### Viewing Logs
+
+Check TUI logs (from host):
+```bash
+tail -f ~/.cryptic/logs/cryptic-tui.log.*
+```
+
+Inside container:
+```bash
+docker compose run --rm cryptic-tui /bin/sh
+tail -f /home/cryptic/.cryptic/logs/cryptic-tui.log.*
+```
+
+Check cryptic client logs (from host):
+```bash
+tail -f ~/.cryptic/<username>/<server>_<port>/logs/cryptic-tui.log.*
+```
+
+
+### Networking
+
+#### Connecting to Host Server (Development)
+
+When the Cryptic server runs on your host machine:
+
+```bash
+CRYPTIC_SERVER_HOST=cryptic-server docker compose run --rm cryptic-tui
+```
+
+The mapping is done in `extra_hosts` in `docker-compose.yml`:
+```yaml
+services:
+  cryptic-tui:
+    extra_hosts:
+      - "cryptic-server:host-gateway"
+```
+
+**NOTE** The Cryptic server has a SAN extension: _DNS: cryptic-server_ in
+its certificate.
+
+#### Connecting to Another Container
+
+If the server runs in Docker on the same network:
+```bash
+CRYPTIC_SERVER_HOST=cryptic-server docker compose run --rm cryptic-tui
+```
+
+Ensure both services are on the same network:
+```yaml
+services:
+  cryptic-server:
+    networks:
+      - cryptic-network
+
+  cryptic-tui:
+    networks:
+      - cryptic-network
+
+networks:
+  cryptic-network:
+    driver: bridge
+```
+
+#### Connecting to Remote Server
+
+For production/remote servers:
+```bash
+CRYPTIC_USERNAME=alice \
+CRYPTIC_SERVER_HOST=relay.example.com \
+CRYPTIC_SERVER_PORT=8443 \
+docker compose run --rm cryptic-tui
+```
+
+### Troubleshooting
+
+#### Build Failures
+
+**Error: "COPY failed: file not found in build context"**
+
+This means `cryptic-tui` is not in the expected location.
+
+**NOTE** FIXME - this is just temporary until the repo is public
+
+Solution:
+```bash
+# Check current location
+pwd
+# Should be inside the cryptic directory
+
+# Check parent directory
+ls ../
+# Should show cryptic-tui directory
+
+# If not, clone it:
+cd ..
+git clone git@github.com:etnt/cryptic-tui.git
+cd cryptic
+```
+
+**Error: "failed to compute cache key: too many links"**
+
+This is a macOS Docker issue with symlinks (resolved in current Dockerfile).
+
+If you still encounter it:
+```bash
+# Clean Docker build cache
+docker builder prune -a
+docker compose build --no-cache cryptic-tui
+```
+
+**Error: "error getting credentials - docker-credential-desktop not found"**
+
+Temporary fix for macOS Docker Desktop:
+```bash
+# Backup config
+cp ~/.docker/config.json ~/.docker/config.json.backup
+
+# Remove problematic credsStore setting
+jq 'del(.credsStore)' ~/.docker/config.json > ~/.docker/config.json.tmp
+mv ~/.docker/config.json.tmp ~/.docker/config.json
+
+# Try build again
+docker compose build cryptic-tui
+```
+
+#### Connection Issues
+
+**Cannot connect to server**
+
+Check environment variables:
+```bash
+docker compose run --rm cryptic-tui env | grep CRYPTIC
+```
+
+Verify server is reachable from container:
+```bash
+docker compose run --rm cryptic-tui ping cryptic-server
+# or
+docker compose run --rm cryptic-tui nc -zv cryptic-server 8443
+```
+
+**TUI starts but connection fails**
+
+Check certificates exist:
+```bash
+ls -la ~/.cryptic/alice/localhost_8443/certificates/
+# Should show: alice.crt, alice.key, ca.crt
+```
+
+If certificates are missing, the entrypoint script will display a warning with instructions. Run onboarding:
+```bash
+docker compose run --rm cryptic-tui sh -c "cryptic --onboard"
+```
+
+Verify server host setting:
+```bash
+docker compose run --rm cryptic-tui env | grep CRYPTIC_SERVER_HOST
+```
+
+**Debug mode**
+
+Enable verbose logging:
+```bash
+CRYPTIC_DEBUG=true docker compose run --rm cryptic-tui
+# Then check logs:
+tail -f ~/.cryptic/logs/cryptic-tui.log.*
+```
+
+#### Terminal Display Issues
+
+**Terminal size incorrect**
+
+Ensure TTY is enabled:
+```yaml
+services:
+  cryptic-tui:
+    stdin_open: true
+    tty: true
+```
+
+**Colors not working**
+
+Set terminal type:
+```bash
+TERM=xterm-256color docker compose run --rm cryptic-tui
+```
+
+**TUI not responding to input**
+
+Check if stdin is properly attached:
+```bash
+# Use -it flags explicitly
+docker compose run -it --rm cryptic-tui
+```
+
+#### Permission Issues (Linux)
+
+If you get permission errors on `~/.cryptic/`:
+
+```bash
+# Check ownership
+ls -ld ~/.cryptic
+
+# Fix ownership (replace 1000:1000 with your UID:GID)
+sudo chown -R 1000:1000 ~/.cryptic
+
+# Or set permissions
+chmod -R u+rwX ~/.cryptic
+```
+
+### Production Deployment
+
+#### Security Considerations
+
+1. **Certificate management**: Ensure certificates are properly protected
+2. **Volume permissions**: Set strict permissions on `~/.cryptic/` (0700)
+3. **Network isolation**: Use Docker networks to isolate client traffic
+4. **Regular updates**: Keep the base image and dependencies updated
+5. **Debug logging**: Disable `CRYPTIC_DEBUG` in production
+
+#### Recommended Setup
+
+1. **Use secrets for sensitive data**:
+   ```yaml
+   services:
+     cryptic-tui:
+       secrets:
+         - user_cert
+         - user_key
+
+   secrets:
+     user_cert:
+       file: ~/.cryptic/alice/localhost_8443/certificates/alice.crt
+     user_key:
+       file: ~/.cryptic/alice/localhost_8443/certificates/alice.key
+   ```
+
+2. **Set resource limits**:
+   ```yaml
+   services:
+     cryptic-tui:
+       deploy:
+         resources:
+           limits:
+             cpus: '1.0'
+             memory: 512M
+           reservations:
+             cpus: '0.5'
+             memory: 256M
+   ```
+
+3. **Use specific image tags**:
+   ```yaml
+   services:
+     cryptic-tui:
+       image: cryptic-tui:1.0.0  # Don't use :latest in production
+   ```
+
+### Advanced Usage
+
+#### Running Without Docker Compose
+
+Run the container directly:
+
+```bash
+docker run -it --rm \
+  --name cryptic-tui \
+  -v ~/.cryptic:/home/cryptic/.cryptic \
+  -e CRYPTIC_USERNAME=alice \
+  -e CRYPTIC_SERVER_HOST=relay.example.com \
+  -e CRYPTIC_SERVER_PORT=8443 \
+  -e CRYPTIC_ENABLE_DB=false \
+  cryptic-tui
+```
+
+#### Building for Different Architectures
+
+Build for ARM64 (Apple Silicon):
+```bash
+docker buildx build -f Dockerfile.tui --platform linux/arm64 -t cryptic-tui:arm64 .
+```
+
+Build multi-architecture image:
+```bash
+docker buildx build -f Dockerfile.tui --platform linux/amd64,linux/arm64 -t cryptic-tui:latest .
+```
+
+#### Custom Build with Local cryptic-tui Changes
+
+If you're developing `cryptic-tui`:
+
+```bash
+# Make changes to ../cryptic-tui/
+# Then rebuild:
+docker compose build --no-cache cryptic-tui
+
+# Test your changes:
+CRYPTIC_USERNAME=alice docker compose run --rm cryptic-tui
+```
+
+### Future Improvements
+
+Once the `cryptic-tui` repository is public, the Dockerfile will be updated to:
+
+```dockerfile
+# Future version (no manual clone needed)
+RUN git clone https://github.com/etnt/cryptic-tui.git /cryptic-tui
+```
+
+This will eliminate the need for manual cloning and sibling directory setup.
+
+### See Also
+
+- [DOCKER-TUI-SUMMARY.md](../DOCKER-TUI-SUMMARY.md) - Comprehensive TUI client documentation
+- [DOCKER-TUI-BUILD-NOTES.md](../DOCKER-TUI-BUILD-NOTES.md) - Build-specific details
+- [QUICKSTART-DOCKER-TUI.md](../QUICKSTART-DOCKER-TUI.md) - Step-by-step guide
+
+
+## The Server
 
 The Cryptic server Docker deployment uses a multi-stage build process to create
 a minimal, secure container image. The image runs the Erlang release in
 foreground mode and requires external mTLS certificates mounted as volumes.
 
-## Prerequisites
+### Prerequisites
 
 1. **Docker** (version 20.10 or later)
    ```bash
@@ -27,7 +606,7 @@ foreground mode and requires external mTLS certificates mounted as volumes.
 
    See [Certificate Generation](#certificate-generation) below for instructions.
 
-## Quick Start
+### Quick Start
 
 1. **Generate certificates** (if you haven't already):
    ```bash
@@ -74,9 +653,9 @@ foreground mode and requires external mTLS certificates mounted as volumes.
    docker exec -it cryptic-server bin/cryptic remote_console
 ```
 
-## Docker Image Details
+### Docker Image Details
 
-### Multi-Stage Build
+#### Multi-Stage Build
 
 The Dockerfile uses two stages:
 
@@ -92,14 +671,14 @@ The Dockerfile uses two stages:
    - Only includes the compiled release
    - Health check on port 8443
 
-### Image Size
+#### Image Size
 
 The final image is approximately **38-40 MB**, significantly smaller than
 including the full Erlang/OTP development environment.
 
-## Configuration
+### Configuration
 
-### Environment Variables
+#### Environment Variables
 
 Configure the server using these environment variables (names reflect the Erlang server code in `cryptic_server.erl` and `cryptic_ca_app.erl`):
 
@@ -125,7 +704,7 @@ services:
       - CRYPTIC_DEBUG=true
 ```
 
-### Volume Mounts
+#### Volume Mounts
 
 The docker-compose.yml defines several volumes:
 
@@ -164,7 +743,7 @@ The docker-compose.yml defines several volumes:
      - ./bootstrap:/opt/cryptic/lib/cryptic-1.2.3/priv/ca/bootstrap:ro
    ```
 
-### Port Mapping
+#### Port Mapping
 
 The default configuration maps port 8443 from the container to the host:
 
@@ -180,7 +759,7 @@ ports:
   - "9443:8443"
 ```
 
-## Certificate & CA Database Generation
+### Certificate & CA Database Generation
 
 Generate the CA and Server certificates using the
 `scripts/generate-mtls-certs.sh` script.
@@ -188,7 +767,7 @@ Generate the CA and Server certificates using the
 **Production Note**: For production deployments, use certificates from a
 trusted Certificate Authority. The CA database (`CRYPTIC_CA_DB_FILE`) is persisted on a volume; back it up regularly.
 
-### CA Database Persistence
+#### CA Database Persistence
 
 The CA subsystem stores state (user registrations, issued cert metadata) in the SQLite file referenced by `CRYPTIC_CA_DB_FILE`. Mount the parent directory (`/opt/cryptic/data/ca`) as a named volume or host bind to retain state across container restarts:
 
@@ -199,9 +778,9 @@ volumes:
 
 The server does **not** store end-to-end encrypted chat messages; those are only persisted client-side in each user's `messages.db`. This keeps the server largely stateless apart from CA data and logs.
 
-## Common Operations
+### Common Operations
 
-### Building the Image
+#### Building the Image
 
 Build the Docker image:
 ```bash
@@ -213,7 +792,7 @@ Build with a specific tag:
 docker build -t cryptic-server:1.0.0 .
 ```
 
-### Starting the Server
+#### Starting the Server
 
 Start in detached mode:
 ```bash
@@ -225,7 +804,7 @@ Start with logs visible:
 docker compose up
 ```
 
-### Stopping the Server
+#### Stopping the Server
 
 Stop the container:
 ```bash
@@ -237,7 +816,7 @@ Stop and remove volumes (careful - this deletes data!):
 docker compose down -v
 ```
 
-### Viewing Logs
+#### Viewing Logs
 
 Follow logs in real-time:
 ```bash
@@ -249,7 +828,7 @@ View last 100 lines:
 docker compose logs --tail=100 cryptic-server
 ```
 
-### Accessing the Container
+#### Accessing the Container
 
 Open a shell in the running container:
 ```bash
@@ -261,7 +840,7 @@ Attach to the Erlang console:
 docker compose exec cryptic-server bin/cryptic remote_console
 ```
 
-### Health Check
+#### Health Check
 
 The container includes a health check that verifies the server is listening on port 8443:
 
@@ -273,9 +852,9 @@ docker inspect --format='{{.State.Health.Status}}' cryptic-server
 docker inspect --format='{{range .State.Health.Log}}{{.Output}}{{end}}' cryptic-server
 ```
 
-## Networking
+### Networking
 
-### Default Configuration
+#### Default Configuration
 
 The docker-compose.yml creates a bridge network named `cryptic-network`:
 
@@ -285,7 +864,7 @@ networks:
     driver: bridge
 ```
 
-### Connecting from Host
+#### Connecting from Host
 
 If you're running the client on the host machine, connect to `localhost:8443`:
 
@@ -294,7 +873,7 @@ cryptic_console ...
 # In the Cryptic shell, connect to localhost:8443
 ```
 
-### Connecting from Another Container
+#### Connecting from Another Container
 
 Add your client container to the same network:
 
@@ -307,9 +886,9 @@ services:
 
 Then connect to `cryptic-server:8443` (use the service name as hostname).
 
-## Troubleshooting
+### Troubleshooting
 
-### Container Won't Start
+#### Container Won't Start
 
 **Check logs**:
 ```bash
@@ -322,7 +901,7 @@ docker compose logs cryptic-server
 3. **Permission denied**: Ensure certificate files are readable
 4. **NIF loading errors**: The cryptic_nif.so library requires libsodium - this is included in the image
 
-### Connection Refused
+#### Connection Refused
 
 **Verify server is listening**:
 ```bash
@@ -341,7 +920,7 @@ docker compose exec cryptic-server env | grep CRYPTIC_SERVER_HOST
 # Should show: CRYPTIC_SERVER_HOST=0.0.0.0
 ```
 
-### mTLS Handshake Failures
+#### mTLS Handshake Failures
 
 **Verify certificates**:
 ```bash
@@ -358,7 +937,7 @@ openssl verify -CAfile priv/ssl/ca.crt priv/ssl/server.crt
 openssl verify -CAfile priv/ssl/ca.crt ~/.cryptic/<username>/<server>_<port>/certificates/<username>.crt
 ```
 
-### Performance Issues
+#### Performance Issues
 
 **Monitor container resources**:
 ```bash
@@ -379,9 +958,9 @@ services:
           memory: 512M
 ```
 
-## Production Deployment
+### Production Deployment
 
-### Security Considerations
+#### Security Considerations
 
 1. **Use proper certificates**: Don't use self-signed certificates in production
 2. **Secure private keys**: Set strict permissions (0400) on key files
@@ -389,7 +968,7 @@ services:
 4. **Network isolation**: Use Docker networks to isolate the server
 5. **Regular updates**: Keep the base image and dependencies updated
 
-### Recommended Setup
+#### Recommended Setup
 
 1. **Use Docker secrets** for sensitive data:
    ```yaml
@@ -437,9 +1016,9 @@ services:
          memory: 2G
    ```
 
-## Advanced Usage
+### Advanced Usage
 
-### Building for Different Architectures
+#### Building for Different Architectures
 
 Build for ARM64 (e.g., Apple Silicon):
 ```bash
@@ -451,7 +1030,7 @@ Build multi-architecture image:
 docker buildx build --platform linux/amd64,linux/arm64 -t cryptic-server:latest .
 ```
 
-### Custom Build Args
+#### Custom Build Args
 
 The Dockerfile is configured for Erlang 28.1 and Alpine Linux.
 The build process includes:
@@ -466,7 +1045,7 @@ Build with specific settings:
 docker build -t cryptic-server .
 ```
 
-### Running Without Docker Compose
+#### Running Without Docker Compose
 
 Run the container directly:
 
@@ -487,7 +1066,7 @@ docker run -d \
   cryptic-server
 ```
 
-## Integration with CI/CD
+### Integration with CI/CD
 
 Example GitHub Actions workflow:
 
@@ -517,6 +1096,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 ```
+
+---
 
 ## References
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Docker entrypoint script for Cryptic TUI client
-# Sets up Erlang node and launches the Rust TUI
+# Sets up environment and launches bin/cryptic --tui
 #
 set -e
 
@@ -33,9 +33,13 @@ error() {
 fix_permissions() {
     local dir="$1"
     if [ -d "$dir" ]; then
-        if [ "$(stat -c %u "$dir" 2>/dev/null || stat -f %u "$dir")" != "$(id -u cryptic)" ]; then
+        # Get the actual owner UID
+        local owner_uid=$(stat -c %u "$dir" 2>/dev/null || stat -f %u "$dir" 2>/dev/null || echo "0")
+        local cryptic_uid=$(id -u cryptic)
+        
+        if [ "$owner_uid" != "$cryptic_uid" ]; then
             info "Fixing permissions for $dir..."
-            chown -R cryptic:cryptic "$dir" 2>/dev/null || true
+            chown -R cryptic:cryptic "$dir" 2>/dev/null || warn "Could not change ownership of $dir"
         fi
     fi
 }
@@ -45,57 +49,36 @@ setup_erlang_cookie() {
     local cookie_file="/home/cryptic/.erlang.cookie"
     
     if [ -n "$ERLANG_COOKIE" ]; then
-        info "Setting up Erlang cookie..."
+        info "Setting up Erlang cookie from environment..."
         echo -n "$ERLANG_COOKIE" > "$cookie_file"
-        chmod 400 "$cookie_file"
-        chown cryptic:cryptic "$cookie_file"
+        chmod 400 "$cookie_file" 2>/dev/null || true
+        chown cryptic:cryptic "$cookie_file" 2>/dev/null || true
         success "Erlang cookie configured"
-    elif [ ! -f "$cookie_file" ]; then
+    elif [ -f "$cookie_file" ]; then
+        success "Using existing Erlang cookie from $cookie_file"
+        # Try to fix permissions, but ignore errors if file is read-only mounted
+        chmod 400 "$cookie_file" 2>/dev/null || true
+        chown cryptic:cryptic "$cookie_file" 2>/dev/null || true
+    else
         warn "No Erlang cookie provided. Generating random cookie..."
         # Generate random cookie
         ERLANG_COOKIE=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
         echo -n "$ERLANG_COOKIE" > "$cookie_file"
-        chmod 400 "$cookie_file"
-        chown cryptic:cryptic "$cookie_file"
-        warn "Generated cookie: $ERLANG_COOKIE"
+        chmod 400 "$cookie_file" 2>/dev/null || true
+        chown cryptic:cryptic "$cookie_file" 2>/dev/null || true
+        info "Generated cookie: $ERLANG_COOKIE"
         warn "Set ERLANG_COOKIE environment variable to match other nodes!"
-    else
-        success "Using existing Erlang cookie from $cookie_file"
-    fi
-}
-
-# Start background Erlang node for cryptic_engine
-start_erlang_node() {
-    info "Starting Erlang client node: ${CRYPTIC_NODE_NAME}@$(hostname)..."
-    
-    # Start Erlang node in background using the release
-    cd /opt/cryptic/erlang
-    
-    # Set node name
-    export RELEASE_NODE="${CRYPTIC_NODE_NAME}@$(hostname)"
-    export RELEASE_COOKIE="$ERLANG_COOKIE"
-    
-    # Start in background mode
-    su-exec cryptic bin/cryptic daemon &
-    ERLANG_PID=$!
-    
-    # Wait for node to start
-    sleep 3
-    
-    if ps -p $ERLANG_PID > /dev/null 2>&1; then
-        success "Erlang node started (PID: $ERLANG_PID)"
-    else
-        error "Failed to start Erlang node"
     fi
 }
 
 # Verify certificate files exist
 check_certificates() {
-    local cert_dir="/home/cryptic/.cryptic/${CRYPTIC_USERNAME}/certificates"
+    local cert_dir="/home/cryptic/.cryptic/${CRYPTIC_USERNAME}/${CRYPTIC_SERVER_HOST}_${CRYPTIC_SERVER_PORT}/certificates"
     
     if [ ! -d "$cert_dir" ]; then
         warn "Certificate directory not found: $cert_dir"
-        warn "Mount certificates as volume: -v /path/to/certs:$cert_dir"
+        warn "You may need to run onboarding first:"
+        warn "  docker compose run --rm cryptic-tui sh -c \"cryptic --onboard\""
         return 1
     fi
     
@@ -107,6 +90,7 @@ check_certificates() {
         warn "  - ${CRYPTIC_USERNAME}.crt"
         warn "  - ${CRYPTIC_USERNAME}.key"
         warn "  - ca.crt"
+        warn "Run onboarding: docker compose run --rm cryptic-tui sh -c \"cryptic --onboard\""
         return 1
     fi
     
@@ -123,10 +107,10 @@ show_connection_info() {
 ╚═══════════════════════════════════════════════════════════════╝
 
 Connection Details:
-  Erlang Node:     ${CRYPTIC_NODE_NAME}@$(hostname)
-  Target Node:     ${ERLANG_NODE}
-  Cookie:          ${ERLANG_COOKIE:0:8}...
   Username:        ${CRYPTIC_USERNAME}
+  Server:          ${CRYPTIC_SERVER_HOST}:${CRYPTIC_SERVER_PORT}
+  Node Name:       ${CRYPTIC_NODE_NAME}
+  Enable DB:       ${CRYPTIC_ENABLE_DB}
 
 Keyboard Shortcuts:
   Ctrl+Q - Quit
@@ -146,28 +130,23 @@ main() {
     # Set up Erlang cookie
     setup_erlang_cookie
     
-    # Start background Erlang node
-    start_erlang_node
-    
-    # Check certificates (warn but don't fail)
-    check_certificates || warn "Continuing without certificates..."
+    # Check certificates (warn but don't fail - user might be onboarding)
+    check_certificates || warn "Continuing without certificates (use --onboard to set up)..."
     
     # Show connection info
     show_connection_info
     
-    # If command is cryptic-tui, run as cryptic user
+    # If command is cryptic-tui (default), run bin/cryptic --tui
     if [ "$1" = "cryptic-tui" ]; then
-        shift
+        info "Starting Cryptic TUI via bin/cryptic --tui..."
         
-        # Build command arguments
-        TUI_ARGS="--node ${ERLANG_NODE} --cookie ${ERLANG_COOKIE}"
-        
-        info "Starting Cryptic TUI..."
-        info "Command: cryptic-tui $TUI_ARGS $@"
-        echo ""
-        
-        # Execute as cryptic user with proper TTY
-        exec su-exec cryptic cryptic-tui $TUI_ARGS "$@"
+        # Execute as cryptic user with bin/cryptic script
+        exec su-exec cryptic /opt/cryptic/bin/cryptic --tui \
+            -u "${CRYPTIC_USERNAME}" \
+            -s "${CRYPTIC_SERVER_HOST}" \
+            -p "${CRYPTIC_SERVER_PORT}" \
+            --name "${CRYPTIC_NODE_NAME}" \
+            $([ "${CRYPTIC_ENABLE_DB}" = "true" ] && echo "--enable-db")
     else
         # Run custom command as cryptic user
         info "Running custom command: $@"

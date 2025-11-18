@@ -12,7 +12,6 @@ RUN apk add --no-cache \
     g++ \
     libc-dev \
     openssl-dev \
-    ncurses-dev \
     libsodium-dev \
     sqlite-dev \
     pkgconf
@@ -43,7 +42,6 @@ FROM alpine:latest
 # Install runtime dependencies
 RUN apk add --no-cache \
     openssl \
-    ncurses-libs \
     libstdc++ \
     libgcc \
     libsodium \

@@ -51,7 +51,6 @@ RUN apk add --no-cache \
     g++ \
     libc-dev \
     openssl-dev \
-    ncurses-dev \
     libsodium-dev \
     sqlite-dev \
     pkgconf
@@ -85,8 +84,6 @@ FROM erlang:28.1-alpine
 
 # Install runtime dependencies (including sqlite-libs for esqlite NIF)
 RUN apk add --no-cache \
-    ncurses-libs \
-    ncurses-terminfo-base \
     libstdc++ \
     libgcc \
     libsodium \
@@ -120,6 +117,10 @@ COPY --from=erlang-builder /buildroot/scripts /opt/cryptic/scripts
 # Copy Rust TUI binary from rust-builder
 COPY --from=rust-builder /build/target/release/cryptic-tui /usr/local/bin/
 
+# Copy entrypoint script from cryptic/scripts directory
+COPY cryptic/scripts/docker-tui-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-tui-entrypoint.sh
+
 # Make scripts executable
 RUN chmod +x /opt/cryptic/bin/* /opt/cryptic/scripts/*.sh
 
@@ -130,19 +131,12 @@ RUN mkdir -p \
     /home/cryptic/.cryptic/certificates && \
     chown -R cryptic:cryptic /home/cryptic /opt/cryptic
 
-# Set up Erlang cookie
-RUN echo -n "cryptic_secret_cookie" > /home/cryptic/.erlang.cookie && \
-    chmod 400 /home/cryptic/.erlang.cookie && \
-    chown cryptic:cryptic /home/cryptic/.erlang.cookie
-
 # Set environment variables (matching bin/cryptic script options)
 ENV CRYPTIC_USERNAME=${CRYPTIC_USERNAME:-"docker-client"} \
     CRYPTIC_SERVER_HOST=${CRYPTIC_SERVER_HOST:-"cryptic-server"} \
     CRYPTIC_SERVER_PORT=${CRYPTIC_SERVER_PORT:-"8443"} \
     CRYPTIC_ENABLE_DB=${CRYPTIC_ENABLE_DB:-"false"} \
     CRYPTIC_NODE_NAME=${CRYPTIC_NODE_NAME:-"localhost"} \
-    CRYPTIC_TUI_MODE=${CRYPTIC_TUI_MODE:-"true"} \
-    CRYPTIC_INTERACTIVE=${CRYPTIC_INTERACTIVE:-"false"} \
     HOME=/home/cryptic \
     TERM=xterm-256color \
     PATH=/opt/cryptic/bin:$PATH
@@ -150,12 +144,15 @@ ENV CRYPTIC_USERNAME=${CRYPTIC_USERNAME:-"docker-client"} \
 # Expose EPMD port and dynamic port range for distributed Erlang
 EXPOSE 4369 9000-9100
 
-# Switch to cryptic user
-USER cryptic
+# Don't switch to cryptic user yet - entrypoint needs root to fix volume permissions
+# USER will be handled by entrypoint script
 
 # Set working directory to user home
 WORKDIR /home/cryptic
 
+# Use entrypoint script for setup
+ENTRYPOINT ["/usr/local/bin/docker-tui-entrypoint.sh"]
+
 # Default: start using bin/cryptic with --tui mode
-# The script will handle starting both Erlang backend and Rust TUI
-CMD ["/opt/cryptic/bin/cryptic", "--tui"]
+# The entrypoint will handle starting both Erlang backend and Rust TUI
+CMD ["cryptic-tui"]

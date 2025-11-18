@@ -99,8 +99,6 @@ Enhanced interactive shell with advanced line editing capabilities and Emacs-sty
 **`cryptic_ws_client`**
 WebSocket client that handles mTLS connections to the server. Manages automatic keypair generation, prekey upload, message encryption/decryption, and provides a clean API for messaging operations.
 
-**`cryptic_ws_ui`**
-Professional terminal user interface built with ncurses (cecho). Provides comprehensive Double Ratchet session management, real-time chat functionality, automatic X3DH-to-ratchet initialization, unified encrypted message handling, session status display, and an intuitive user experience for secure messaging.
 
 ### Supporting Components
 
@@ -274,7 +272,6 @@ Pre-configured client certificates are available for immediate testing:
 - Erlang/OTP 27+
 - Libsodium development libraries
 - Rebar3 build tool
-- cecho (Erlang ncurses library) - automatically installed via rebar3
 
 ### Build Commands
 

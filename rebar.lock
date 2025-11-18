@@ -1,8 +1,5 @@
 {"1.2.0",
-[{<<"cecho">>,
-  {git,"https://github.com/mazenharake/cecho.git",
-       {ref,"dabe9f35def4085420eada4f629fbbc2b45a858b"}},
-  0},
+[
  {<<"cowboy">>,{pkg,<<"cowboy">>,<<"2.9.0">>},0},
  {<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.16.0">>},0},
  {<<"eclip">>,

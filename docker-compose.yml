@@ -36,9 +36,8 @@ services:
       - ./priv/ssl/ca.crt:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt:ro
       - ./priv/ssl/ca.key:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.key:ro
 
-      # Optional: Bootstrap GPG fingerprints for pre-verified users
-      # Uncomment and create the directory if using bootstrap
-      # - ./priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:ro
+      # Bootstrap GPG fingerprints for pre-verified users
+      - ./priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:ro
 
       # Persistent data volumes (logs and CA database)
       - cryptic-logs:/opt/cryptic/logs
@@ -77,8 +76,9 @@ services:
     # Environment variables (map to bin/cryptic script options)
     environment:
       # Username for authentication (required)
-      # Set via TUI_USERNAME environment variable when running
-      - CRYPTIC_USERNAME=${TUI_USERNAME:-alice}
+      # Set via CRYPTIC_USERNAME environment variable when running:
+      # CRYPTIC_USERNAME=kalle docker compose run --rm cryptic-tui
+      - CRYPTIC_USERNAME=${CRYPTIC_USERNAME:-alice}
       
       # Server connection details (can be overridden)
       # Default to host.docker.internal which maps to host machine via extra_hosts
@@ -93,9 +93,8 @@ services:
       # Enable encrypted message storage (optional)
       - CRYPTIC_ENABLE_DB=${CRYPTIC_ENABLE_DB:-false}
       
-      # TUI mode flags (handled by bin/cryptic --tui)
-      - CRYPTIC_TUI_MODE=true
-      - CRYPTIC_INTERACTIVE=false
+      # Debug logging (optional)
+      - CRYPTIC_DEBUG=${CRYPTIC_DEBUG:-false}
       
       # Terminal configuration
       - TERM=xterm-256color
@@ -116,9 +115,6 @@ services:
       # - cryptic_chat_storage writes to SQLite database
       # - Application writes log files
       - ${HOME}/.cryptic:/home/cryptic/.cryptic
-      
-      # Mount Erlang cookie (read-only is fine, never modified)
-      - ${HOME}/.erlang.cookie:/home/cryptic/.erlang.cookie:ro
     
     # NOTE: No depends_on - client can connect to any server (local or remote)
     # If connecting to local cryptic-server, start it separately first
@@ -131,7 +127,7 @@ services:
     # This allows container to connect to server running on host machine
     # Note: Don't use "localhost" as it conflicts with container's own 127.0.0.1
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "cryptic-server:host-gateway"
     
     # Don't auto-restart (this is an interactive client)
     restart: "no"
