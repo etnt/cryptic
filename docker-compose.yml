@@ -81,10 +81,10 @@ services:
       - CRYPTIC_USERNAME=${TUI_USERNAME:-alice}
       
       # Server connection details (can be overridden)
-      # Default to localhost which maps to host machine via extra_hosts
+      # Default to host.docker.internal which maps to host machine via extra_hosts
       # Override with CRYPTIC_SERVER_HOST=cryptic-server for Docker server
       # or CRYPTIC_SERVER_HOST=relay.example.com for remote server
-      - CRYPTIC_SERVER_HOST=${CRYPTIC_SERVER_HOST:-localhost}
+      - CRYPTIC_SERVER_HOST=${CRYPTIC_SERVER_HOST:-host.docker.internal}
       - CRYPTIC_SERVER_PORT=${CRYPTIC_SERVER_PORT:-8443}
       
       # Erlang node configuration
@@ -127,10 +127,11 @@ services:
     networks:
       - cryptic-network
     
-    # Map localhost in container to host machine (for Mac/Windows Docker Desktop)
-    # This allows container to connect to server running on host's localhost:8443
+    # Map host.docker.internal in container to host machine (for Mac/Windows Docker Desktop)
+    # This allows container to connect to server running on host machine
+    # Note: Don't use "localhost" as it conflicts with container's own 127.0.0.1
     extra_hosts:
-      - "localhost:host-gateway"
+      - "host.docker.internal:host-gateway"
     
     # Don't auto-restart (this is an interactive client)
     restart: "no"

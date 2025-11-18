@@ -93,7 +93,10 @@ RUN apk add --no-cache \
     sqlite-libs \
     gnupg \
     bash \
-    su-exec
+    su-exec \
+    curl \
+    openssl \
+    jq
 
 # Create cryptic user and group
 RUN addgroup -S cryptic && adduser -S cryptic -G cryptic
