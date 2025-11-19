@@ -472,6 +472,13 @@ perform_renewal_check(State) ->
             DaysUntilExpiry = (State#renewal_state.cert_expires_at - Now) div 86400,
             ?info("Certificate renewal triggered: ~p days until expiry", [DaysUntilExpiry]),
             
+            %% Notify user
+            Msg = io_lib:format(
+                "Certificate expiring in ~p days, initiating automatic renewal...",
+                [DaysUntilExpiry]
+            ),
+            publish_system_message(Msg),
+            
             %% Perform renewal process
             NewState = State#renewal_state{
                 renewal_in_progress = true,
@@ -533,6 +540,16 @@ perform_renewal_process(State) ->
                                         ok ->
                                             ?info("Certificate renewal completed successfully", []),
                                             
+                                            %% Notify user of success
+                                            {ok, _NewIssuedAt, NewExpiresAt} = 
+                                                parse_certificate(CertFile),
+                                            ExpiryDate = format_unix_time(NewExpiresAt),
+                                            SuccessMsg = io_lib:format(
+                                                "Certificate renewed successfully, valid until ~s",
+                                                [ExpiryDate]
+                                            ),
+                                            publish_system_message(SuccessMsg),
+                                            
                                             %% Parse new certificate for updated timestamps
                                             {ok, IssuedAt, ExpiresAt} = 
                                                 parse_certificate(CertFile),
@@ -589,6 +606,16 @@ handle_renewal_failure(State, Reason) ->
                   [MaxAttempts, Reason]),
             ?error("Manual intervention required - please run: cryptic --onboard", []),
             
+            %% Notify user of failure
+            DaysRemaining = (State#renewal_state.cert_expires_at - 
+                           erlang:system_time(second)) div 86400,
+            FailureMsg = io_lib:format(
+                "Alert: Automatic certificate renewal failed after ~p attempts. "
+                "Certificate expires in ~p days. Please run manual renewal: cryptic --onboard",
+                [MaxAttempts, DaysRemaining]
+            ),
+            publish_system_message(FailureMsg),
+            
             %% Reset renewal state but keep failure count for visibility
             State#renewal_state{
                 renewal_in_progress = false
@@ -597,6 +624,14 @@ handle_renewal_failure(State, Reason) ->
             RetryInterval = State#renewal_state.retry_interval,
             ?warning("Renewal attempt ~p/~p failed, will retry in ~p seconds", 
                    [CurrentAttempts, MaxAttempts, RetryInterval]),
+            
+            %% Notify user of retry
+            RetryMinutes = RetryInterval div 60,
+            RetryMsg = io_lib:format(
+                "Automatic renewal failed (attempt ~p/~p), will retry in ~p minutes",
+                [CurrentAttempts, MaxAttempts, RetryMinutes]
+            ),
+            publish_system_message(RetryMsg),
             
             %% Schedule retry
             erlang:send_after(RetryInterval * 1000, self(), check_renewal),
@@ -959,6 +994,42 @@ install_new_certificate(NewCertPem, CertFile) ->
             ?error("Exception during certificate installation: ~p:~p~n~p",
                   [Class, CatchReason, Stacktrace]),
             {error, {install_exception, CatchReason}}
+    end.
+
+%% @private
+%% @doc Format Unix timestamp as human-readable date string.
+%%
+%% @param UnixTime Unix timestamp (seconds since epoch)
+%% @returns Formatted date string like "2025-11-26 14:30:00 UTC"
+-spec format_unix_time(integer()) -> string().
+format_unix_time(UnixTime) ->
+    {{Year, Month, Day}, {Hour, Minute, Second}} = 
+        calendar:gregorian_seconds_to_datetime(UnixTime + 62167219200),
+    io_lib:format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B UTC",
+                 [Year, Month, Day, Hour, Minute, Second]).
+
+%% @private
+%% @doc Publish a system message to the event bus for user notification.
+%%
+%% This function publishes messages to the cryptic_event_bus so that the
+%% console UI can display renewal status updates to the user.
+%%
+%% @param Message The message text to display (binary or string)
+-spec publish_system_message(binary() | string()) -> ok.
+publish_system_message(Message) when is_list(Message) ->
+    publish_system_message(list_to_binary(Message));
+publish_system_message(Message) when is_binary(Message) ->
+    try
+        cryptic_event_bus:publish(#{
+            type => system_message,
+            message => Message
+        }),
+        ok
+    catch
+        _:_ ->
+            %% If event bus publish fails, just log it - don't crash renewal
+            ?warning("Failed to publish system message: ~s", [Message]),
+            ok
     end.
 
 %% @private

@@ -94,6 +94,7 @@
 -include("cryptic_ansi.hrl").
 -include("cryptic.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 %% Internal state record
 -record(console_state, {
@@ -269,6 +270,9 @@ main(InitCfg) ->
     },
     {ok, EnginePid} = cryptic_engine:start_link(EngineCfg),
 
+    %% Start certificate renewal monitor (optional, continues if it fails)
+    _RenewalPid = maybe_start_renewal_monitor(CertCfg, WsClientPid),
+
     %% Create named ETS table for input buffer preservation
     %% Use named table so cryptic_shell can access it directly
     InputBufferTable = ets:new(cryptic_console_input_buffer, [
@@ -423,6 +427,155 @@ get_cert_config(Cfg) ->
         server_host => ServerHost,
         server_port => ServerPort
     }.
+
+%%% @doc Extract GPG fingerprint from client certificate SAN extension.
+%%%
+%%% The client certificate contains the GPG fingerprint in the SAN (Subject Alternative Name)
+%%% extension as a DNS name in the format: "<fingerprint>.gpg.cryptic.local"
+%%%
+%%% This function parses the certificate and extracts the fingerprint for use in
+%%% automatic certificate renewal.
+%%%
+%%% @param CertFile Path to the client certificate file
+%%% @returns `{ok, GpgFingerprint}' where GpgFingerprint is a binary, or `{error, Reason}'
+-spec extract_gpg_from_cert(string()) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_cert(CertFile) ->
+    try
+        case file:read_file(CertFile) of
+            {ok, CertPem} ->
+                [{'Certificate', CertDer, not_encrypted}] = 
+                    public_key:pem_decode(CertPem),
+                
+                Cert = public_key:pkix_decode_cert(CertDer, otp),
+                
+                %% Extract TBS certificate which contains extensions
+                #'OTPCertificate'{
+                    tbsCertificate = TBSCert
+                } = Cert,
+                
+                %% Find SAN extension
+                case TBSCert of
+                    #'OTPTBSCertificate'{extensions = Extensions} when is_list(Extensions) ->
+                        case find_san_extension(Extensions) of
+                            {ok, SANValues} ->
+                                extract_gpg_from_san(SANValues);
+                            {error, _} = Error ->
+                                Error
+                        end;
+                    _ ->
+                        {error, no_extensions_in_certificate}
+                end;
+            {error, Reason} ->
+                {error, {cert_read_failed, Reason}}
+        end
+    catch
+        Class:ErrorReason:_Stacktrace ->
+            {error, {cert_parse_failed, Class, ErrorReason}}
+    end.
+
+%% @private Find SAN extension in certificate extensions
+-spec find_san_extension(list()) -> {ok, term()} | {error, term()}.
+find_san_extension(Extensions) ->
+    %% OID for SubjectAltName: 2.5.29.17
+    SANOid = ?'id-ce-subjectAltName',
+    
+    case lists:keyfind(SANOid, 2, Extensions) of
+        #'Extension'{extnValue = SANValue} ->
+            {ok, SANValue};
+        false ->
+            {error, no_san_extension}
+    end.
+
+%% @private Extract GPG fingerprint from SAN values
+-spec extract_gpg_from_san(term()) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_san(SANValues) when is_list(SANValues) ->
+    extract_gpg_from_san_list(SANValues);
+extract_gpg_from_san(_) ->
+    {error, invalid_san_format}.
+
+%% @private Helper to iterate through SAN list
+-spec extract_gpg_from_san_list(list()) -> {ok, binary()} | {error, term()}.
+extract_gpg_from_san_list([{dNSName, DNSName} | Rest]) ->
+    %% DNSName format: "<fingerprint>.gpg.cryptic.local"
+    case string:split(DNSName, ".gpg.cryptic.local") of
+        [Fingerprint, ""] ->
+            {ok, list_to_binary(Fingerprint)};
+        _ ->
+            extract_gpg_from_san_list(Rest)
+    end;
+extract_gpg_from_san_list([_ | Rest]) ->
+    extract_gpg_from_san_list(Rest);
+extract_gpg_from_san_list([]) ->
+    {error, no_gpg_in_san}.
+
+%%% @doc Attempt to start certificate renewal monitor.
+%%%
+%%% Extracts GPG information from the client certificate and starts the
+%%% cryptic_cert_renewal gen_server. If automatic renewal is disabled or
+%%% if any required information cannot be extracted, logs a warning and
+%%% continues without automatic renewal.
+%%%
+%%% @param CertCfg Certificate configuration map with cert_file, key_file, etc.
+%%% @param WsClientPid PID of the WebSocket client process
+%%% @returns PID of renewal monitor if started, or `undefined' if not started
+-spec maybe_start_renewal_monitor(map(), pid()) -> pid() | undefined.
+maybe_start_renewal_monitor(CertCfg, WsClientPid) ->
+    %% Check if automatic renewal is enabled (default: true)
+    AutoRenewalEnabled = application:get_env(cryptic, auto_cert_renewal_enabled, true),
+    
+    case AutoRenewalEnabled of
+        false ->
+            ?info("Automatic certificate renewal disabled", []),
+            undefined;
+        true ->
+            start_renewal_monitor(CertCfg, WsClientPid)
+    end.
+
+%% @private Start the renewal monitor with all required configuration
+-spec start_renewal_monitor(map(), pid()) -> pid() | undefined.
+start_renewal_monitor(CertCfg, WsClientPid) ->
+    CertFile = maps:get(cert_file, CertCfg),
+    
+    try
+        %% Extract GPG fingerprint from certificate
+        case extract_gpg_from_cert(CertFile) of
+            {ok, GpgFingerprint} ->
+                %% Build renewal configuration
+                RenewalCfg = CertCfg#{
+                    gpg_fingerprint => GpgFingerprint,
+                    ws_client_pid => WsClientPid,
+                    renewal_threshold => application:get_env(
+                        cryptic, cert_renewal_threshold, 0.25
+                    ),
+                    max_retry_attempts => application:get_env(
+                        cryptic, cert_renewal_max_retries, 5
+                    ),
+                    retry_interval => application:get_env(
+                        cryptic, cert_renewal_retry_interval, 3600
+                    )
+                },
+                
+                %% Start the renewal monitor
+                case cryptic_cert_renewal:start_link(RenewalCfg) of
+                    {ok, RenewalPid} ->
+                        ?info("Certificate renewal monitor started", []),
+                        RenewalPid;
+                    {error, Reason} ->
+                        ?warning("Failed to start certificate renewal monitor: ~p", [Reason]),
+                        ?warning("Certificate renewal will be manual only", []),
+                        undefined
+                end;
+            {error, Reason} ->
+                ?warning("Could not extract GPG fingerprint from certificate: ~p", [Reason]),
+                ?warning("Certificate renewal will be manual only", []),
+                undefined
+        end
+    catch
+        Class:ErrorReason:_Stacktrace ->
+            ?warning("Exception starting renewal monitor: ~p:~p", [Class, ErrorReason]),
+            ?warning("Certificate renewal will be manual only", []),
+            undefined
+    end.
 
 %% @doc Main command loop with async message handling
 command_loop(State) ->
