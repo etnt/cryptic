@@ -340,30 +340,41 @@ init({UIPid, Username, ServerHost, Config}) ->
 %% @param State Current state
 %% @returns {Reply, NewState}
 do_send_message(Command, State) ->
-    %% Add message_id if this is a message that needs acknowledgment
-    {CommandWithId, NewState} =
-        case maps:get(<<"type">>, Command, undefined) of
-            <<"x3dh">> ->
-                add_message_tracking(Command, State);
-            <<"ratchet">> ->
-                add_message_tracking(Command, State);
-            _ ->
-                %% Other commands don't need acknowledgment tracking
-                {Command, State}
-        end,
+    %% Check if WebSocket connection is established
+    case State#state.connected of
+        true ->
+            %% Add message_id if this is a message that needs acknowledgment
+            {CommandWithId, NewState} =
+                case maps:get(<<"type">>, Command, undefined) of
+                    <<"x3dh">> ->
+                        add_message_tracking(Command, State);
+                    <<"ratchet">> ->
+                        add_message_tracking(Command, State);
+                    _ ->
+                        %% Other commands don't need acknowledgment tracking
+                        {Command, State}
+                end,
 
-    JsonCommand = jsx:encode(CommandWithId),
-    ?msg_out("~s~n", [maps:get(<<"type">>, CommandWithId, <<"unknown...">>)]),
-    ?dbg(
-        "send_message: ConnPid=~p, StreamRef=~p , Command=~p~n",
-        [NewState#state.conn_pid, NewState#state.stream_ref, CommandWithId]
-    ),
-    ok = gun:ws_send(
-        NewState#state.conn_pid,
-        NewState#state.stream_ref,
-        {text, JsonCommand}
-    ),
-    {ok, NewState}.
+            JsonCommand = jsx:encode(CommandWithId),
+            ?msg_out("~s~n", [maps:get(<<"type">>, CommandWithId, <<"unknown...">>)]),
+            ?dbg(
+                "send_message: ConnPid=~p, StreamRef=~p , Command=~p~n",
+                [NewState#state.conn_pid, NewState#state.stream_ref, CommandWithId]
+            ),
+            ok = gun:ws_send(
+                NewState#state.conn_pid,
+                NewState#state.stream_ref,
+                {text, JsonCommand}
+            ),
+            {ok, NewState};
+        false ->
+            %% Not connected yet, queue the command
+            ?dbg("WebSocket not connected yet, queuing command: ~p~n", [Command]),
+            NewState = State#state{
+                pending_commands = [Command | State#state.pending_commands]
+            },
+            {ok, NewState}
+    end.
 
 %% @private
 %% @doc Handle synchronous calls to the gen_server.
