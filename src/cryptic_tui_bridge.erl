@@ -20,7 +20,8 @@
          start/4,
          stop/1,
          get_caller_node/0,
-         get_recent_messages/3
+         get_recent_messages/3,
+         save_outgoing_message/2
         ]).
 
 %% gen_server callbacks
@@ -37,7 +38,10 @@
          username :: binary() | undefined,
          passphrase :: binary() | undefined,
          event_filter :: fun((map()) -> boolean()) | undefined,
-         engine_pid :: pid() | undefined
+         engine_pid :: pid() | undefined,
+         server_host :: string(),
+         server_port :: non_neg_integer(),
+         db_enabled :: boolean()
         }).
 
 %%%===================================================================
@@ -68,6 +72,12 @@ start(RustNode, Username, Passphrase, Filter) when is_atom(RustNode) andalso
      {ok, binary()} | {error, term()}.
 get_recent_messages(CurrentUser, Peer, Limit) ->
     gen_server:call(?SERVER, {get_recent_messages, CurrentUser, Peer, Limit}).
+
+
+-spec save_outgoing_message(ToUser :: binary(), Message :: binary()) -> ok | {error,term()}.
+save_outgoing_message(ToUser, Message) ->
+    gen_server:call(?SERVER, {save_outgoing_message, ToUser, Message}).
+
 
 %% @doc Get the calling process's node name.
 %% When called via RPC from Rust, this returns the Rust node's name.
@@ -104,7 +114,7 @@ init([RustNode, Username, Passphrase, CustomFilter]) ->
     %% as a detached node and need to have the Passphrase!
     inform_cryptic_console({set_passphrase, Passphrase}),
 
-    EnginePid = get_engine_pid(),
+    ConsoleData = get_console_data(),
 
     %% Subscribe to event bus with appropriate filter
     Filter = case CustomFilter of
@@ -130,7 +140,10 @@ init([RustNode, Username, Passphrase, CustomFilter]) ->
                 {ok, #state{rust_node    = RustNode,
                             username     = Username,
                             passphrase   = Passphrase,
-                            engine_pid   = EnginePid,
+                            engine_pid   = maps:get(engine_pid, ConsoleData),
+                            server_host  = maps:get(server_host, ConsoleData),
+                            server_port  = maps:get(server_port, ConsoleData),
+                            db_enabled   = maps:get(db_enabled, ConsoleData),
                             event_filter = Filter}};
             {error, Reason} ->
                 ?error("Failed to subscribe to event bus: ~p", [Reason]),
@@ -152,6 +165,23 @@ handle_call({get_recent_messages,CurrentUser,Peer,Limit} = R, _From, State) ->
             Limit,
             State#state.passphrase),
     ?dbg("~p:handle_call , Reply=~p~n",[?MODULE,Reply]),
+    {reply, Reply, State};
+%%
+handle_call({save_outgoing_message, ToUser, Message} = R, _From, State) ->
+    ?dbg("~p:handle_call , ~p~n",[?MODULE,R]),
+    Timestamp = erlang:timestamp(),
+    DateTime = calendar:now_to_datetime(Timestamp),
+    Reply =
+        cryptic_chat_storage:save_encrypted_message(
+          State#state.username,
+          binary_to_list(ToUser),
+          State#state.server_host,
+          State#state.server_port,
+          Message,
+          DateTime,
+          State#state.passphrase
+         ),
+    ?dbg("~p saving message, Result: ~p~n",[?MODULE, Reply]),
     {reply, Reply, State};
 %%
 handle_call(_Request, _From, State) ->
@@ -216,13 +246,13 @@ inform_cryptic_console(Msg) ->
     end.
 
 
-get_engine_pid() ->
-    cryptic_console ! {get_engine_pid, self()},
+get_console_data() ->
+    cryptic_console ! {get_console_data, self()},
     receive
-        {engine_pid, Pid} ->
-            Pid
+        {console_data, ConsoleData} ->
+            ConsoleData
     after 3000 ->
-        ?error("~p: could not get the Engine Pid!~n", [?MODULE]),
+        ?error("~p: could not get the ConsoleData!~n", [?MODULE]),
         undefined
     end.
 

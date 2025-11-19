@@ -126,10 +126,11 @@ send_message(JsonMsg) ->
             ?dbg("~p: Sending message to Engine PID: ~p~n", [?MODULE, EnginePid]),
             case cryptic_engine:send_message(EnginePid,
                                              ToUser,
-                                            Plaintext)
+                                             Plaintext)
             of
                 ok ->
-                    ?info("~p: Message sent to Engine successfully~n", [?MODULE]),
+                    ?dbg("~p: Message sent to Engine successfully~n", [?MODULE]),
+                    cryptic_tui_bridge:save_outgoing_message(ToUser, Plaintext),
                     ok;
                 {error, Reason} ->
                     ?error("~p: Failed to send message to Engine: ~p~n", [?MODULE, Reason]),
@@ -185,10 +186,10 @@ send_to_bus(JsonMsg) ->
     ok.
 
 get_engine_pid() ->
-    cryptic_console ! {get_engine_pid, self()},
+    cryptic_console ! {get_console_data, self()},
     receive
-        {engine_pid, Pid} ->
-            Pid
+        {console_data, ConsoleData} ->
+            maps:get(engine_pid, ConsoleData)
     after 3000 ->
         ?error("~p: could not get the Engine Pid!~n", [?MODULE]),
         undefined

@@ -564,9 +564,14 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             %% Continue waiting - the DOWN message will trigger restart
             wait_for_input_or_messages(InputPid, MonitorRef, State);
 
-        {get_engine_pid, From}  ->
+        {get_console_data, From}  ->
             %% For example, from the TUI bridge process
-            From ! {engine_pid, State#console_state.engine_pid},
+            ConsoleData = #{engine_pid => State#console_state.engine_pid,
+                            server_host => State#console_state.server_host,
+                            server_port => State#console_state.server_port,
+                            db_enabled => State#console_state.db_enabled
+                            },
+            From ! {console_data, ConsoleData},
             wait_for_input_or_messages(InputPid, MonitorRef, State);
 
         Other ->
@@ -585,6 +590,15 @@ tui_wait_loop(State) ->
             tui_wait_loop(State);
         {event, #{type := deliver_message, from := FromUsername, message := Message, timestamp := Timestamp}} ->
             ?dbg("TUI backend received message from ~s~n", [FromUsername]),
+
+            %% Run any external notification script
+            notify_user(
+                FromUsername,
+                Message,
+                Timestamp,
+                State#console_state.notifier
+            ),
+
             %% Save message to storage if database is enabled
             case State of
                 #console_state{
@@ -593,7 +607,7 @@ tui_wait_loop(State) ->
                     server_port = ServerPort,
                     passphrase = Passphrase,
                     db_enabled = true
-                } when Passphrase =/= undefined, Passphrase =/= <<"tui-mode-placeholder">> ->
+                } when Passphrase =/= undefined ->
                     DateTime = calendar:now_to_datetime(Timestamp),
                     case
                         cryptic_chat_storage:save_encrypted_message(
@@ -619,9 +633,14 @@ tui_wait_loop(State) ->
             ?dbg("TUI backend received websocket message (ignoring - TUI subscribes directly)~n", []),
             %% TUI already subscribes to event bus directly, no need to re-publish
             tui_wait_loop(State);
-        {get_engine_pid, From}  ->
-            %% For the TUI bridge process to get engine PID
-            From ! {engine_pid, State#console_state.engine_pid},
+        {get_console_data, From}  ->
+            %% For the TUI bridge process
+            ConsoleData = #{engine_pid => State#console_state.engine_pid,
+                            server_host => State#console_state.server_host,
+                            server_port => State#console_state.server_port,
+                            db_enabled => State#console_state.db_enabled
+                            },
+            From ! {console_data, ConsoleData},
             tui_wait_loop(State);
         {set_passphrase, From, Passphrase} ->
             %% TUI has received passphrase from user, initialize engine with it
