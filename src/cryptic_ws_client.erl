@@ -77,7 +77,8 @@
     start_link/1, start_link/2, start_link/3,
     send_message/2,
     stop/1,
-    set_engine_pid/2
+    set_engine_pid/2,
+    reload_certificate_and_reconnect/1
 ]).
 -export([
     init/1,
@@ -246,6 +247,56 @@ stop(Pid) ->
 set_engine_pid(Pid, EnginePid) ->
     gen_server:call(Pid, {set_engine_pid, EnginePid}).
 
+%% @doc Reload client certificate and reconnect to server.
+%%
+%% Triggers a graceful reload of the client certificate and reconnection
+%% to the WebSocket server. This is used during automatic certificate renewal.
+%%
+%% == Process ==
+%%
+%% The reload process:
+%% <ol>
+%%   <li>Gracefully closes existing WebSocket connection</li>
+%%   <li>Closes gun HTTP connection</li>
+%%   <li>Re-reads certificate files from disk (new certificate must already be saved)</li>
+%%   <li>Re-establishes TLS connection with new certificate</li>
+%%   <li>Upgrades to WebSocket</li>
+%%   <li>Resends any pending messages</li>
+%% </ol>
+%%
+%% == Prerequisites ==
+%%
+%% Before calling this function:
+%% <ul>
+%%   <li>New certificate must already be saved to disk</li>
+%%   <li>Certificate file paths remain the same</li>
+%%   <li>Private key remains unchanged (only certificate is replaced)</li>
+%% </ul>
+%%
+%% == Behavior ==
+%%
+%% The function returns immediately with `ok'. The actual reconnection
+%% happens asynchronously. Monitor the connection status via logging
+%% or by observing incoming messages.
+%%
+%% == Example ==
+%%
+%% ```
+%% %% Certificate renewal has saved new cert to disk
+%% ok = cryptic_cert_renewal:install_new_certificate(NewCertPem, CertFile),
+%%
+%% %% Trigger reload and reconnection
+%% ok = cryptic_ws_client:reload_certificate_and_reconnect(WsClientPid),
+%%
+%% %% Connection will be reestablished with new certificate
+%% %% Pending messages will be automatically resent
+%% '''
+%%
+%% @param Pid The client process PID
+%% @returns `ok'
+reload_certificate_and_reconnect(Pid) ->
+    gen_server:cast(Pid, reload_certificate_and_reconnect).
+
 %%%===================================================================
 %%% gen_server Callbacks
 %%%===================================================================
@@ -404,6 +455,18 @@ handle_call(_Request, _From, State) ->
 %% @param Msg The cast message
 %% @param State Current gen_server state
 %% @returns `{noreply, State}'
+handle_cast(reload_certificate_and_reconnect, State) ->
+    ?info("Reloading certificate and reconnecting...", []),
+    
+    %% Close existing connection gracefully
+    NewState = close_connection_gracefully(State),
+    
+    %% Trigger immediate reconnection with new certificate
+    %% The connect_websocket/1 function will re-read certificate files
+    self() ! attempt_reconnect,
+    
+    {noreply, NewState};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -725,6 +788,67 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
+
+%% @private
+%% @doc Gracefully close the WebSocket and gun connection.
+%%
+%% Performs an orderly shutdown of the connection without triggering
+%% automatic reconnection. This is used during certificate reload.
+%%
+%% == Process ==
+%%
+%% <ol>
+%%   <li>Send WebSocket close frame (if WebSocket is open)</li>
+%%   <li>Wait briefly for clean closure</li>
+%%   <li>Close gun connection</li>
+%%   <li>Cancel reconnect timer if active</li>
+%%   <li>Reset connection state</li>
+%% </ol>
+%%
+%% @param State Current client state
+%% @returns Updated state with connection closed
+-spec close_connection_gracefully(#state{}) -> #state{}.
+close_connection_gracefully(State) ->
+    %% Send WebSocket close frame if connection is active
+    case {State#state.conn_pid, State#state.stream_ref, State#state.connected} of
+        {Conn, Stream, true} when Conn =/= undefined, Stream =/= undefined ->
+            ?info("Sending WebSocket close frame", []),
+            try
+                gun:ws_send(Conn, Stream, close),
+                %% Give it a moment to close cleanly
+                timer:sleep(100)
+            catch
+                _:_ -> ok  %% Connection might already be dead
+            end;
+        _ ->
+            ok
+    end,
+    
+    %% Close gun connection
+    case State#state.conn_pid of
+        undefined -> ok;
+        ConnPid ->
+            ?info("Closing gun connection", []),
+            try
+                gun:close(ConnPid)
+            catch
+                _:_ -> ok
+            end
+    end,
+    
+    %% Cancel reconnect timer if one is active
+    case State#state.reconnect_timer_ref of
+        undefined -> ok;
+        ReconnectTimer -> erlang:cancel_timer(ReconnectTimer)
+    end,
+    
+    %% Reset connection state
+    State#state{
+        conn_pid = undefined,
+        stream_ref = undefined,
+        connected = false,
+        reconnect_timer_ref = undefined
+    }.
 
 %% @private
 %% @doc Establish a WebSocket connection with mTLS authentication.
