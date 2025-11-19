@@ -52,8 +52,10 @@ cryptic_ca_bootstrap:load_bootstrap_registrations(DbRef).
 
 ### Step 3: Request certificates
 
-Request new certificates via the `./bin/cryptic-onboard` script.
-Choose the `Request a TLS certificate from server` action.
+Request new certificates via the `./bin/cryptic --onboard` script.
+
+1. Choose the `Export GPG public key for admin registration` action.
+2. Choose the `Request a TLS certificate from server` action.
 
 Veryfy that you have got certificates, for example:
 
@@ -76,6 +78,13 @@ Example:
 ```
 ./script/cryptic_console -u admin --enable-db
 ```
+
+### Step 5: Request new certificate when expired
+
+The certificate issued is only valid for a short time. The Cryptic client
+should automatically renew them before they expire. But if you haven't been
+running the client for a while and the certificate has expired, then you can
+just repeat **Step 3** above to request a new certificate. 
 
 
 ## Bootstrap File Format
@@ -122,9 +131,8 @@ Then restart the server or reload bootstrap registrations.
 
 **Key Points**:
 - Bootstrap is needed for the first user(s) to register their GPG identity
-- After bootstrapping, use `./bin/cryptic-onboard request` to get a certificate
+- After bootstrapping, use the `./bin/cryptic --onboard` script to request a certificate
 - The onboarding script handles GPG key creation, CSR generation, and signing
-- Subsequent users follow the same process: bootstrap GPG, then request certificate
 
 
 ## Troubleshooting
