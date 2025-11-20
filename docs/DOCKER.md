@@ -574,13 +574,6 @@ RUN git clone https://github.com/etnt/cryptic-tui.git /cryptic-tui
 
 This will eliminate the need for manual cloning and sibling directory setup.
 
-### See Also
-
-- [DOCKER-TUI-SUMMARY.md](../DOCKER-TUI-SUMMARY.md) - Comprehensive TUI client documentation
-- [DOCKER-TUI-BUILD-NOTES.md](../DOCKER-TUI-BUILD-NOTES.md) - Build-specific details
-- [QUICKSTART-DOCKER-TUI.md](../QUICKSTART-DOCKER-TUI.md) - Step-by-step guide
-
-
 ## The Server
 
 The Cryptic server Docker deployment uses a multi-stage build process to create
@@ -978,7 +971,7 @@ services:
          - server_key
          - server_cert
          - ca_cert
-   
+
    secrets:
      server_key:
        file: ./priv/ssl/server.key
@@ -986,16 +979,7 @@ services:
        file: ./priv/ssl/server.crt
      ca_cert:
        file: ./priv/ssl/ca.crt
-```2. **Enable logging** to external system (e.g., Loki, ELK):
-   ```yaml
-   services:
-     cryptic-server:
-       logging:
-         driver: "json-file"
-         options:
-           max-size: "10m"
-           max-file: "3"
-   ```
+```
 
 3. **Use health checks** with orchestration (Kubernetes, Swarm):
    ```yaml

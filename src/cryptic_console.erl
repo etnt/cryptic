@@ -431,7 +431,7 @@ get_cert_config(Cfg) ->
 %%% @doc Extract GPG fingerprint from client certificate SAN extension.
 %%%
 %%% The client certificate contains the GPG fingerprint in the SAN (Subject Alternative Name)
-%%% extension as a DNS name in the format: "<fingerprint>.gpg.cryptic.local"
+%%% extension as a DNS name in the format: `<fingerprint>.gpg.cryptic.local'
 %%%
 %%% This function parses the certificate and extracts the fingerprint for use in
 %%% automatic certificate renewal.

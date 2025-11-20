@@ -85,7 +85,7 @@
     % Certificate lifecycle
     cert_expires_at :: integer(),   % Unix timestamp
     cert_issued_at :: integer(),    % Unix timestamp
-    renewal_threshold :: float(),   % Percentage (default: 0.25 for 25%)
+    renewal_threshold :: float(),   % Percentage (default: 0.5 for 50%)
     renewal_trigger_time :: integer(), % Unix timestamp when renewal should occur
     
     % Renewal process state
@@ -195,7 +195,7 @@ init(Config) ->
     GpgEmail = maps:get(gpg_email, Config),
 
     %% Configuration options with defaults
-    RenewalThreshold = maps:get(renewal_threshold, Config, 0.25),
+    RenewalThreshold = maps:get(renewal_threshold, Config, 0.5),
     AutoRenewalEnabled = maps:get(auto_renewal_enabled, Config, true),
     WsClientPid = maps:get(ws_client_pid, Config, undefined),
 

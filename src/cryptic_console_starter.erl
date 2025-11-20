@@ -63,7 +63,7 @@ start() ->
     spawn(fun() -> run() end).
 
 %% @doc Start the console with optional args (for -s flag compatibility)
-%% A<rgs are ignored, configuration comes from application environment
+%% Args are ignored, configuration comes from application environment
 -spec run() -> ok.
 run() ->
     %% Ensure the cryptic application is loaded
