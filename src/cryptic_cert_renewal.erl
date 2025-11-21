@@ -16,7 +16,7 @@
 %% ```
 %% {cryptic, [
 %%     {auto_cert_renewal_enabled, true},
-%%     {cert_renewal_threshold, 0.25},           %% 25% of lifespan
+%%     {cert_renewal_threshold, 0.5},            %% 50% of lifespan
 %%     {cert_renewal_check_interval, 3600},      %% Check every hour (seconds)
 %%     {cert_renewal_max_retries, 5},
 %%     {cert_renewal_retry_intervals, [300, 900, 3600, 7200, 14400]}
@@ -46,6 +46,7 @@
 -export([
     start_link/1,
     check_now/0,
+    renew_now/0,
     get_status/0,
     enable/0,
     disable/0
@@ -81,26 +82,26 @@
     cert_dir :: string(),           % Base directory for certificates
     gpg_fingerprint :: binary(),
     gpg_email :: binary(),
-    
+
     % Certificate lifecycle
     cert_expires_at :: integer(),   % Unix timestamp
     cert_issued_at :: integer(),    % Unix timestamp
     renewal_threshold :: float(),   % Percentage (default: 0.5 for 50%)
     renewal_trigger_time :: integer(), % Unix timestamp when renewal should occur
-    
+
     % Renewal process state
     renewal_in_progress :: boolean(),
     renewal_attempts :: integer(),
     last_renewal_attempt :: integer(), % Unix timestamp
-    
+
     % Timers
     check_timer_ref :: reference() | undefined,
-    
+
     % Configuration
     auto_renewal_enabled = true :: boolean(), % Feature flag, default: true
     max_retry_attempts = 5 :: integer(),      % Default: 5
     retry_interval = 3600 :: integer(),       % Seconds, default: 3600 (1 hour)
-    
+
     % Callbacks
     ws_client_pid :: pid() | undefined % For triggering reconnection
 }).
@@ -124,7 +125,7 @@
 %%   ca_file => "/path/to/ca.crt",
 %%   gpg_fingerprint => <<"ABC123...">>,
 %%   gpg_email => <<"alice@example.com">>,
-%%   renewal_threshold => 0.25,        % Optional, default 25%
+%%   renewal_threshold => 0.5,        % Optional, default 50%
 %%   auto_renewal_enabled => true,     % Optional, default true
 %%   ws_client_pid => Pid              % Optional, set later via set_ws_client/1
 %% }
@@ -142,6 +143,43 @@ start_link(Config) ->
 -spec check_now() -> ok.
 check_now() ->
     gen_server:cast(?MODULE, check_now).
+
+%% @doc Trigger immediate certificate renewal (manual renewal).
+%%
+%% This function forces an immediate renewal regardless of the certificate's
+%% expiration time. It bypasses the automatic renewal threshold check and
+%% starts the renewal process immediately.
+%%
+%% This is useful for:
+%% <ul>
+%%   <li>Manual certificate renewal before automatic trigger</li>
+%%   <li>Testing the renewal process</li>
+%%   <li>Recovering from a failed automatic renewal</li>
+%%   <li>Renewing after configuration changes</li>
+%% </ul>
+%%
+%% The renewal process includes:
+%% <ul>
+%%   <li>Generating a new CSR with existing key</li>
+%%   <li>Signing CSR with GPG key</li>
+%%   <li>Submitting to CA for new certificate</li>
+%%   <li>Installing new certificate</li>
+%%   <li>Triggering WebSocket reconnection</li>
+%% </ul>
+%%
+%% == Example ==
+%% ```
+%% %% From console or TUI
+%% ok = cryptic_cert_renewal:renew_now().
+%% %% User will receive system messages via event bus:
+%% %% "Manual certificate renewal initiated..."
+%% %% "Certificate renewed successfully, valid until 2025-11-27 10:00:00 UTC"
+%% '''
+%%
+%% @returns `ok' (renewal happens asynchronously)
+-spec renew_now() -> ok.
+renew_now() ->
+    gen_server:cast(?MODULE, renew_now).
 
 %% @doc Get current renewal status and statistics.
 %%
@@ -192,7 +230,7 @@ init(Config) ->
     KeyFile = maps:get(key_file, Config),
     CAFile = maps:get(ca_file, Config),
     GpgFingerprint = maps:get(gpg_fingerprint, Config),
-    GpgEmail = maps:get(gpg_email, Config),
+    GpgEmail = maps:get(gpg_email, Config, undefined),  % Optional - not used in renewal
 
     %% Configuration options with defaults
     RenewalThreshold = maps:get(renewal_threshold, Config, 0.5),
@@ -254,7 +292,7 @@ init(Config) ->
                 retry_interval = RetryInterval,
                 ws_client_pid = WsClientPid
             },
-            
+
             {ok, State};
         {error, Reason} ->
             ?error("Failed to parse certificate ~s: ~p", [CertFile, Reason]),
@@ -297,6 +335,23 @@ handle_cast(check_now, State) ->
     ?info("Manual renewal check triggered", []),
     NewState = perform_renewal_check(State),
     {noreply, NewState};
+
+handle_cast(renew_now, State) ->
+    ?info("Manual certificate renewal triggered by user", []),
+
+    %% Publish notification
+    publish_system_message("Manual certificate renewal initiated..."),
+
+    %% Force immediate renewal by directly calling renewal process
+    %% Skip the threshold check - user explicitly requested renewal
+    NewState = State#renewal_state{
+        renewal_in_progress = true,
+        last_renewal_attempt = erlang:system_time(second),
+        renewal_attempts = State#renewal_state.renewal_attempts + 1
+    },
+
+    RenewedState = perform_renewal_process(NewState),
+    {noreply, RenewedState};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -346,10 +401,10 @@ parse_certificate(CertFile) ->
                 %% Decode PEM to DER
                 [{'Certificate', CertDer, not_encrypted}] = 
                     public_key:pem_decode(CertPem),
-                
+
                 %% Decode DER to OTP certificate record
                 Cert = public_key:pkix_decode_cert(CertDer, otp),
-                
+
                 %% Extract validity period
                 #'OTPCertificate'{
                     tbsCertificate = #'OTPTBSCertificate'{
@@ -359,11 +414,11 @@ parse_certificate(CertFile) ->
                         }
                     }
                 } = Cert,
-                
+
                 %% Convert to Unix timestamps
                 IssuedAt = validity_time_to_unix(NotBefore),
                 ExpiresAt = validity_time_to_unix(NotAfter),
-                
+
                 {ok, IssuedAt, ExpiresAt}
             catch
                 Class:Reason:Stacktrace ->
@@ -402,13 +457,13 @@ parse_utc_time(TimeStr) when is_list(TimeStr) ->
         [list_to_integer([A, B]) || 
          <<A, B>> <= list_to_binary(TimeStr), 
          A >= $0, A =< $9, B >= $0, B =< $9],
-    
+
     %% Convert 2-digit year to 4-digit
     Year = if
         YY >= 50 -> 1900 + YY;
         true -> 2000 + YY
     end,
-    
+
     %% Convert to Unix timestamp
     datetime_to_unix({{Year, MM, DD}, {HH, Min, SS}}).
 
@@ -420,14 +475,14 @@ parse_general_time(TimeStr) when is_list(TimeStr) ->
     <<YearBin:4/binary, MMBin:2/binary, DDBin:2/binary,
       HHBin:2/binary, MinBin:2/binary, SSBin:2/binary, _Rest/binary>> = 
         list_to_binary(TimeStr),
-    
+
     Year = binary_to_integer(YearBin),
     MM = binary_to_integer(MMBin),
     DD = binary_to_integer(DDBin),
     HH = binary_to_integer(HHBin),
     Min = binary_to_integer(MinBin),
     SS = binary_to_integer(SSBin),
-    
+
     %% Convert to Unix timestamp
     datetime_to_unix({{Year, MM, DD}, {HH, Min, SS}}).
 
@@ -460,32 +515,32 @@ calculate_renewal_time(IssuedAt, ExpiresAt, Threshold)
 -spec perform_renewal_check(renewal_state()) -> renewal_state().
 perform_renewal_check(State) ->
     Now = erlang:system_time(second),
-    
+
     %% Check if renewal should be triggered
     ShouldRenew = State#renewal_state.auto_renewal_enabled andalso
                   Now >= State#renewal_state.renewal_trigger_time andalso
                   not State#renewal_state.renewal_in_progress,
-    
+
     case ShouldRenew of
         true ->
             %% Log renewal trigger
             DaysUntilExpiry = (State#renewal_state.cert_expires_at - Now) div 86400,
             ?info("Certificate renewal triggered: ~p days until expiry", [DaysUntilExpiry]),
-            
+
             %% Notify user
             Msg = io_lib:format(
                 "Certificate expiring in ~p days, initiating automatic renewal...",
                 [DaysUntilExpiry]
             ),
             publish_system_message(Msg),
-            
+
             %% Perform renewal process
             NewState = State#renewal_state{
                 renewal_in_progress = true,
                 last_renewal_attempt = Now,
                 renewal_attempts = State#renewal_state.renewal_attempts + 1
             },
-            
+
             perform_renewal_process(NewState);
         false ->
             %% Log status if close to renewal time
@@ -510,87 +565,75 @@ perform_renewal_process(State) ->
     ServerHost = State#renewal_state.server_host,
     ServerPort = State#renewal_state.server_port,
     GpgFingerprint = State#renewal_state.gpg_fingerprint,
-    
+
     ?info("Starting certificate renewal process for ~s", [Username]),
-    
-    %% Step 1: Generate CSR
-    case generate_csr(Username, KeyFile, CertFile) of
-        {ok, CsrPem} ->
+
+    Result =
+        maybe
+            %% Step 1: Generate CSR
+            {ok, CsrPem} ?= generate_csr(Username, KeyFile, CertFile),
             ?info("CSR generated successfully", []),
-            
+
             %% Step 2: Sign CSR with GPG
-            case sign_csr_with_gpg(CsrPem, GpgFingerprint) of
-                {ok, GpgSignature} ->
-                    ?info("CSR signed with GPG successfully", []),
-                    
-                    %% Step 3: Submit to CA
-                    case submit_csr_to_ca(ServerHost, ServerPort, CsrPem, 
-                                          GpgFingerprint, GpgSignature) of
-                        {ok, NewCertPem} ->
-                            ?info("New certificate received from CA", []),
-                            
-                            %% Step 4: Install new certificate
-                            case install_new_certificate(NewCertPem, CertFile) of
-                                ok ->
-                                    ?info("New certificate installed successfully", []),
-                                    
-                                    %% Step 5: Trigger WebSocket reconnect
-                                    WsPid = State#renewal_state.ws_client_pid,
-                                    case trigger_websocket_reconnect(WsPid) of
-                                        ok ->
-                                            ?info("Certificate renewal completed successfully", []),
-                                            
-                                            %% Notify user of success
-                                            {ok, _NewIssuedAt, NewExpiresAt} = 
-                                                parse_certificate(CertFile),
-                                            ExpiryDate = format_unix_time(NewExpiresAt),
-                                            SuccessMsg = io_lib:format(
-                                                "Certificate renewed successfully, valid until ~s",
-                                                [ExpiryDate]
-                                            ),
-                                            publish_system_message(SuccessMsg),
-                                            
-                                            %% Parse new certificate for updated timestamps
-                                            {ok, IssuedAt, ExpiresAt} = 
-                                                parse_certificate(CertFile),
-                                            Threshold = State#renewal_state.renewal_threshold,
-                                            NewTriggerTime = calculate_renewal_time(
-                                                IssuedAt, ExpiresAt, Threshold
-                                            ),
-                                            
-                                            %% Reset renewal state
-                                            State#renewal_state{
-                                                cert_issued_at = IssuedAt,
-                                                cert_expires_at = ExpiresAt,
-                                                renewal_trigger_time = NewTriggerTime,
-                                                renewal_in_progress = false,
-                                                renewal_attempts = 0
-                                            };
-                                        {error, ReconnectError} ->
-                                            ?warning("Failed to trigger reconnect: ~p", 
-                                                   [ReconnectError]),
-                                            %% Cert is installed but reconnect failed
-                                            %% Mark as success but log warning
-                                            State#renewal_state{
-                                                renewal_in_progress = false,
-                                                renewal_attempts = 0
-                                            }
-                                    end;
-                                {error, InstallError} ->
-                                    ?error("Failed to install certificate: ~p", [InstallError]),
-                                    handle_renewal_failure(State, InstallError)
-                            end;
-                        {error, CaError} ->
-                            ?error("CA rejected CSR: ~p", [CaError]),
-                            handle_renewal_failure(State, CaError)
-                    end;
-                {error, GpgError} ->
-                    ?error("GPG signing failed: ~p", [GpgError]),
-                    handle_renewal_failure(State, GpgError)
-            end;
-        {error, CsrError} ->
-            ?error("CSR generation failed: ~p", [CsrError]),
-            handle_renewal_failure(State, CsrError)
+            {ok, GpgSignature} ?= sign_csr_with_gpg(CsrPem, GpgFingerprint),
+            ?info("CSR signed with GPG successfully", []),
+
+            %% Step 3: Submit to CA
+            {ok, NewCertPem} ?= submit_csr_to_ca(ServerHost, ServerPort, CsrPem,
+                                                 GpgFingerprint, GpgSignature),
+            ?info("New certificate received from CA", []),
+
+            %% Step 4: Install new certificate
+            ok ?= install_new_certificate(NewCertPem, CertFile),
+            ?info("New certificate installed successfully", []),
+
+            %% Step 5: Trigger WebSocket reconnect
+            WsPid = State#renewal_state.ws_client_pid,
+            case trigger_websocket_reconnect(WsPid) of
+                ok ->
+                    ?info("Certificate renewal completed successfully", []),
+
+                    %% Notify user of success
+                    {ok, _NewIssuedAt, NewExpiresAt} = parse_certificate(CertFile),
+                    ExpiryDate = format_unix_time(NewExpiresAt),
+                    SuccessMsg = io_lib:format(
+                                   "Certificate renewed successfully, valid until ~s",
+                                   [ExpiryDate]
+                                  ),
+                    publish_system_message(SuccessMsg),
+
+                    %% Parse new certificate for updated timestamps
+                    {ok, IssuedAt, ExpiresAt} = parse_certificate(CertFile),
+                    Threshold = State#renewal_state.renewal_threshold,
+                    NewTriggerTime = calculate_renewal_time(IssuedAt, ExpiresAt, Threshold),
+
+                    %% Reset renewal state
+                    {ok, State#renewal_state{
+                           cert_issued_at = IssuedAt,
+                           cert_expires_at = ExpiresAt,
+                           renewal_trigger_time = NewTriggerTime,
+                           renewal_in_progress = false,
+                           renewal_attempts = 0
+                          }};
+                {error, ReconnectError} ->
+                    ?warning("Failed to trigger reconnect: ~p", [ReconnectError]),
+                    %% Cert is installed but reconnect failed
+                    %% Mark as success but log warning
+                    {ok, State#renewal_state{
+                           renewal_in_progress = false,
+                           renewal_attempts = 0
+                          }}
+            end
+        else
+            {error, Error} ->
+                ?error("Certificate renewal failed: ~p", [Error]),
+                {error, Error}
+        end,
+
+    %% Handle result
+    case Result of
+        {ok, NewState} -> NewState;
+        {error, FailureReason} -> handle_renewal_failure(State, FailureReason)
     end.
 
 %% @private
@@ -599,13 +642,13 @@ perform_renewal_process(State) ->
 handle_renewal_failure(State, Reason) ->
     MaxAttempts = State#renewal_state.max_retry_attempts,
     CurrentAttempts = State#renewal_state.renewal_attempts,
-    
+
     if
         CurrentAttempts >= MaxAttempts ->
             ?error("Certificate renewal failed after ~p attempts: ~p", 
                   [MaxAttempts, Reason]),
             ?error("Manual intervention required - please run: cryptic --onboard", []),
-            
+
             %% Notify user of failure
             DaysRemaining = (State#renewal_state.cert_expires_at - 
                            erlang:system_time(second)) div 86400,
@@ -615,7 +658,7 @@ handle_renewal_failure(State, Reason) ->
                 [MaxAttempts, DaysRemaining]
             ),
             publish_system_message(FailureMsg),
-            
+
             %% Reset renewal state but keep failure count for visibility
             State#renewal_state{
                 renewal_in_progress = false
@@ -624,7 +667,7 @@ handle_renewal_failure(State, Reason) ->
             RetryInterval = State#renewal_state.retry_interval,
             ?warning("Renewal attempt ~p/~p failed, will retry in ~p seconds", 
                    [CurrentAttempts, MaxAttempts, RetryInterval]),
-            
+
             %% Notify user of retry
             RetryMinutes = RetryInterval div 60,
             RetryMsg = io_lib:format(
@@ -632,10 +675,10 @@ handle_renewal_failure(State, Reason) ->
                 [CurrentAttempts, MaxAttempts, RetryMinutes]
             ),
             publish_system_message(RetryMsg),
-            
+
             %% Schedule retry
             erlang:send_after(RetryInterval * 1000, self(), check_renewal),
-            
+
             State#renewal_state{
                 renewal_in_progress = false
             }
@@ -662,31 +705,48 @@ handle_renewal_failure(State, Reason) ->
 generate_csr(Username, KeyFile, CertFile) ->
     try
         %% Read existing certificate to extract subject information
-        SubjectName = case file:read_file(CertFile) of
-            {ok, CertPem} ->
-                [{'Certificate', CertDer, not_encrypted}] = 
-                    public_key:pem_decode(CertPem),
-                Cert = public_key:pkix_decode_cert(CertDer, otp),
-                #'OTPCertificate'{
-                    tbsCertificate = #'OTPTBSCertificate'{
-                        subject = CertSubject
-                    }
-                } = Cert,
-                %% Extract CN from subject
-                case extract_cn_from_subject(CertSubject) of
-                    "unknown" -> binary_to_list(Username);
-                    CN -> CN
-                end;
-            {error, _} ->
-                %% Fallback to username if cert can't be read
-                binary_to_list(Username)
-        end,
-        
+        SubjectName =
+            case file:read_file(CertFile) of
+                {ok, CertPem} ->
+                    [{'Certificate', CertDer, not_encrypted}] =
+                        public_key:pem_decode(CertPem),
+                    Cert = public_key:pkix_decode_cert(CertDer, otp),
+                    #'OTPCertificate'{
+                       tbsCertificate = #'OTPTBSCertificate'{
+                                           subject = CertSubject
+                                          }
+                      } = Cert,
+                    %% Extract CN from subject
+                    case extract_cn_from_subject(CertSubject) of
+                        "unknown" -> binary_to_list(Username);
+                        CN -> CN
+                    end;
+                {error, _} ->
+                    %% Fallback to username if cert can't be read
+                    binary_to_list(Username)
+            end,
+
         %% Read private key
         {ok, KeyPem} = file:read_file(KeyFile),
-        [KeyEntry] = public_key:pem_decode(KeyPem),
+        PemEntries = public_key:pem_decode(KeyPem),
+
+        %% Find the actual private key entry (skip EC parameters if present)
+        KeyEntry =
+            case lists:filter(
+                   fun
+                       ({'RSAPrivateKey', _, _}) -> true;
+                       ({'ECPrivateKey', _, _}) -> true;
+                       ({'PrivateKeyInfo', _, _}) -> true;
+                       (_) -> false
+                   end, PemEntries)
+            of
+                [Entry] -> Entry;
+                [Entry | _] -> Entry;  % Take first if multiple
+                [] -> throw({error, no_private_key_found})
+            end,
+
         PrivateKey = public_key:pem_entry_decode(KeyEntry),
-        
+
         %% Build subject as RDN sequence
         %% Subject format: /CN=username
         CsrSubject = {rdnSequence, [
@@ -695,77 +755,120 @@ generate_csr(Username, KeyFile, CertFile) ->
                 value = {utf8String, list_to_binary(SubjectName)}
             }]
         ]},
-        
+
         %% Extract public key from private key
-        PublicKey = case PrivateKey of
-            #'RSAPrivateKey'{modulus = N, publicExponent = E} ->
-                #'RSAPublicKey'{modulus = N, publicExponent = E};
-            #'ECPrivateKey'{publicKey = PubKey} ->
-                PubKey;
-            _ ->
-                ?error("Unsupported key type: ~p", [element(1, PrivateKey)]),
-                throw({error, unsupported_key_type})
-        end,
-        
+        {PublicKey, KeyAlgorithm} =
+            case PrivateKey of
+                #'RSAPrivateKey'{modulus = N, publicExponent = E} ->
+                    PubKey = #'RSAPublicKey'{modulus = N, publicExponent = E},
+                    Algorithm = #'PublicKeyAlgorithm'{
+                                   algorithm = ?'rsaEncryption',
+                                   parameters = {asn1_OPENTYPE, <<5, 0>>} % NULL
+                                  },
+                    {PubKey, Algorithm};
+                #'ECPrivateKey'{publicKey = PubKeyBitString,
+                                parameters = Params} ->
+                    %% For EC keys, the public key is already a bit string
+                    %% and we need to extract and encode the curve parameters
+                    %% Parameters can be {namedCurve, OID} - we need to encode the OID
+                    EncodedParams =
+                        case Params of
+                            {namedCurve, OID} when is_tuple(OID) ->
+                                %% Encode the OID as ASN.1
+                                {asn1_OPENTYPE,
+                                 public_key:der_encode('EcpkParameters',
+                                                       Params)};
+                            _ ->
+                                %% If already encoded or other format, use as-is
+                                Params
+                        end,
+                    Algorithm = #'PublicKeyAlgorithm'{
+                                   algorithm = ?'id-ecPublicKey',
+                                   parameters = EncodedParams
+                                  },
+                    {PubKeyBitString, Algorithm};
+                _ ->
+                    ?error("Unsupported key type: ~p", [element(1, PrivateKey)]),
+                    throw({error, unsupported_key_type})
+            end,
+
         %% Build SubjectPublicKeyInfo
-        SubjectPKInfo = case PublicKey of
-            #'RSAPublicKey'{} ->
-                %% RSA public key
-                PubKeyDer = public_key:der_encode('RSAPublicKey', PublicKey),
-                #'OTPSubjectPublicKeyInfo'{
-                    algorithm = #'PublicKeyAlgorithm'{
-                        algorithm = ?'rsaEncryption',
-                        parameters = {asn1_OPENTYPE, <<5, 0>>} % NULL
-                    },
-                    subjectPublicKey = PubKeyDer
-                };
-            _ ->
-                ?error("Unsupported public key type for CSR", []),
-                throw({error, unsupported_pubkey_type})
-        end,
-        
+        SubjectPKInfo =
+            case PublicKey of
+                #'RSAPublicKey'{} ->
+                    %% RSA public key - needs to be DER encoded
+                    PubKeyDer = public_key:der_encode('RSAPublicKey', PublicKey),
+                    #'OTPSubjectPublicKeyInfo'{
+                       algorithm = KeyAlgorithm,
+                       subjectPublicKey = PubKeyDer
+                      };
+                BitString when is_bitstring(BitString) ->
+                    %% EC public key (already a bit string)
+                    #'OTPSubjectPublicKeyInfo'{
+                       algorithm = KeyAlgorithm,
+                       subjectPublicKey = BitString
+                      };
+                _ ->
+                    ?error("Unsupported public key type for CSR: ~p", [PublicKey]),
+                    throw({error, unsupported_pubkey_type})
+            end,
+
         %% Build CertificationRequestInfo
         CertReqInfo = #'CertificationRequestInfo'{
-            version = v1,
-            subject = CsrSubject,
-            subjectPKInfo = SubjectPKInfo,
-            attributes = []  % No extensions
-        },
-        
+                         version = v1,
+                         subject = CsrSubject,
+                         subjectPKInfo = SubjectPKInfo,
+                         attributes = []  % No extensions
+                        },
+
         %% Encode and sign the request
-        CertReqInfoDer = public_key:der_encode('CertificationRequestInfo', CertReqInfo),
-        
+        CertReqInfoDer = public_key:der_encode('CertificationRequestInfo',
+                                               CertReqInfo),
+
         %% Sign with private key
-        Signature = case PrivateKey of
-            #'RSAPrivateKey'{} ->
-                %% SHA256 with RSA
-                public_key:sign(CertReqInfoDer, sha256, PrivateKey);
-            _ ->
-                throw({error, unsupported_signature_algorithm})
-        end,
-        
+        {Signature, SignatureAlgorithm} =
+            case PrivateKey of
+                #'RSAPrivateKey'{} ->
+                    %% SHA256 with RSA
+                    Sig = public_key:sign(CertReqInfoDer, sha256, PrivateKey),
+                    SigAlg = #'CertificationRequest_signatureAlgorithm'{
+                                algorithm = ?'sha256WithRSAEncryption',
+                                parameters = {asn1_OPENTYPE, <<5, 0>>} % NULL
+                               },
+                    {Sig, SigAlg};
+                #'ECPrivateKey'{} ->
+                    %% ECDSA with SHA256
+                    Sig = public_key:sign(CertReqInfoDer, sha256, PrivateKey),
+                    SigAlg = #'CertificationRequest_signatureAlgorithm'{
+                                algorithm = ?'ecdsa-with-SHA256',
+                                parameters = asn1_NOVALUE
+                               },
+                    {Sig, SigAlg};
+                _ ->
+                    throw({error, unsupported_signature_algorithm})
+            end,
+
         %% Build complete CertificationRequest
         CertReq = #'CertificationRequest'{
-            certificationRequestInfo = CertReqInfo,
-            signatureAlgorithm = #'CertificationRequest_signatureAlgorithm'{
-                algorithm = ?'sha256WithRSAEncryption',
-                parameters = {asn1_OPENTYPE, <<5, 0>>} % NULL
-            },
-            signature = Signature
-        },
-        
+                     certificationRequestInfo = CertReqInfo,
+                     signatureAlgorithm = SignatureAlgorithm,
+                     signature = Signature
+                    },
+
         %% Encode to DER
         CsrDer = public_key:der_encode('CertificationRequest', CertReq),
-        
+
         %% Convert to PEM
         CsrPemEntry = {'CertificationRequest', CsrDer, not_encrypted},
         CsrPem = public_key:pem_encode([CsrPemEntry]),
-        
+
         ?info("CSR generated successfully for ~s", [SubjectName]),
         {ok, CsrPem}
+
     catch
         throw:{error, Reason} ->
             {error, Reason};
+
         Class:CatchReason:Stacktrace ->
             ?error("Exception during CSR generation: ~p:~p~n~p",
                   [Class, CatchReason, Stacktrace]),
@@ -801,14 +904,14 @@ find_cn_in_rdn([RDN | Rest]) ->
 find_cn_in_attributes([]) ->
     not_found;
 find_cn_in_attributes([#'AttributeTypeAndValue'{
-    type = ?'id-at-commonName',
-    value = {utf8String, CN}
-} | _]) ->
+                          type = ?'id-at-commonName',
+                          value = {utf8String, CN}
+                         } | _]) ->
     {ok, binary_to_list(CN)};
 find_cn_in_attributes([#'AttributeTypeAndValue'{
-    type = ?'id-at-commonName',
-    value = CN
-} | _]) when is_list(CN) ->
+                          type = ?'id-at-commonName',
+                          value = CN
+                         } | _]) when is_list(CN) ->
     {ok, CN};
 find_cn_in_attributes([_ | Rest]) ->
     find_cn_in_attributes(Rest).
@@ -886,44 +989,70 @@ sign_csr_with_gpg(CsrPem, GpgFingerprint) ->
     {ok, binary()} | {error, term()}.
 submit_csr_to_ca(ServerHost, ServerPort, CsrPem, GpgFingerprint, GpgSignature) ->
     try
+        %% Ensure inets application is started for httpc
+        case application:ensure_all_started(inets) of
+            {ok, _} -> ok;
+            {error, {already_started, inets}} -> ok;
+            {error, Reason} -> 
+                ?error("Failed to start inets application: ~p", [Reason]),
+                throw({error, {inets_start_failed, Reason}})
+        end,
+
+        %% Ensure ServerHost is a list (string) for io_lib:format
+        HostString = case ServerHost of
+            Host when is_binary(Host) -> binary_to_list(Host);
+            Host when is_list(Host) -> Host
+        end,
+
         %% Build request URL
         Url = io_lib:format("https://~s:~p/ca/v1/csr", 
-                           [binary_to_list(ServerHost), ServerPort]),
-        
-        %% Build JSON request body
+                           [HostString, ServerPort]),
+
+        %% The CA expects gpg_sig_b64 to be the PEM-armored signature, base64-encoded
+        %% The signature from erl_gpg is already PEM-armored, so we base64-encode it
+        %% However, looking at the onboard script and CA code, we need to send it as-is
+        %% Actually: The onboard script does: gpg --armor | base64
+        %% So: PEM armor → base64 encode
+        GpgSigB64 = base64:encode(GpgSignature),
+
+        %% Build JSON request body with correct field names expected by CA
         RequestBody = jsx:encode(#{
             <<"csr_pem">> => CsrPem,
-            <<"gpg_fingerprint">> => GpgFingerprint,
-            <<"gpg_signature_pem">> => GpgSignature
+            <<"gpg_fp">> => GpgFingerprint,
+            <<"gpg_sig_b64">> => GpgSigB64
         }),
-        
+
         %% Make HTTPS request
         Headers = [{"Content-Type", "application/json"}],
-        
+
         ?info("Submitting CSR to CA: ~s", [Url]),
-        
-        case httpc:request(post, {Url, Headers, "application/json", RequestBody}, 
-                          [{ssl, [{verify, verify_none}]}], []) of
+
+        case httpc:request(post,
+                           {Url, Headers, "application/json", RequestBody},
+                           [{ssl, [{verify, verify_none}]}], [])
+        of
             {ok, {{_, 200, _}, _ResponseHeaders, ResponseBody}} ->
                 %% Parse JSON response
                 Response = jsx:decode(list_to_binary(ResponseBody), [return_maps]),
-                
-                case maps:get(<<"success">>, Response, false) of
-                    true ->
-                        CertPem = maps:get(<<"certificate_pem">>, Response),
-                        ValidUntil = maps:get(<<"valid_until">>, Response, <<"unknown">>),
+
+                %% CA returns: {status => <<"issued">>, cert_pem => ...}
+                case maps:get(<<"status">>, Response, undefined) of
+                    <<"issued">> ->
+                        CertPem = maps:get(<<"cert_pem">>, Response),
+                        ExpiresAt = maps:get(<<"expires_at">>, Response),
+                        ValidUntil = format_unix_time(ExpiresAt),
                         ?info("New certificate issued, valid until: ~s", [ValidUntil]),
                         {ok, CertPem};
-                    false ->
+                    _ ->
                         ErrorMsg = maps:get(<<"error">>, Response, <<"unknown error">>),
                         ?error("CA rejected CSR: ~s", [ErrorMsg]),
                         {error, {ca_rejected, ErrorMsg}}
                 end;
-            
+
             {ok, {{_, StatusCode, _}, _ResponseHeaders, ResponseBody}} ->
                 ?error("CA returned error ~p: ~s", [StatusCode, ResponseBody]),
                 {error, {http_error, StatusCode, ResponseBody}};
-            
+
             {error, HttpReason} ->
                 ?error("HTTP request to CA failed: ~p", [HttpReason]),
                 {error, {http_request_failed, HttpReason}}
@@ -953,7 +1082,7 @@ install_new_certificate(NewCertPem, CertFile) ->
         %% Create backup of existing certificate
         Timestamp = integer_to_list(erlang:system_time(second)),
         BackupFile = CertFile ++ ".backup." ++ Timestamp,
-        
+
         case file:read_file(CertFile) of
             {ok, OldCertPem} ->
                 ok = file:write_file(BackupFile, OldCertPem),
@@ -961,14 +1090,14 @@ install_new_certificate(NewCertPem, CertFile) ->
             {error, enoent} ->
                 ?info("No existing certificate to backup", [])
         end,
-        
+
         %% Write new certificate
         ok = file:write_file(CertFile, NewCertPem),
         ?info("New certificate installed: ~s", [CertFile]),
-        
+
         %% Set proper permissions (readable by user only)
         ok = file:change_mode(CertFile, 8#600),
-        
+
         %% Validate the new certificate
         case parse_certificate(CertFile) of
             {ok, IssuedAt, ExpiresAt} ->

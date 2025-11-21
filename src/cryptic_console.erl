@@ -1551,7 +1551,7 @@ send_message_to_user(ToUsername, Message, State, ShowConfirmation) ->
             case cryptic_engine:send_message(EnginePid, ToUsername, Message) of
                 ok ->
                     Timestamp = erlang:timestamp(),
-                    
+
                     %% Save outgoing message to storage if database is enabled
                     case State of
                         #console_state{
@@ -1584,7 +1584,7 @@ send_message_to_user(ToUsername, Message, State, ShowConfirmation) ->
                         _ ->
                             ok
                     end,
-                    
+
                     %% Display sent message confirmation with timestamp if requested
                     case ShowConfirmation of
                         true ->
@@ -2005,80 +2005,15 @@ display_certificate_status(CertFile, KeyFile, _State) ->
 
 
 %% @doc Execute cert renew command
-execute_cert_renew(Opts, State) ->
-    Force = maps:get(force, Opts, false),
-    NewKey = maps:get(new_key, Opts, false),
-
-    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-    cryptic_shell:print_info("Certificate Renewal"),
-    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-
-    %% Get paths
-    Username = binary_to_list(State#console_state.username),
-    ServerHost = State#console_state.server_host,
-    ServerPort = State#console_state.server_port,
-    CrypticDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
-
-    KeyFile = CrypticDir ++ "/certificates/" ++ Username ++ ".key",
-    CSRFile = CrypticDir ++ "/certificates/" ++ Username ++ ".csr",
-
-    %% Step 1: Generate new key if requested
-    case NewKey of
+execute_cert_renew(_Opts, State) ->
+    case State#console_state.tui_mode of
         true ->
-            cryptic_shell:print_info("[1/4] Generating new TLS key pair..."),
-            GenKeyCmd = "openssl ecparam -genkey -name secp384r1 -out " ++ KeyFile ++ " 2>/dev/null",
-            os:cmd(GenKeyCmd),
-            os:cmd("chmod 600 " ++ KeyFile),
-            cryptic_shell:print_success("New TLS key generated");
+            %% In TUI mode, just trigger renewal - TUI will handle notifications via event bus
+            ?info("Manual certificate renewal requested from TUI", []),
+            cryptic_cert_renewal:renew_now();
         false ->
-            cryptic_shell:print_info("[1/4] Reusing existing TLS key..."),
-            case filelib:is_file(KeyFile) of
-                true -> 
-                    cryptic_shell:print_success("Using existing key");
-                false ->
-                    cryptic_shell:print_error("Key file not found: " ++ KeyFile),
-                    throw({error, key_not_found})
-            end
-    end,
-
-    %% Step 2: Create CSR
-    cryptic_shell:print_info("[2/4] Creating Certificate Signing Request..."),
-
-    %% Get GPG fingerprint from config (would need to be stored)
-    GPG_FP = "PLACEHOLDER_FP",  %% TODO: Store this during registration
-    SubjectStr = "/CN=" ++ GPG_FP ++ "@" ++ ServerHost,
-
-    GenCSRCmd = "openssl req -new -key " ++ KeyFile ++ 
-                " -subj \"" ++ SubjectStr ++ "\" -out " ++ CSRFile ++ " 2>/dev/null",
-    os:cmd(GenCSRCmd),
-    cryptic_shell:print_success("CSR created"),
-
-    %% Step 3: Sign CSR with GPG
-    cryptic_shell:print_info("[3/4] Signing CSR with GPG key..."),
-    cryptic_shell:print_warning("GPG signing not yet implemented"),
-    %% TODO: Sign CSR with GPG key
-
-    %% Step 4: Send renewal request
-    cryptic_shell:print_info("[4/4] Requesting certificate renewal..."),
-
-    MsgData =
-        #{force => Force,
-          new_key => NewKey,
-          csr => <<"PLACEHOLDER_CSR">>,  %% TODO: Read actual CSR
-          gpg_sig => <<"PLACEHOLDER_SIG">>  %% TODO: Actual GPG signature
-         },
-    case cryptic_messages:cert_renew(MsgData) of
-        {ok, Msg} ->
-            send_to_server(Msg),
-            cryptic_shell:print_success("Renewal request sent");
-        {error, Reason} ->
-            cryptic_shell:print_error(
-              "Invalid cert renew parameters: " ++
-                  lists:flatten(io_lib:format("~p", [Reason]))
-             )
-    end,
-
-    cryptic_shell:print_info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").
+            cryptic_cert_renewal:renew_now()
+    end.
 
 %% @doc Cleanup resources
 cleanup(State) ->
