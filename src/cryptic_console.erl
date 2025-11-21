@@ -107,6 +107,7 @@
     console_pid :: pid() | undefined,
     input_buffer_table :: ets:tid() | undefined,
     notifier :: string() | undefined,
+    file_notifier :: string() | undefined,  % Filename for file-based notifications
     passphrase :: binary() | undefined,
     %% Whether encrypted message storage is enabled
     db_enabled :: boolean(),
@@ -300,6 +301,7 @@ main(InitCfg) ->
         console_pid = ConsolePid,
         input_buffer_table = InputBufferTable,
         notifier = maps:get(notifier, InitCfg, undefined),
+        file_notifier = maps:get(file_notifier, InitCfg, undefined),
         passphrase = Passphrase,
         db_enabled = DbEnabled,
         tui_mode = maps:get(tui_mode, InitCfg, false)
@@ -445,14 +447,14 @@ extract_gpg_from_cert(CertFile) ->
             {ok, CertPem} ->
                 [{'Certificate', CertDer, not_encrypted}] = 
                     public_key:pem_decode(CertPem),
-                
+
                 Cert = public_key:pkix_decode_cert(CertDer, otp),
-                
+
                 %% Extract TBS certificate which contains extensions
                 #'OTPCertificate'{
                     tbsCertificate = TBSCert
                 } = Cert,
-                
+
                 %% Find SAN extension
                 case TBSCert of
                     #'OTPTBSCertificate'{extensions = Extensions} when is_list(Extensions) ->
@@ -478,7 +480,7 @@ extract_gpg_from_cert(CertFile) ->
 find_san_extension(Extensions) ->
     %% OID for SubjectAltName: 2.5.29.17
     SANOid = ?'id-ce-subjectAltName',
-    
+
     case lists:keyfind(SANOid, 2, Extensions) of
         #'Extension'{extnValue = SANValue} ->
             {ok, SANValue};
@@ -522,7 +524,7 @@ extract_gpg_from_san_list([]) ->
 maybe_start_renewal_monitor(CertCfg, WsClientPid) ->
     %% Check if automatic renewal is enabled (default: true)
     AutoRenewalEnabled = application:get_env(cryptic, auto_cert_renewal_enabled, true),
-    
+
     case AutoRenewalEnabled of
         false ->
             ?info("Automatic certificate renewal disabled", []),
@@ -535,7 +537,7 @@ maybe_start_renewal_monitor(CertCfg, WsClientPid) ->
 -spec start_renewal_monitor(map(), pid()) -> pid() | undefined.
 start_renewal_monitor(CertCfg, WsClientPid) ->
     CertFile = maps:get(cert_file, CertCfg),
-    
+
     try
         %% Extract GPG fingerprint from certificate
         case extract_gpg_from_cert(CertFile) of
@@ -554,7 +556,7 @@ start_renewal_monitor(CertCfg, WsClientPid) ->
                         cryptic, cert_renewal_retry_interval, 3600
                     )
                 },
-                
+
                 %% Start the renewal monitor
                 case cryptic_cert_renewal:start_link(RenewalCfg) of
                     {ok, RenewalPid} ->
@@ -667,7 +669,11 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
                 FromUsername,
                 Message,
                 Timestamp,
-                State#console_state.notifier
+                State#console_state.notifier,
+                State#console_state.file_notifier,
+                State#console_state.username,
+                State#console_state.server_host,
+                State#console_state.server_port
             ),
 
             %% Save message to storage if database is enabled
@@ -749,7 +755,11 @@ tui_wait_loop(State) ->
                 FromUsername,
                 Message,
                 Timestamp,
-                State#console_state.notifier
+                State#console_state.notifier,
+                State#console_state.file_notifier,
+                State#console_state.username,
+                State#console_state.server_host,
+                State#console_state.server_port
             ),
 
             %% Save message to storage if database is enabled
@@ -1830,8 +1840,9 @@ display_websocket_message(Message) ->
     io:format("~s", [""]),
     timer:sleep(100).
 
-notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
+notify_user(FromUsername, _Message, _Timestamp, Notifier, FileNotifier, Username, ServerHost, ServerPort) ->
     F = fun() ->
+        %% Handle script-based notification
         case Notifier of
             undefined ->
                 ok;
@@ -1846,6 +1857,32 @@ notify_user(FromUsername, _Message, _Timestamp, Notifier) ->
                 ?dbg("Running notifier command: ~s~n", [Command]),
                 os:cmd(Command),
                 ok;
+            _ ->
+                ok
+        end,
+        
+        %% Handle file-based notification (Docker-compatible)
+        case FileNotifier of
+            undefined ->
+                ok;
+            Filename when is_list(Filename) ->
+                %% Construct path: ~/.cryptic/<username>/<server>_<port>/<filename>
+                UserDir = cryptic_lib:get_cryptic_dir(Username, ServerHost, ServerPort),
+                FilePath = filename:join(UserDir, Filename),
+                ?dbg("Writing notification to file: ~s~n", [FilePath]),
+                
+                %% Ensure directory exists
+                ok = filelib:ensure_dir(FilePath),
+                
+                %% Write sender username to file
+                case file:write_file(FilePath, FromUsername) of
+                    ok ->
+                        ?dbg("Notification file written successfully~n", []),
+                        ok;
+                    {error, Reason} ->
+                        ?dbg("Failed to write notification file: ~p~n", [Reason]),
+                        ok
+                end;
             _ ->
                 ok
         end

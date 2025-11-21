@@ -238,6 +238,10 @@ Active sessions: 2
 
 ### Get Notified
 
+Cryptic provides two notification mechanisms to alert you when messages arrive:
+
+#### Script-Based Notification (`--notifier`)
+
 By using the option `--notifier <file-path>` you can specify a script
 that will be invoked whenever a message arrives. The script will be
 invoked with the Username of the sender as argument. So on Linux this
@@ -254,6 +258,61 @@ terminal-notifier -title "Cryptic" -message "Cryptic message from: $1" -sound de
 
 # On Linux we could use:
 # notify-send "Cryptic message from: $1"
+```
+
+#### File-Based Notification (`--file-notify`)
+
+For Docker-compatible deployments or when script execution isn't suitable, use
+`--file-notify <filename>` to write the sender's username to a file. The file
+is created in `~/.cryptic/<username>/<server>_<port>/` and can be monitored by
+external file watchers.
+
+**Mac (using fswatch):**
+```bash
+# Start the client with file notification
+> ./bin/cryptic -u alice --file-notify sender.msg
+
+# In another terminal, watch the file
+> brew install fswatch
+> fswatch -0 ~/.cryptic/alice/cryptic-server_8443/sender.msg | xargs -0 -n1 -I{} /full/path/to/your-script.sh {}
+```
+
+**Linux (using inotify-tools):**
+```bash
+# Start the client with file notification
+> ./bin/cryptic -u alice --file-notify sender.msg
+
+# In another terminal, watch the file
+> sudo apt install inotify-tools
+> while inotifywait -e modify ~/.cryptic/alice/cryptic-server_8443/sender.msg; do /full/path/to/your-script.sh; done
+```
+
+**Docker Example:**
+```bash
+# Mount the cryptic directory and use file notification
+> docker run -v ~/.cryptic:/root/.cryptic cryptic --file-notify sender.msg
+
+# On the host, watch the file
+> fswatch -0 ~/.cryptic/alice/cryptic-server_8443/sender.msg | xargs -0 -n1 -I{} terminal-notifier -title "Cryptic" -message "Message from $(cat ~/.cryptic/alice/cryptic-server_8443/sender.msg)"
+```
+
+**Note:** Both notification methods can be used simultaneously if desired.
+
+Here is another example script for Mac: if your script is quick, handle rapid
+successive events (debounce) to avoid duplicate runs.
+
+```bash
+#!/bin/bash
+
+debounce_ms=200
+last=0
+while read -r f; do
+  now=$(python3 -c 'import time; print(int(time.time()*1000))')
+  if (( now - last > debounce_ms )); then
+    /Users/alice/.cryptic/alice/cryptic-server_8443/my_notify.sh "$f"
+    last=$now
+  fi
+done < <(fswatch -0 /Users/alice/.cryptic/alice/cryptic-server_8443/inbox_sender | xargs -0 -n1 -I{} printf '%s\n' {})
 ```
 
 ## The Server

@@ -12,7 +12,6 @@
         ranch,
         cowlib,
         cowboy,
-        eclip,
         esqlite,
         uuid,
         erl_gpg

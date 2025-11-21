@@ -8,6 +8,7 @@ USERNAME="${CRYPTIC_USERNAME:-}"
 SERVER_HOST="${CRYPTIC_SERVER_HOST:-localhost}"
 SERVER_PORT="${CRYPTIC_SERVER_PORT:-8443}"
 NOTIFIER="${CRYPTIC_NOTIFIER:-}"
+FILE_NOTIFIER="${CRYPTIC_FILE_NOTIFIER:-}"
 ENABLE_DB="${CRYPTIC_ENABLE_DB:-false}"
 TUI_MODE="unset"  # Will be set from env or flag
 NODE_NAME="${CRYPTIC_NODE_NAME:-localhost}"
@@ -26,6 +27,9 @@ Options:
   -s, --server-host <host>     Server hostname (default: localhost)
   -p, --server-port <port>     Server port (default: 8443)
   -n, --notifier <path>        Path to notification script (optional)
+  -f, --file-notify <name>     Filename for notification file (optional)
+                               File will be created in ~/.cryptic/<user>/<server>_<port>/
+                               Sender username will be written to this file on message arrival
   --enable-db                  Enable encrypted message storage
   --tui                        Start with TUI (detached backend + terminal UI)
   --name <hostname>            Hostname for Erlang node (default: localhost)
@@ -53,6 +57,11 @@ Examples:
   # With custom server
   $0 -u alice -s example.com -p 9443
 
+  # With file-based notification (Docker-friendly)
+  $0 -u alice --file-notify notify.txt
+  # Creates: ~/.cryptic/alice/localhost_8443/notify.txt
+  # Watch file: watch -n 1 cat ~/.cryptic/alice/localhost_8443/notify.txt
+
   # Connect to running backend (when started with --tui)
   erl -sname admin -remsh alice@localhost
 
@@ -77,6 +86,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--notifier)
             NOTIFIER="$2"
+            shift 2
+            ;;
+        -f|--file-notify)
+            FILE_NOTIFIER="$2"
             shift 2
             ;;
         --enable-db)
@@ -137,6 +150,10 @@ export CRYPTIC_NODE_NAME="$NODE_NAME"
 
 if [ -n "$NOTIFIER" ]; then
     export CRYPTIC_NOTIFIER="$NOTIFIER"
+fi
+
+if [ -n "$FILE_NOTIFIER" ]; then
+    export CRYPTIC_FILE_NOTIFIER="$FILE_NOTIFIER"
 fi
 
 # Set interactive mode based on TUI flag
