@@ -5,265 +5,380 @@
 
 ## Overview
 
-Cryptic is a professional implementation of an end-to-end encrypted chat system built in Erlang/OTP. It features WebSocket mTLS communication, real-time messaging, and implements state-of-the-art cryptographic protocols including the Double Ratchet algorithm for secure message exchange.
+Cryptic is an end-to-end encrypted chat system built in Erlang/OTP.
+It implements WebSocket mTLS communication, real-time messaging, and
+cryptographic protocols based on Signal's specifications.
 
-The system implements a secure messaging platform using:
+### Core Features
 
-- **WebSocket mTLS** communication for real-time, certificate-authenticated messaging
-- **Double Ratchet Protocol** for forward secrecy and break-in recovery
-- **X3DH Key Agreement** for initial session establishment
-- **X25519** Diffie-Hellman key exchange for ephemeral key ratcheting
-- **ChaCha20-Poly1305** AEAD encryption for message confidentiality and authenticity
-- **Blake2b KDF** high-performance key derivation (39x faster than Erlang)
-- **Automatic session initialization** and seamless protocol upgrade
-- **Perfect forward secrecy** and break-in recovery through DH ratcheting
-- **Professional Terminal UI** with real-time chat capabilities and session management
-- **Color-coded interface** with interactive chat mode and comprehensive status display
+- **WebSocket mTLS** - Certificate-based client authentication
+- **Double Ratchet Protocol** - Forward secrecy and break-in recovery
+- **X3DH Key Agreement** - Asynchronous initial session establishment
+- **X25519** - Elliptic curve Diffie-Hellman key exchange
+- **ChaCha20-Poly1305** - AEAD encryption via libsodium NIFs
+- **Blake2b KDF** - High-performance key derivation (39x faster than pure Erlang)
+- **Event Bus Architecture** - Pub/sub system for component communication
+- **GPG-based Onboarding** - Certificate issuance via signed CSRs
+- **SQLite Message Storage** - Encrypted chat history with ChaCha20-Poly1305
+- **Automatic Certificate Renewal** - X.509 client certificate lifecycle management
+- **External TUI Support** - Rust-based terminal UI via Erlang distribution protocol
 
 ## Architecture
 
 ```
-┌─────────────────┐           WebSocket mTLS            ┌───────────────┐
-│     Alice       │         ←──────────────────→        │      Bob      │
-│  (Terminal UI)  │                                     │ (Terminal UI) │
-└─────────┬───────┘                                     └───────┬───────┘
-          │                                                     │
-          │ 1. Connect with client cert                         │ 1. Connect with client cert
-          │ 2. Auto-generate keypair                            │ 2. Auto-generate keypair
-          │ 3. Upload prekey                                    │ 3. Upload prekey
-          │                                                     │
-          │ ┌─────────────────────────────────────────────────┐ │
-          └─│            WebSocket mTLS Server                │─┘
-            │        Certificate Authentication               │
-            │     Real-time Message Forwarding                │
-            │        User/Prekey Management                   │
-            └─────────────────────────────────────────────────┘
+┌──────────────────┐       WebSocket mTLS          ┌──────────────────┐
+│   Client (Alice) │  ←──────────────────────→     │  Client (Bob)    │
+│   cryptic_console│                               │  cryptic_console │
+└────────┬─────────┘                               └─────────┬────────┘
+         │                                                   │
+         │ event_bus pub/sub                                 │
+         │                                                   │
+    ┌────┴────────────────────────────┐                      │
+    │                                 │                      │
+    ▼                                 ▼                      │
+┌──────────────┐              ┌─────────────┐                │
+│ ws_client    │  ←─────────  │   engine    │                │
+│ (WebSocket)  │              │ (Crypto)    │  ratchet state │
+└──────┬───────┘              └─────────────┘                │
+       │                                                     │
+       │ encrypted messages                                  │
+       │                                                     │
+       └────────────┬                                        │
+                    │                                        │
+              WebSocket mTLS                                 │
+                    │                                        │
+                    │                                        │
+                    │                                        │
+                    ▼                                        │
+┌──────────────────────────────────────────────────────┐     │
+│           WebSocket mTLS Server                      │     │
+│         (cryptic_server + cryptic_ws_handler)        │     │
+│                                                      │     │
+│  • Certificate authentication (GPG-signed)           │     │
+│  • Message routing between clients                   │     │
+│  • CA REST API (certificate issuance/renewal)        │     │
+│  • GPG key registry (user verification)              │     │
+└──────────────────────────────────────────────────────┘     │
+                                                             │
+                    WebSocket mTLS                           │
+                          │                                  │
+                          └──────────────────────────────────┘
 ```
 
 ## Key Components
 
-```
-                        ┌──────────────────┐
-                        │      START       │         Terminal
-                        └──────────────────┘
-                                 │
-                                 ▼
-                        ┌──────────────────────┐
-                        │   cryptic_console    │    Erlang script
-                        └──────────────────────┘
-                                  │
-                                  ▼
-                        ┌──────────────────────┐
-                        │  cryptic_console.erl │── ┐
-                        └──────────────────────┘    ╲
-                     ╱            │                  ╲
-                    ╱             │                   ╲
-                    ▼             ▼                    ▼
-    ┌──────────────────────┐  ┌──────────────────────┐  ┌────────────────────┐
-    │ cryptic_ws_client.erl│  │   cryptic_engine.erl │  │  cryptic_shell.erl │
-    └──────────────────────┘  └──────────────────────┘  └────────────────────┘
-                │                         │
-                │                         ▼
-                │              ┌────────────────────────────┐
-                │              │ cryptic_ratchet_engine.erl │
-                │              └────────────────────────────┘
-                │
-                │
-────────────────┼─────────────────────────────────────────────────────────────
-    External Network (WebSocket TLS connection)
-────────────────┼─────────────────────────────────────────────────────────────
-                │
-                ▼
-    ┌──────────────────────┐
-    │  cryptic_server.erl  │
-    └──────────────────────┘
-
-```
-
 ### Server Components
 
-**`cryptic_server`**
-Main server process that manages the WebSocket mTLS server startup, ETS table creation, and overall application lifecycle. Provides configuration management through environment variables and handles graceful shutdown.
+**`cryptic_server`**  
+Main server application managing WebSocket mTLS server lifecycle, ETS table initialization, and configuration. Supervises both messaging and CA subsystems.
 
-**`cryptic_ws_handler`**
-Enhanced Cowboy WebSocket handler that manages individual client connections and Double Ratchet session state. Handles mTLS authentication using client certificates, processes JSON commands, manages ratchet state persistence, and routes encrypted messages between users in real-time.
+**`cryptic_ws_handler`**  
+Cowboy WebSocket handler managing client connections with mTLS authentication. Routes encrypted messages between users and maintains server-side message queues for offline delivery.
+
+**`cryptic_ca_*` (CA Subsystem)**  
+- `cryptic_ca_rest_handler` - REST API for certificate issuance and renewal
+- `cryptic_ca_store` - CA certificate/key management and serial number tracking
+- `cryptic_ca_cert` - X.509 certificate generation with GPG fingerprint SANs
+- `cryptic_ca_gpg` - GPG signature verification for CSR authentication
+- `cryptic_gpg_registry` - Stores user GPG public keys for verification
 
 ### Client Components
 
-**`cryptic_console`**
-Interactive terminal console interface providing a sophisticated command-line experience for secure messaging. Features asynchronous message delivery, input buffer preservation across interruptions, command history navigation, and ANSI colored output. Uses a two-process architecture to handle incoming messages while waiting for user input without blocking.
+**`cryptic_console`**  
+Terminal interface with command parser, ANSI rendering, and asynchronous message handling. Implements two-process architecture: UI process and message receiver process via `cryptic_event_bus` subscriptions.
 
-**`cryptic_shell`**
-Enhanced interactive shell with advanced line editing capabilities and Emacs-style keybindings. Provides character-by-character editing with cursor movement, command history (last 100 commands), arrow key support for navigation and history, secure password input with masking, and robust escape sequence handling. Operates in raw terminal mode for precise keystroke control.
+**`cryptic_shell`**  
+Line editor with Emacs keybindings, command history (last 100 commands), and secure password input. Operates in raw terminal mode for character-by-character control.
 
-**`cryptic_ws_client`**
-WebSocket client that handles mTLS connections to the server. Manages automatic keypair generation, prekey upload, message encryption/decryption, and provides a clean API for messaging operations.
+**`cryptic_ws_client`**  
+WebSocket client with automatic reconnection, keepalive timers, and mTLS connection management. Publishes/subscribes to `cryptic_event_bus` for component decoupling.
 
+### Core Cryptographic Components
 
-### Supporting Components
+**`cryptic_engine`**  
+Messaging orchestrator (gen_server) coordinating X3DH and Double Ratchet operations. Implements callback behavior for storage, network, and UI integration. Manages session lifecycle and pending message queues.
 
-**`cryptic_engine`**
-Main messaging engine implemented as a gen_server that coordinates encrypted message exchange from a user's perspective. Orchestrates X3DH key agreement and Double Ratchet protocol operations through a flexible callback API, enabling drop-in integration across different contexts (console, web, mobile). Manages session lifecycle, pending messages, key bundle storage, and seamless protocol transitions.
+**`cryptic_ratchet_engine`**  
+Double Ratchet state machine (gen_statem) with separate states for initiator/responder roles. Handles DH ratchet steps, chain key advancement, and out-of-order message processing.
 
-**`cryptic_ratchet_engine`**
-Double Ratchet state engine using gen_statem behavior covering the full protocol lifecycle. Maintains separate initiator and responder chain keys for bidirectional communication, ensuring proper cryptographic separation between message directions. Provides callback-based architecture for UI-agnostic integration.
+**`cryptic_double_ratchet`**  
+Protocol implementation with symmetric-key ratcheting, DH ratchet steps, skipped message key store (max 1000 keys), and header encryption. Pure functional implementation with no process state.
 
-**`cryptic_double_ratchet`**
-Complete Double Ratchet protocol implementation providing forward secrecy and break-in recovery. Manages sending/receiving chains, DH ratchet steps, skipped message key store, and high-performance cryptographic operations using native Blake2b KDF.
+**`cryptic_lib`**  
+X3DH implementation, X25519 key operations, ChaCha20-Poly1305 encryption, and key bundle storage. Provides file-based encrypted storage for identity keys and session states.
 
-**`cryptic_lib`** 
-Enhanced cryptographic library providing high-level encryption operations and X3DH key agreement. Implements X3DH sender/receiver initialization with automatic session key return for seamless Double Ratchet integration, message encryption/decryption, and storage management.
+**`cryptic_nif`**  
+Libsodium bindings via NIFs: X25519 (crypto_scalarmult), ChaCha20-Poly1305 (crypto_aead_chacha20poly1305_ietf), Blake2b KDF (crypto_generichash), and secure random bytes.
 
-**`cryptic_nif`**
-Native Interface Functions (NIFs) providing high-performance cryptographic primitives. Wraps libsodium functions for X25519 key exchange, ChaCha20-Poly1305 AEAD encryption, Blake2b key derivation (39x performance improvement), and secure random number generation.
+### Infrastructure Components
 
-**`cryptic_event_manager`**
-Event management system for logging and monitoring. Provides structured event handling with configurable output destinations and log levels.
+**`cryptic_event_bus`**  
+Pub/sub event system (gen_server) with filter-based subscriptions, topic support, automatic dead subscriber cleanup via process monitors, and safe error handling (filter crashes isolated per subscriber).
 
-**`cryptic_console_logger`**
-Console-based event logger that outputs formatted log messages to the terminal. Used for debugging and real-time monitoring of system events.
+**`cryptic_chat_storage`**  
+SQLite3 storage backend via esqlite. Stores encrypted messages with ChaCha20-Poly1305 using user passphrase-derived keys. Supports conversation queries, timestamp filtering, and message status tracking.
 
-**`cryptic_file_logger`**
-File-based event logger that writes structured log entries to files. Supports log rotation and persistent audit trails for security events.
+**`cryptic_cert_renewal`**  
+Automatic certificate renewal monitor (gen_server). Parses X.509 validity periods, calculates renewal trigger times (configurable threshold), generates CSRs using existing keys (RSA/EC support), GPG-signs CSRs, submits to CA REST API, installs new certificates, and triggers WebSocket reconnection. Includes retry logic with exponential backoff and manual renewal API.
 
-**`cryptic_app`**
-OTP application behavior implementation that starts the supervision tree and initializes the Cryptic application components.
+**`cryptic_cert_monitor`**  
+Certificate expiration tracking and alerting system for proactive certificate lifecycle management.
 
-**`cryptic_sup`**
-Root supervisor that manages the fault-tolerant supervision tree for all Cryptic processes, ensuring system reliability and automatic restart capabilities.
+**`cryptic_event_manager`**  
+Event logging infrastructure with pluggable handlers for file logging (`cryptic_file_logger`), console output (`cryptic_console_logger`), and message-specific logging (`cryptic_msg_logger`).
 
 ## Cryptographic Protocol
 
-### 1. WebSocket mTLS Authentication
+### 1. Certificate-based Authentication
 
-- Client connects to WebSocket server using mutual TLS authentication
-- Client certificate provides cryptographic identity verification
-- Secure channel established for all subsequent communication
+- Server runs integrated CA with REST API (`/ca/v1/csr`)
+- New users generate GPG keypair and CSR
+- CSR is GPG-signed with user's private key
+- Admin approves user by uploading GPG public key to server
+- User submits signed CSR to CA REST endpoint
+- CA verifies GPG signature against registered public key
+- CA issues X.509 certificate with GPG fingerprint in SAN extension
+- Certificate used for mTLS WebSocket authentication
+- Automatic renewal via `cryptic_cert_renewal` before expiration
 
-### 2. X3DH Key Agreement (Initial Session Setup)
+### 2. X3DH Key Agreement (Initial Session)
 
-- Upon WebSocket connection, client automatically generates X25519 identity and prekey bundles
-- Client uploads prekey bundle to server via WebSocket message
-- Server stores prekey bundle and associates it with client connection
-- First message exchange uses X3DH protocol to establish shared secret
+- Client generates X25519 identity keypair and signed prekey on startup
+- Client uploads prekey bundle to server via WebSocket
+- Server stores bundle in ETS table keyed by username
+- First message: sender fetches receiver's prekey bundle
+- Sender computes X3DH shared secret using ephemeral key
+- X3DH output becomes initial root key for Double Ratchet
+- Receiver reconstructs shared secret upon receiving X3DH message
+- Both parties initialize matching ratchet sessions
 
-### 3. X3DH Message Exchange (Session Initialization)
+### 3. Double Ratchet Protocol (Ongoing)
 
-1. Alice generates fresh ephemeral X25519 keypair for X3DH initialization
-2. Alice fetches Bob's prekey bundle via WebSocket: `{"type": "get_prekey", "user": "bob"}`
-3. Alice performs X3DH key agreement with Bob's bundle
-4. X3DH produces shared secret for Double Ratchet initialization
-5. Alice automatically initializes Double Ratchet session with X3DH shared secret
-6. Alice sends first encrypted message using Double Ratchet protocol
-7. Bob receives X3DH message, performs key agreement, and initializes matching ratchet session
+**Chain Key Ratcheting (Symmetric)**
+- Separate sending/receiving chains per direction
+- Each message advances chain key: `CK_new = KDF(CK_old)`
+- Message keys derived from chain key: `MK = KDF(CK, 0x01)`
+- Chain keys never reused - deleted after derivation
 
-### 4. Double Ratchet Protocol (Ongoing Communication)
+**DH Ratchet Steps (Asymmetric)**
+- Occurs on first message in new direction
+- Generate fresh X25519 ephemeral keypair
+- Compute new DH shared secret with peer's public key
+- Derive new root key and chain key
+- Provides break-in recovery and forward secrecy
 
-1. Both parties maintain separate sending and receiving chain keys
-2. Message encryption uses current sending chain key and advances the chain
-3. Message decryption uses receiving chain key and handles gaps/reordering
-4. DH ratchet steps occur on direction changes: generate new DH keypair and rotate chains
-5. High-performance Blake2b KDF (39x faster) for all key derivation operations
-6. Skipped message key store handles out-of-order and delayed message delivery
-7. Forward secrecy: past messages remain secure even if current keys compromised
-8. Break-in recovery: security restored after DH ratchet step following compromise
+**Out-of-Order Message Handling**
+- Skipped message key store (max 1000 keys)
+- Pre-derive keys for gaps in message sequence
+- Messages decrypt correctly even if delivered out-of-order
+- Automatic cleanup of old skipped keys
 
-## Security Features
+**Performance**
+- Blake2b KDF via NIF: 39x faster than pure Erlang
+- ChaCha20-Poly1305 AEAD via libsodium NIF
+- All cryptographic operations use hardware acceleration when available
 
-### Cryptographic Strength
+## Security Properties
 
-- **X25519**: Elliptic curve Diffie-Hellman with Curve25519 (128-bit security)
-- **ChaCha20-Poly1305**: Authenticated encryption with 256-bit keys
-- **Blake2b KDF**: High-performance cryptographically strong key derivation (39x faster than Erlang)
-- **Libsodium**: Battle-tested cryptographic library via NIF
-- **Double Ratchet**: State-of-the-art protocol used by Signal, WhatsApp, and other secure messengers
+### Cryptographic Primitives
 
-### Forward Secrecy and Break-in Recovery
+- **X25519**: ECDH key agreement (Curve25519, ~128-bit security)
+- **ChaCha20-Poly1305**: AEAD encryption (256-bit keys, 96-bit nonces)
+- **Blake2b**: Cryptographic hash and KDF (configurable output, faster than SHA-2)
+- **Libsodium**: Industry-standard cryptographic library via NIFs
 
-- **Chain key ratcheting**: Each message advances chain keys, providing forward secrecy
-- **DH ratchet steps**: New ephemeral DH keypairs generated on direction changes
-- **Independent chains**: Separate sending and receiving chains for each party
-- **Past message security**: Compromise of current keys doesn't affect previous messages
-- **Break-in recovery**: Security restored after DH ratchet step following compromise
-- **Unique message keys**: Every message encrypted with a unique derived key
-- **No key reuse**: Chain keys and message keys never reused across messages
+### Forward Secrecy
 
-### Out-of-Order Message Handling
+- **Message-level**: Each message uses unique derived key, immediately deleted
+- **Chain-level**: Chain keys advance with each message, old keys deleted
+- **DH ratchet**: New ephemeral keypair on direction change
+- **Past security**: Compromise of current keys doesn't affect past messages
 
-- **Skipped message key store**: Pre-derives keys for missing messages
-- **Delayed delivery support**: Messages can arrive out-of-order and still decrypt
-- **Gap handling**: Automatic key derivation for skipped message numbers
-- **Forward secrecy preservation**: Skipped keys automatically cleaned up after use
+### Break-in Recovery
 
-### Transport Security
+- **DH ratchet step**: Generates new shared secret independent of compromised state
+- **Recovery time**: One round-trip after compromise (when direction changes)
+- **Bidirectional**: Both sending and receiving chains protected
 
-- **Certificate-based authentication**: Client certificates provide cryptographic identity
+### Out-of-Order Delivery
+
+- **Skipped keys**: Pre-derive and store keys for missing message numbers (max 1000)
+- **Gap handling**: Messages with gaps in sequence numbers handled automatically
+- **Delayed messages**: Messages arriving late still decrypt correctly
+- **Cleanup**: Skipped keys removed after use or on limit exceeded
+
+### Authentication
+
+- **Certificate-based**: X.509 client certificates with GPG-verified identity
+- **GPG signatures**: All certificate requests authenticated with GPG private keys
+- **SAN extensions**: GPG fingerprints embedded in certificate for binding
 - **Mutual TLS**: Both client and server authenticate each other
-- **Secure transport**: All communication encrypted at transport layer
-- **Connection persistence**: Maintains secure channel for real-time messaging
+
+### Storage Security
+
+- **Key encryption**: Identity keys and session states encrypted with ChaCha20-Poly1305
+- **Passphrase-derived keys**: User passphrase + random salt + Blake2b KDF
+- **Message history**: SQLite database with per-message encryption
+- **Key isolation**: Each user's keys stored in separate directory (`~/.cryptic/username/`)
 
 ## Quick Start
 
-### Starting the Server
+### Server Startup
 
 ```bash
-# Use the following script
+# Start server with WebSocket mTLS and CA subsystem
 ./scripts/start-server.sh
+
+# Server binds to 0.0.0.0:8443 by default
+# CA REST API available at https://localhost:8443/ca/v1/
 ```
 
-### Starting a Client
+### Client Startup
 
 ```bash
-# Use the following script for the client: 'alice'
-./scripts/start-client.sh alice
+# Standard console mode
+./bin/cryptic -u alice --enable-db
+
+# With custom server
+./bin/cryptic -u alice -s example.com -p 9443
+
+# TUI mode (requires cryptic-tui: github.com/etnt/cryptic-tui)
+./bin/cryptic -u alice --tui
+```
+
+### User Onboarding
+
+```bash
+# Interactive wizard for new users
+./bin/cryptic --onboard
+
+# Steps:
+# 1. Generate GPG keypair
+# 2. Export GPG public key for admin
+# 3. Admin uploads GPG key to server
+# 4. User submits GPG-signed CSR
+# 5. CA verifies signature and issues certificate
 ```
 
 ### Basic Usage
 
-1. Connect to server: `connect`
-2. Send messages: `send <user> <message>` (automatically uses Double Ratchet)
-3. Enter chat mode: `chat <user>` (seamless ratchet session management)
-4. Check session status: `key_status` (view Double Ratchet session information)
-5. Check inbox: `inbox`
-6. List users: `list_users`
-7. Get help: `help`
+```
+connect                    # Connect to server with mTLS
+send <user> <message>     # Send encrypted message (auto-ratchet)
+chat <user>               # Enter chat mode with user
+list_users                # Show registered users
+key_status                # Display ratchet session info
+inbox                     # Check pending messages
+help                      # Show all commands
+:cr                       # Manual certificate renewal
+```
 
-## Certificate Management
+## Building and Development
 
-The system uses X.509 client certificates for mTLS authentication. Certificate infrastructure is managed using the included Certificate Authority (CA) framework:
+### Prerequisites
 
-- **CA Setup**: `cd CA/ && make all`
-- **New Client Cert**: `cd CA/ && make client`
-- **Certificate Verification**: `./scripts/verify-crt.sh client_keys/alice.crt`
-- **Revocation**: `./scripts/revoke-cert.sh certs/02.pem`
+- Erlang/OTP 27+
+- Libsodium (via Homebrew, apt, or source)
+- Rebar3
+- SQLite3 (for message storage)
+- GPG (for certificate onboarding)
 
-Pre-configured client certificates are available for immediate testing:
+### Build
 
-- alice - `CA/client_keys/alice.{crt,key,pem}`
-- bob - `CA/client_keys/bob.{crt,key,pem}`
-- charlie - `CA/client_keys/charlie.{crt,key,pem}`
-- admin - `CA/client_keys/admin.{crt,key,pem}`
+```bash
+# macOS
+brew install libsodium
+
+# Build
+rebar3 compile
+
+# Generate documentation
+rebar3 edoc
+# or: rebar3 ex_doc
+
+# Run tests
+rebar3 eunit
+```
+
+### Certificate Authority Setup
+
+```bash
+cd CA/
+make all                           # Initialize CA
+make client                        # Generate client cert
+./scripts/verify-crt.sh certs/alice.crt
+./scripts/revoke-cert.sh certs/02.pem
+```
+
+Pre-configured test certificates in `CA/client_keys/`:
+- alice.{crt,key,pem}
+- bob.{crt,key,pem}
+- charlie.{crt,key,pem}
+- admin.{crt,key,pem}
+
+## Known Limitations
+
+- **Server-side storage**: Messages and sessions stored in ETS (in-memory, non-persistent)
+- **Single prekey bundle**: One prekey per user (no rotation implemented)
+- **GPG dependency**: Onboarding requires GPG installed and configured
+- **Session cleanup**: Ratchet sessions persist until client disconnect
+- **Skipped key limit**: Maximum 1000 skipped message keys per session
 
 ## WebSocket Message Protocol
 
-### Client to Server Messages
+### Client → Server
 
-- `{"type": "upload_prekey", "prekey": "base64_public_key"}` - Upload X3DH prekey bundle
-- `{"type": "get_prekey", "user": "bob"}` - Request another user's prekey bundle
-- `{"type": "send_message", "to": "bob", "ephemeral": "...", "nonce": "...", "cipher": "..."}` - Send X3DH encrypted message (initial)
-- `{"type": "send_ratchet_message", "to": "bob", "ratchet_data": {...}}` - Send Double Ratchet encrypted message
-- `{"type": "get_messages"}` - Retrieve stored messages
-- `{"type": "list_users"}` - Get list of all registered users
+**Certificate/Key Management**
+- `{"type": "upload_identity_keys", ...}` - Upload X3DH identity keys and prekeys
+- `{"type": "get_key_bundle", "username": "bob"}` - Request user's public keys
 
-### Server to Client Messages
+**Messaging**
+- `{"type": "x3dh", ...}` - Initial X3DH message (session establishment)
+- `{"type": "ratchet", ...}` - Double Ratchet message (ongoing conversation)
+- `{"type": "send_message", ...}` - Generic message (engine determines protocol)
 
-- `{"type": "welcome", "message": "Connected to Cryptic server"}` - Connection confirmation
-- `{"type": "success", "message": "Operation completed"}` - Operation success
-- `{"type": "prekey", "user": "bob", "prekey": "base64_public_key"}` - X3DH prekey bundle response
-- `{"type": "users", "users": ["alice", "bob", "charlie"]}` - Users list response
-- `{"type": "message", "from": "alice", "ephemeral": "...", "nonce": "...", "cipher": "..."}` - Incoming X3DH encrypted message
-- `{"type": "ratchet_message", "from": "alice", "ratchet_data": {...}}` - Incoming Double Ratchet encrypted message
-- `{"type": "error", "message": "Error description"}` - Error response
+**User Management**
+- `{"type": "list_users"}` - Get list of registered users
+- `{"type": "user_status", "username": "alice"}` - Check if user is online
+
+### Server → Client
+
+**Connection**
+- `{"type": "welcome", ...}` - Connection confirmed, username assigned
+
+**Certificate/Key Management**
+- `{"type": "key_bundle", "username": "bob", ...}` - User's public key bundle
+- `{"type": "success", ...}` - Operation succeeded
+
+**Messaging**
+- `{"type": "message", ...}` - Incoming encrypted message (X3DH or ratchet)
+- `{"type": "message_sent", ...}` - Message delivery confirmed
+
+**User Management**
+- `{"type": "users", "users": [...]}` - Registered users list
+- `{"type": "user_status", ...}` - User online/offline status
+- `{"type": "error", ...}` - Error occurred
+
+### CA REST API
+
+**POST /ca/v1/csr**
+```json
+{
+  "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----...",
+  "gpg_fp": "ABCD1234...",
+  "gpg_sig_b64": "base64_encoded_signature"
+}
+```
+
+**Response (200 OK)**
+```json
+{
+  "status": "issued",
+  "cert_pem": "-----BEGIN CERTIFICATE-----...",
+  "serial": 42,
+  "expires_at": 1732627533
+}
+```
 
 ## Building and Development
 
@@ -289,34 +404,33 @@ $ rebar3 edoc
 $ rebar3 eunit
 ```
 
-## Security Considerations
-
-### Current Limitations
-
-- **In-memory storage**: Messages and ratchet states stored in ETS (not persistent)
-- **Certificate-based identity**: mTLS provides authentication but not username verification
-- **Single prekey bundle**: Users have one prekey bundle for X3DH initialization
-- **Session state cleanup**: Ratchet sessions persist until client disconnect
-
-### Production Enhancements
-
-- **Certificate-Username Binding**: Map client certificates to specific usernames
-- **Persistent Ratchet State**: Database backend for Double Ratchet session persistence
-- **Multiple Prekey Bundles**: Key rotation and multiple prekeys per user
-- **Session Lifecycle Management**: Automatic cleanup and state archival
-- **Message Ordering**: Enhanced out-of-order handling for high-latency networks
-
 ## API Documentation
 
-For detailed API documentation of individual modules, see:
+For detailed module documentation:
 
-- `cryptic_server` - Server lifecycle and WebSocket management
-- `cryptic_ws_handler` - WebSocket connection handling, message routing, and ratchet state management
-- `cryptic_double_ratchet` - Complete Double Ratchet protocol implementation
-- `cryptic_ws_client` - WebSocket client API for messaging operations
-- `cryptic_ws_ui` - Terminal user interface with Double Ratchet session management
-- `cryptic_lib` - High-level cryptographic operations, X3DH, and storage
-- `cryptic_nif` - High-performance cryptographic primitives via NIFs
+**Core**
+- `cryptic_server` - Server lifecycle and supervision
+- `cryptic_ws_handler` - WebSocket connection handling and message routing
+- `cryptic_engine` - Messaging orchestration and session management
+- `cryptic_ratchet_engine` - Double Ratchet state machine
+- `cryptic_double_ratchet` - Protocol implementation
+- `cryptic_lib` - X3DH and cryptographic operations
+
+**Client**
+- `cryptic_console` - Terminal UI
+- `cryptic_ws_client` - WebSocket client with reconnection
+- `cryptic_shell` - Line editor with history
+
+**Infrastructure**
+- `cryptic_event_bus` - Pub/sub event system
+- `cryptic_chat_storage` - SQLite encrypted message storage
+- `cryptic_cert_renewal` - Automatic certificate renewal
+- `cryptic_nif` - Libsodium bindings
+
+**CA**
+- `cryptic_ca_rest_handler` - Certificate issuance REST API
+- `cryptic_ca_gpg` - GPG signature verification
+- `cryptic_gpg_registry` - User GPG key storage
 
 ## License
 
