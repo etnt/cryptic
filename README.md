@@ -42,6 +42,8 @@ An ****external TUI**** (Terminal User Interface) exist, written in Rust, that
 connects via the Erlang distribution protocol as a hidden node.
 See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
+(Demo)[https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN]
+
 ## Documentation
 
 📚 **[Complete API Documentation](https://etnt.github.io/cryptic/)** - Comprehensive EDoc-generated documentation
@@ -81,17 +83,18 @@ Cryptic implements a secure messaging system using:
 ## Quick Start
 
 ```bash
-# Start the server with WebSocket support
+# Start the server
 # Make sure to read about bootstrap the first user below!
 > ./scripts/start-server.sh
 
-# In another terminal, start the console client (new standard Erlang method)
+# In another terminal, start the console client
 > ./bin/cryptic -u alice --enable-db
 
 # Specify the server and port to be used
 > ./bin/cryptic -u alice --enable-db -s cryptic.example.com -p 9443
 
 # Start with TUI mode (detached backend + external UI)
+# Make sure to have the `cryptic-tui` binary in your PATH!
 # See: https://github.com/etnt/cryptic-tui
 > ./bin/cryptic -u alice --tui
 
@@ -335,9 +338,9 @@ or via a tailor made [docker container](docs/DOCKER.md) .
 
 ## References
 
-The [X3DH Key Agreement Protocol](https://signal.org/docs/specifications/x3dh/)
-The [Double Ratchet Algorithm](https://signal.org/docs/specifications/doubleratchet/)
-The Messaging Layer Security (MLS) Protocol - [RFC 9420](https://datatracker.ietf.org/doc/rfc9420/)
+- The [X3DH Key Agreement Protocol](https://signal.org/docs/specifications/x3dh/)
+- The [Double Ratchet Algorithm](https://signal.org/docs/specifications/doubleratchet/)
+- The Messaging Layer Security (MLS) Protocol - [RFC 9420](https://datatracker.ietf.org/doc/rfc9420/)
 
 ## License
 

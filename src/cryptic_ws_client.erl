@@ -584,6 +584,10 @@ handle_info(
     State = #state{conn_pid = ConnPid}
 ) ->
     ?warning("Connection down: ~p", [Reason]),
+    Event = #{type => system_message,
+              sys_code => server_connection_down,
+              message => <<"Server connection lost!">>},
+    cryptic_event_bus:publish(Event),
     %% Cancel ping timer if connection is down
     case State#state.ping_timer_ref of
         undefined -> ok;
@@ -637,11 +641,19 @@ handle_info(attempt_reconnect, State = #state{connected = false}) ->
     of
         {ok, NewState} ->
             ?info("Reconnection successful", []),
+            Event = #{type => system_message,
+                      sys_code => server_connection_up,
+                      message => <<"Server reconnected!">>},
+            cryptic_event_bus:publish(Event),
             {noreply, NewState#state{reconnect_timer_ref = undefined}};
         {error, Reason} ->
             ?warning("Reconnection failed: ~p, will retry in 60 seconds", [
                 Reason
             ]),
+            Event = #{type => system_message,
+                      sys_code => server_connection_down,
+                      message => <<"Failed to reconnect to Server!">>},
+            cryptic_event_bus:publish(Event),
             %% Schedule another reconnection attempt
             ReconnectTimerRef = erlang:send_after(
                 ?RECONNECT_TIMEOUT, self(), attempt_reconnect
