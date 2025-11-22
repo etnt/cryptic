@@ -26,6 +26,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_HOST="localhost"
 SERVER_PORT="8443"
 DAEMON_MODE=false
+NODE_NAME="crypticsrv@localhost"
 
 # Function to display usage
 show_usage() {
@@ -37,6 +38,7 @@ Start Cryptic server with WebSocket mTLS support.
 Options:
     -s, --server-host HOST    Server host/IP to bind to (default: localhost)
     -p, --server-port PORT    Server port to listen on (default: 8443)
+    --sname NODE              Erlang node name (default: crypticsrv@localhost)
     -d, --daemon              Run server as detached background process
     -h, --help                Display this help message and exit
 
@@ -56,11 +58,14 @@ Examples:
     # Start on all interfaces, port 9000 (long options)
     $0 --server-host 0.0.0.0 --server-port 9000
 
+    # Start with custom node name
+    $0 --sname mysrv@localhost
+
     # Start as daemon in background
     $0 -d
 
     # Combine options
-    $0 -h 0.0.0.0 -p 9443 -d
+    $0 -s 0.0.0.0 -p 9443 --sname myserver@localhost -d
 
 EOF
 }
@@ -76,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -p|--server-port)
             SERVER_PORT="$2"
+            shift 2
+            ;;
+        --sname)
+            NODE_NAME="$2"
             shift 2
             ;;
         -d|--daemon)
@@ -109,6 +118,7 @@ export CRYPTIC_SERVER_HOST="${CRYPTIC_SERVER_HOST:-$SERVER_HOST}"
 export CRYPTIC_SERVER_PORT="${CRYPTIC_SERVER_PORT:-$SERVER_PORT}"
 
 echo "Cryptic Server Configuration:"
+echo "  Node Name:   $NODE_NAME"
 echo "  Server Host: $CRYPTIC_SERVER_HOST"
 echo "  Server Port: $CRYPTIC_SERVER_PORT"
 echo "  Server Cert: $CRYPTIC_SERVER_CERT"
@@ -123,7 +133,7 @@ echo ""
 echo "Starting Cryptic application with WebSocket mTLS..."
 
 # Build the erl command with common options
-ERL_OPTS="-sname server@localhost -pa $PROJECT_ROOT/_build/default/lib/*/ebin"
+ERL_OPTS="-sname $NODE_NAME -pa $PROJECT_ROOT/_build/default/lib/*/ebin"
 
 # Erlang code to run
 ERL_CODE="
