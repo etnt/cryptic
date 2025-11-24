@@ -11,12 +11,19 @@
          engine_status/0,
          list_users/0,
          online_users/0,
+         renew_certificate/0,
          send_message/1,
          send_to_bus/1,
          load_recent_messages/3,
          load_messages_before/4,
          load_messages_range/4
         ]).
+
+
+
+-spec renew_certificate() -> ok.
+renew_certificate() ->
+    cryptic_cert_renewal:renew_now().
 
 
 %%@doc Send register_user command via event bus
@@ -138,7 +145,7 @@ send_message(JsonMsg) ->
             end
     end.
 
-
+-spec engine_status() -> {ok, binary()} | {error, term()}.
 engine_status() ->
     case get_engine_pid() of
         undefined ->
@@ -147,9 +154,11 @@ engine_status() ->
 
         EnginePid when is_pid(EnginePid) ->
             ?dbg("~p: Returning engine status~n", [?MODULE]),
-            case cryptic_engine:get_engine_status(EnginePid) of
-                {ok, Status} ->
-                    {ok, jsx:encode(Status)};
+            maybe
+                {ok, EngineStatus} ?= cryptic_engine:get_engine_status(EnginePid),
+                CertStatus = cryptic_cert_renewal:get_status(),
+                {ok, jsx:encode(maps:merge(EngineStatus, CertStatus))}
+            else
                 {error, _Reason} = Error ->
                     Error
             end
