@@ -42,7 +42,7 @@ An ****external TUI**** (Terminal User Interface) exist, written in Rust, that
 connects via the Erlang distribution protocol as a hidden node.
 See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
-(Demo)[https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN]
+[Demo](https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN)
 
 ## Documentation
 
@@ -80,14 +80,10 @@ Cryptic implements a secure messaging system using:
 ```
 
 
-## Quick Start
+## Client Quick Start (when onboarded)
 
 ```bash
-# Start the server
-# Make sure to read about bootstrap the first user below!
-> ./scripts/start-server.sh
-
-# In another terminal, start the console client
+# Start the console client
 > ./bin/cryptic -u alice --enable-db
 
 # Specify the server and port to be used
@@ -100,6 +96,16 @@ Cryptic implements a secure messaging system using:
 
 # Connect to TUI backend via remote shell
 > erl -sname admin -remsh alice@localhost
+```
+
+## Server Quick Start (when setup)
+
+``` bash
+# Start the server
+> ./scripts/start-server.sh
+
+# Start the server on another port with a custom Erlang node name
+> ./scripts/start-server.sh -p 9000 --sname demo@localhost
 ```
 
 ## Onboard new users
@@ -335,6 +341,35 @@ Requests, CSR's).
 
 The Server can be run either via the `scripts/start-server.sh` script,
 or via a tailor made [docker container](docs/DOCKER.md) .
+
+### Setup the server
+
+``` bash
+# After cloning and compiling cryptic:
+# 1. Create the server certificates
+./scripts//generate-mtls-certs.sh
+🔐 Generating mTLS Server Certificates for Cryptic...
+Enter DNS Subject Alternative Name (SAN) (unless localhost only) - press Enter to skip:
+DNS names (comma-separated):
+# If you just runs it on localhost (for testing) then just press enter above!
+# But if you run it with a proper DNS name, e.g acme.duckdns.org ,then type
+# in that DNS name.
+...
+
+# 2. Generate GPG key(s) for your admin user(s)
+./scripts/bootstrap_gpg.sh
+# These GPG keys will be put in the priv/ca/bootstrap directory
+# and will be read by the server when starting. They are the trusted
+# admin users that can add GPG keys from new users to be onboarded-
+
+# 3. start the server
+./scripts/start-server.sh
+
+# 4. For each admin user, run the onboard script to generate the corresponding
+# client certificates.
+./bin/cryptic --onboard
+```
+
 
 ## References
 
