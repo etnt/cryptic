@@ -32,12 +32,14 @@
 
 -define(SERVER, ?MODULE).
 
+-type event_filter_fun() :: fun((map()) -> boolean()).
+
 -record(state,
         {
          rust_node :: atom() | undefined,
          username :: binary() | undefined,
          passphrase :: binary() | undefined,
-         event_filter :: fun((map()) -> boolean()) | undefined,
+         event_filter :: event_filter_fun() | undefined,
          engine_pid :: pid() | undefined,
          server_host :: string(),
          server_port :: non_neg_integer(),

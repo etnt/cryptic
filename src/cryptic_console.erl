@@ -626,7 +626,8 @@ wait_for_input_or_messages(InputPid, MonitorRef, State) ->
             case parse_command(Command) of
                 {quit} ->
                     cryptic_shell:print_highlight("Goodbye!"),
-                    cleanup(State);
+                    cleanup(State),
+                    init:stop();
                 {help} ->
                     cryptic_shell:print_help(),
                     command_loop(State);

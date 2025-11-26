@@ -42,7 +42,8 @@ An ****external TUI**** (Terminal User Interface) exist, written in Rust, that
 connects via the Erlang distribution protocol as a hidden node.
 See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
-[Demo](https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN)
+- [Demo](https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN)
+- [Setup the Cryptic Server](https://youtu.be/24vEPienlwE?si=O-htRZRZVKu9wySO)
 
 ## Documentation
 
@@ -375,7 +376,6 @@ DNS names (comma-separated):
 
 - The [X3DH Key Agreement Protocol](https://signal.org/docs/specifications/x3dh/)
 - The [Double Ratchet Algorithm](https://signal.org/docs/specifications/doubleratchet/)
-- The Messaging Layer Security (MLS) Protocol - [RFC 9420](https://datatracker.ietf.org/doc/rfc9420/)
 
 ## License
 
