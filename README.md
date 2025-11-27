@@ -44,6 +44,7 @@ See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
 - [Demo](https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN)
 - [Setup the Cryptic Server](https://youtu.be/24vEPienlwE?si=O-htRZRZVKu9wySO)
+- [Onboard a new User](https://youtu.be/vcqmaE-D8ZA?si=CRIEiaveoTe4XMzL)
 
 ## Documentation
 
@@ -108,6 +109,10 @@ Cryptic implements a secure messaging system using:
 # Start the server on another port with a custom Erlang node name
 > ./scripts/start-server.sh -p 9000 --sname demo@localhost
 ```
+
+> TIPS: I'm running the Cryptic server on a Raspberry PI4; then
+>       I'm using duckdns.org to point to my external IP address of
+>       my home FW/Router which forward traffic to my RPi4.
 
 ## Onboard new users
 
