@@ -3,6 +3,12 @@
 This guide explains how to deploy the Cryptic client and or the
 [server](#the-server) using Docker and Docker Compose.
 
+**To get the latest server image:**
+
+```bash
+docker pull ghcr.io/etnt/cryptic:main
+```
+
 ## The Client
 
 The Cryptic TUI (Terminal User Interface) client can run in Docker to
