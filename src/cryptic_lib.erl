@@ -1460,7 +1460,11 @@ x3dh_receiver_decrypt(
         %% This ensures we verify against exactly what Alice signed
 
         %% Verify message signature using complete metadata
-        MetadataBin = erlang:term_to_binary(CompleteMetadata),
+        %% Use original metadata bytes if available (for mobile clients with JSON format)
+        MetadataBin = case maps:get(metadata_bytes, MessageBlob, undefined) of
+            undefined -> erlang:term_to_binary(CompleteMetadata);
+            OriginalBytes -> OriginalBytes
+        end,
         ?dbg("X3DH signature verification - Complete Metadata map: ~p", [
             CompleteMetadata
         ]),
@@ -1580,7 +1584,11 @@ x3dh_receiver_decrypt_with_session_key(
         } = Metadata,
 
         %% Verify message signature (use provided SenderIdPub parameter)
-        MetadataBin = erlang:term_to_binary(Metadata),
+        %% Use original metadata bytes if available (for mobile clients with JSON format)
+        MetadataBin = case maps:get(metadata_bytes, MessageBlob, undefined) of
+            undefined -> erlang:term_to_binary(Metadata);
+            OriginalBytes -> OriginalBytes
+        end,
         case verify_signature(MetadataBin, Signature, SenderIdPub) of
             false ->
                 {error, invalid_message_signature};

@@ -2217,8 +2217,10 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
             maps:get(<<"metadata">>, MessagePayload)
         ),
 
-        % Decode metadata to extract sender identity and other info
-        Metadata = erlang:binary_to_term(EncodedMetadata),
+        % Decode metadata - try ETF first, then JSON for mobile clients
+        {Metadata, MetadataFormat} = decode_x3dh_metadata(EncodedMetadata),
+        ?dbg("Decoded X3DH metadata (format: ~p): ~p~n", [MetadataFormat, Metadata]),
+        
         SenderIdPub = maps:get(sender_identity_sign_public, Metadata),
 
         % Extract receiver keys from state
@@ -2262,6 +2264,8 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
 
                 MessageBlob = #{
                     metadata => Metadata,
+                    metadata_bytes => EncodedMetadata,  % Original bytes for signature verification
+                    metadata_format => MetadataFormat,   % 'etf' or 'json'
                     signature => Signature,
                     ciphertext => Ciphertext,
                     nonce => Nonce
@@ -2341,6 +2345,41 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
             ),
             {error, {exception, ErrorClass, ErrorReason}}
     end.
+
+%% @private
+%% @doc Decode X3DH metadata from either ETF (Erlang clients) or JSON (mobile clients)
+%% Returns {Metadata, Format} where Format is 'etf' or 'json'
+decode_x3dh_metadata(EncodedMetadata) ->
+    % Try ETF first (Erlang native format)
+    try
+        EtfMetadata = erlang:binary_to_term(EncodedMetadata),
+        {EtfMetadata, etf}
+    catch
+        error:badarg ->
+            % Try JSON (mobile client format)
+            JsonMap = jsx:decode(EncodedMetadata, [return_maps]),
+            JsonMetadata = convert_json_metadata_to_erlang(JsonMap),
+            {JsonMetadata, json}
+    end.
+
+%% @private
+%% @doc Convert JSON metadata map with binary keys to Erlang metadata with atom keys
+convert_json_metadata_to_erlang(JsonMap) ->
+    #{
+        version => maps:get(<<"version">>, JsonMap),
+        type => maps:get(<<"type">>, JsonMap),
+        sender_id => base64:decode(maps:get(<<"sender_id">>, JsonMap)),
+        sender_identity_dh_public => base64:decode(maps:get(<<"sender_identity_dh_public">>, JsonMap)),
+        sender_identity_sign_public => base64:decode(maps:get(<<"sender_identity_sign_public">>, JsonMap)),
+        recipient_id => base64:decode(maps:get(<<"recipient_id">>, JsonMap)),
+        ephemeral_public => base64:decode(maps:get(<<"ephemeral_public">>, JsonMap)),
+        otpk_id => case maps:get(<<"otpk_id">>, JsonMap, null) of
+            null -> undefined;
+            OtpkIdB64 -> base64:decode(OtpkIdB64)
+        end,
+        message_id => base64:decode(maps:get(<<"message_id">>, JsonMap)),
+        timestamp => maps:get(<<"timestamp">>, JsonMap)
+    }.
 
 %% @private
 %% @doc Initialize ratchet session as receiver after X3DH
