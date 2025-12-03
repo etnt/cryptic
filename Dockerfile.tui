@@ -34,7 +34,7 @@ ARG TUI_SOURCE=local
 
 # Copy cryptic-tui source (from parent context)
 # The build context is the parent directory, so cryptic-tui/ is accessible
-COPY cryptic-tui/Cargo.toml cryptic-tui/Cargo.lock ./
+COPY cryptic-tui/Cargo.toml cryptic-tui/Cargo.lock cryptic-tui/README.md ./
 COPY cryptic-tui/src ./src
 
 # Build release binary with static linking for alpine
