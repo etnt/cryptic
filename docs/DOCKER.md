@@ -3,10 +3,60 @@
 This guide explains how to deploy the Cryptic client and or the
 [server](#the-server) using Docker and Docker Compose.
 
-**To get the latest server image:**
+
+## Quick Deployment
+
+**Run the latest client image:**
 
 ```bash
-docker pull ghcr.io/etnt/cryptic:main
+# Get the latest Client docker image
+docker pull ghcr.io/etnt/cryptic-tui:latest
+
+# Run the Cryptic Onboarding script
+#  1. Generate a GPG key pair
+#  2. Export the generated key
+#  3. Send the key and fingerprint to the admin
+#  4. WAIT! - Do not exit the onboard script (the container will be gone) 
+#  5. When admin has registered your key: Request a TLS certificate from server
+#    If you server is running on localhost on your Host machine, specify:
+#    cryptic-server as your server address (see the: `--add-host` below)
+#  6. Exit the onboard script
+# You should now see your certificates at ~/.cryptic/<user>/cryptic-server_<port> 
+docker run -it --rm --name cryptic-client -v ~/.cryptic:/home/cryptic/.cryptic \
+           --add-host=cryptic-server:host-gateway \
+           ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
+
+# Start the Cryptic client with your username (e.g `franz`)
+# You'll be prompted for a Passphrase which is used to encrypt your local DB
+docker run -it --rm --name cryptic-client -v ~/.cryptic:/home/cryptic/.cryptic \
+           --add-host=cryptic-server:host-gateway \
+           ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic -u franz --enable-db --tui'
+```
+
+**Run the latest server image:**
+
+```bash
+# Get the latest Server docker image
+docker pull ghcr.io/etnt/cryptic:latest
+
+# Run the server (requires certificates in ./priv/ssl/)
+# Make sure you have: server.crt, server.key, ca.crt
+docker run -d \
+  --name cryptic-server \
+  -p 8443:8443 \
+  -v $(pwd)/priv/ssl/server.crt:/opt/cryptic/certs/server.crt:ro \
+  -v $(pwd)/priv/ssl/server.key:/opt/cryptic/certs/server.key:ro \
+  -v $(pwd)/priv/ssl/ca.crt:/opt/cryptic/certs/ca.crt:ro \
+  -v cryptic-logs:/opt/cryptic/logs \
+  -v cryptic-data:/opt/cryptic/data \
+  -e CRYPTIC_SERVER_HOST=0.0.0.0 \
+  ghcr.io/etnt/cryptic:latest
+
+# Check server logs
+docker logs -f cryptic-server
+
+# Stop the server
+docker stop cryptic-server && docker rm cryptic-server
 ```
 
 ## The Client
