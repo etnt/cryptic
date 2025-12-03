@@ -36,14 +36,11 @@ RUN cd c_src && \
 # Build release
 RUN rebar3 as prod release
 
-# Runtime stage
-FROM alpine:latest
+# Runtime stage - use same Erlang version as builder for consistency
+FROM erlang:28.1-alpine
 
 # Install runtime dependencies
 RUN apk add --no-cache \
-    openssl \
-    libstdc++ \
-    libgcc \
     libsodium \
     sqlite-libs \
     gnupg \
