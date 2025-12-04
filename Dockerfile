@@ -58,7 +58,8 @@ COPY --from=builder /buildroot/_build/prod/rel/cryptic ./
 
 # Copy entrypoint script from scripts directory
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY scripts/generate-mtls-certs.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/generate-mtls-certs.sh
 
 # Create directories for runtime data (including CA DB and bootstrap area)
 RUN mkdir -p /opt/cryptic/certs /opt/cryptic/logs /opt/cryptic/data/ca /opt/cryptic/priv/ca/bootstrap && \

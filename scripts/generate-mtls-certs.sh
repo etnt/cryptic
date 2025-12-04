@@ -1,12 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 
 # Generate mTLS certificates for Cryptic chat server
+# POSIX-compatible for Alpine/BusyBox
 
 set -e
 
 echo "🔐 Generating mTLS Server Certificates for Cryptic..."
 
-DIR=priv/ssl
+DIR="${DIR:-priv/ssl}"
 
 # Create SSL directory if it doesn't exist
 mkdir -p ${DIR}
@@ -22,7 +23,7 @@ fi
 
 DNS_SANS=""
 echo "Enter DNS Subject Alternative Name (SAN) (unless localhost only) - press Enter to skip:"
-echo -n "DNS names (comma-separated): " ; read DNS_SANS
+printf "DNS names (comma-separated): " ; read DNS_SANS
 
 # Build SAN string for OpenSSL config file format (DNS.3 = hostname, DNS.4 = hostname, ...)
 SAN_LINES=""
@@ -30,21 +31,55 @@ if [ -n "$DNS_SANS" ]; then
     # Convert comma-separated DNS names to OpenSSL config format
     # Start from DNS.3 (DNS.1 and DNS.2 are already in the config)
     INDEX=3
-    IFS=',' read -ra NAMES <<< "$DNS_SANS"
-    for name in "${NAMES[@]}"; do
+    # POSIX-compatible: use echo and tr instead of bash arrays
+    for name in $(echo "$DNS_SANS" | tr ',' ' '); do
         # Trim whitespace
         name=$(echo "$name" | xargs)
-        if [ -n "$SAN_LINES" ]; then
-            SAN_LINES="$SAN_LINES"$'\n'
+        if [ -n "$name" ]; then
+            if [ -n "$SAN_LINES" ]; then
+                SAN_LINES="${SAN_LINES}
+DNS.$INDEX = $name"
+            else
+                SAN_LINES="DNS.$INDEX = $name"
+            fi
+            INDEX=$((INDEX + 1))
         fi
-        SAN_LINES="${SAN_LINES}DNS.$INDEX = $name"
-        INDEX=$((INDEX + 1))
     done
 fi
 
+# Find openssl.cnf - check multiple locations
+OPENSSL_CNF=""
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Check locations in order of preference
+for cnf_path in \
+    "${SCRIPT_DIR}/openssl.cnf" \
+    "${SCRIPT_DIR}/../priv/openssl.cnf" \
+    "./priv/openssl.cnf" \
+    "./lib/cryptic-1.0.0/priv/openssl.cnf" \
+    "/opt/cryptic/lib/cryptic-1.0.0/priv/openssl.cnf"; do
+    if [ -f "$cnf_path" ]; then
+        OPENSSL_CNF="$cnf_path"
+        break
+    fi
+done
+
+if [ -z "$OPENSSL_CNF" ]; then
+    echo "❌ Error: Cannot find openssl.cnf"
+    echo "   Searched in:"
+    echo "   - ${SCRIPT_DIR}/openssl.cnf"
+    echo "   - ${SCRIPT_DIR}/../priv/openssl.cnf"
+    echo "   - ./priv/openssl.cnf"
+    echo "   - ./lib/cryptic-1.0.0/priv/openssl.cnf"
+    echo "   - /opt/cryptic/lib/cryptic-1.0.0/priv/openssl.cnf"
+    exit 1
+fi
+
+echo "Using OpenSSL config: $OPENSSL_CNF"
+
 # Create temporary config file with SAN extension
 TEMP_CONFIG="/tmp/openssl_san_server.cnf"
-cp ${DIR}/../openssl.cnf "$TEMP_CONFIG"
+cp "$OPENSSL_CNF" "$TEMP_CONFIG"
 
 # Add SAN to the [ alt_names_server ] section after DNS.2 line
 if [ -n "$SAN_LINES" ]; then

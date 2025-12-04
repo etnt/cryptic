@@ -41,6 +41,13 @@ docker run -it --rm --name cryptic-client -v ~/.cryptic:/home/cryptic/.cryptic \
 # Get the latest Server docker image
 docker pull ghcr.io/etnt/cryptic:latest
 
+# Setup the server certificates (one-time step)
+# Creates ca.crt, ca.key, server.crt, server.key in ./priv/ssl/
+mkdir -p priv/ssl
+docker run -it --rm \
+  -v $(pwd)/priv/ssl:/opt/cryptic/certs \
+  ghcr.io/etnt/cryptic:latest sh -c 'DIR=/opt/cryptic/certs generate-mtls-certs.sh'
+
 # Run the server (requires certificates in ./priv/ssl/)
 # Make sure you have: server.crt, server.key, ca.crt
 docker run -d \
