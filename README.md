@@ -42,9 +42,12 @@ An ****external TUI**** (Terminal User Interface) exist, written in Rust, that
 connects via the Erlang distribution protocol as a hidden node.
 See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
+## Demo
+
 - [Demo](https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN)
 - [Setup the Cryptic Server](https://youtu.be/24vEPienlwE?si=O-htRZRZVKu9wySO)
 - [Onboard a new User](https://youtu.be/vcqmaE-D8ZA?si=CRIEiaveoTe4XMzL)
+- [Onboard a new User in Docker container](https://youtu.be/acNHqzHia3o?si=_4mQuE4KQooxb1UM)
 
 ## Documentation
 

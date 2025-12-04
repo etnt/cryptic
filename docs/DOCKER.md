@@ -8,6 +8,8 @@ This guide explains how to deploy the Cryptic client and or the
 
 **Run the latest client image:**
 
+[Demo](https://youtu.be/acNHqzHia3o?si=_4mQuE4KQooxb1UM)
+
 ```bash
 # Get the latest Client docker image
 docker pull ghcr.io/etnt/cryptic-tui:latest
