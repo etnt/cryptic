@@ -27,15 +27,19 @@ done
 
 # Also create priv/ssl in the working directory since config uses relative paths
 mkdir -p /opt/cryptic/priv/ssl
-# Copy CA cert/key files from lib directory to working directory
-for libdir in /opt/cryptic/lib/cryptic-*/; do
-    if [ -f "${libdir}priv/ssl/ca.crt" ]; then
-        cp "${libdir}priv/ssl/ca.crt" /opt/cryptic/priv/ssl/
-        cp "${libdir}priv/ssl/ca.key" /opt/cryptic/priv/ssl/
-        chown cryptic:cryptic /opt/cryptic/priv/ssl/*
-        break
-    fi
-done
+
+# Copy CA cert/key files from mounted certs directory to priv/ssl
+# The application config uses relative path "priv/ssl/ca.crt"
+if [ -f "/opt/cryptic/certs/ca.crt" ] && [ -f "/opt/cryptic/certs/ca.key" ]; then
+    echo "DEBUG: Copying CA files from /opt/cryptic/certs/ to priv/ssl/"
+    cp /opt/cryptic/certs/ca.crt /opt/cryptic/priv/ssl/
+    cp /opt/cryptic/certs/ca.key /opt/cryptic/priv/ssl/
+    chown cryptic:cryptic /opt/cryptic/priv/ssl/*
+else
+    echo "WARNING: CA certificate files not found in /opt/cryptic/certs/"
+    echo "  Expected: /opt/cryptic/certs/ca.crt and /opt/cryptic/certs/ca.key"
+    echo "  Run certificate generation first or mount the files."
+fi
 
 # Debug: Show directory permissions
 echo "DEBUG: /opt/cryptic/data permissions:"
