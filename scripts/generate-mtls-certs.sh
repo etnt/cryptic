@@ -81,6 +81,10 @@ echo "Using OpenSSL config: $OPENSSL_CNF"
 TEMP_CONFIG="/tmp/openssl_san_server.cnf"
 cp "$OPENSSL_CNF" "$TEMP_CONFIG"
 
+# Update the dir path in the config to match our $DIR
+# This replaces "dir = priv/ssl" (or similar) with the actual DIR path
+sed -i "s|^dir[[:space:]]*=.*|dir = $DIR|" "$TEMP_CONFIG"
+
 # Add SAN to the [ alt_names_server ] section after DNS.2 line
 if [ -n "$SAN_LINES" ]; then
     # Use awk to insert multiple lines after DNS.2
