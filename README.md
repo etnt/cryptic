@@ -382,6 +382,7 @@ DNS names (comma-separated):
 ## TODO
 
 - Chat Rooms (obvious next step, plans are made...)
+- Sending files, audio, video...
 - Playing chess (ongoing...other types of games would be fun too :-) )
 - Mobile App (ongoing...atm able to send/receive messages, using Flutter)
 - Interfacing Home Assistant (just a thought)
