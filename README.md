@@ -379,6 +379,13 @@ DNS names (comma-separated):
 ./bin/cryptic --onboard
 ```
 
+## TODO
+
+- Chat Rooms (obvious next step, plans are made...)
+- Playing chess (ongoing...other types of games would be fun too :-) )
+- Mobile App (ongoing...atm able to send/receive messages, using Flutter)
+- Interfacing Home Assistant (just a thought)
+- Other (yeah...what else ?)
 
 ## References
 
