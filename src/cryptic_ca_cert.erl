@@ -31,7 +31,9 @@
     validate_csr/1,
     build_client_cert/5,
     sign_cert/2,
-    encode_pem/1
+    encode_pem/1,
+    get_serial/1,
+    get_expiry/1
 ]).
 
 %% OID constants
@@ -657,4 +659,94 @@ gregorian_to_utc_time(GregorianSecs) ->
         io_lib:format("~2..0B~2..0B~2..0B~2..0B~2..0B~2..0BZ",
                       [YY, M, D, H, Min, S])
     ).
+
+%%====================================================================
+%% Certificate Inspection Functions
+%%====================================================================
+
+%% @doc Extract serial number from a PEM-encoded certificate
+%% 
+%% Returns the serial number as a binary string.
+%% @param CertPEM PEM-encoded certificate
+%% @returns {ok, Serial} or {error, Reason}
+-spec get_serial(binary()) -> {ok, binary()} | {error, term()}.
+get_serial(CertPEM) when is_binary(CertPEM) ->
+    try
+        [{'Certificate', DerCert, not_encrypted}] = 
+            public_key:pem_decode(CertPEM),
+        OTPCert = public_key:pkix_decode_cert(DerCert, otp),
+        #'OTPCertificate'{
+            tbsCertificate = #'OTPTBSCertificate'{
+                serialNumber = SerialInt
+            }
+        } = OTPCert,
+        SerialHex = integer_to_binary(SerialInt, 16),
+        {ok, SerialHex}
+    catch
+        _:Reason ->
+            {error, {invalid_certificate, Reason}}
+    end.
+
+%% @doc Extract expiry date from a PEM-encoded certificate
+%% 
+%% Returns the not-after date as a Unix timestamp.
+%% @param CertPEM PEM-encoded certificate
+%% @returns {ok, ExpiryUnix} or {error, Reason}
+-spec get_expiry(binary()) -> {ok, integer()} | {error, term()}.
+get_expiry(CertPEM) when is_binary(CertPEM) ->
+    try
+        [{'Certificate', DerCert, not_encrypted}] = 
+            public_key:pem_decode(CertPEM),
+        OTPCert = public_key:pkix_decode_cert(DerCert, otp),
+        #'OTPCertificate'{
+            tbsCertificate = #'OTPTBSCertificate'{
+                validity = #'Validity'{
+                    notAfter = NotAfter
+                }
+            }
+        } = OTPCert,
+        ExpiryUnix = validity_to_unix(NotAfter),
+        {ok, ExpiryUnix}
+    catch
+        _:Reason ->
+            {error, {invalid_certificate, Reason}}
+    end.
+
+%% @private Convert ASN.1 validity time to Unix timestamp
+validity_to_unix({utcTime, TimeStr}) ->
+    %% UTCTime format: YYMMDDHHMMSSZ
+    utc_time_to_unix(TimeStr);
+validity_to_unix({generalTime, TimeStr}) ->
+    %% GeneralizedTime format: YYYYMMDDHHMMSSZ
+    general_time_to_unix(TimeStr).
+
+%% @private Parse UTCTime (YYMMDDHHMMSSZ) to Unix timestamp
+utc_time_to_unix(TimeStr) ->
+    <<YY:2/binary, MM:2/binary, DD:2/binary, 
+      HH:2/binary, Min:2/binary, SS:2/binary, "Z">> = 
+        list_to_binary(TimeStr),
+    Year2 = binary_to_integer(YY),
+    %% UTCTime uses 2-digit years: 00-49 = 2000-2049, 50-99 = 1950-1999
+    Year = if Year2 >= 50 -> 1900 + Year2; true -> 2000 + Year2 end,
+    Month = binary_to_integer(MM),
+    Day = binary_to_integer(DD),
+    Hour = binary_to_integer(HH),
+    Minute = binary_to_integer(Min),
+    Second = binary_to_integer(SS),
+    DateTime = {{Year, Month, Day}, {Hour, Minute, Second}},
+    calendar:datetime_to_gregorian_seconds(DateTime) - 62167219200.
+
+%% @private Parse GeneralizedTime (YYYYMMDDHHMMSSZ) to Unix timestamp
+general_time_to_unix(TimeStr) ->
+    <<YYYY:4/binary, MM:2/binary, DD:2/binary, 
+      HH:2/binary, Min:2/binary, SS:2/binary, "Z">> = 
+        list_to_binary(TimeStr),
+    Year = binary_to_integer(YYYY),
+    Month = binary_to_integer(MM),
+    Day = binary_to_integer(DD),
+    Hour = binary_to_integer(HH),
+    Minute = binary_to_integer(Min),
+    Second = binary_to_integer(SS),
+    DateTime = {{Year, Month, Day}, {Hour, Minute, Second}},
+    calendar:datetime_to_gregorian_seconds(DateTime) - 62167219200.
 

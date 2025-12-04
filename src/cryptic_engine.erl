@@ -188,7 +188,8 @@
     send_message/3,
     get_active_sessions/1,
     terminate_session/2,
-    get_engine_status/1
+    get_engine_status/1,
+    initialize_with_passphrase/2
 ]).
 
 %% gen_server callbacks
@@ -342,6 +343,16 @@ terminate_session(EnginePid, PeerUsername) ->
 get_engine_status(EnginePid) ->
     gen_server:call(EnginePid, get_engine_status).
 
+%% @doc Initialize engine with passphrase for delayed initialization
+%%
+%% Used when running in TUI mode where the passphrase is obtained
+%% from the user after the engine has started. This triggers
+%% reloading of identity keys with the actual passphrase.
+-spec initialize_with_passphrase(EnginePid :: pid(), Passphrase :: binary()) ->
+    ok | {error, term()}.
+initialize_with_passphrase(EnginePid, Passphrase) ->
+    gen_server:call(EnginePid, {initialize_with_passphrase, Passphrase}).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -483,6 +494,14 @@ handle_call(get_engine_status, _From, State) ->
         )
     },
     {reply, {ok, Status}, State};
+handle_call({initialize_with_passphrase, Passphrase}, _From, State) ->
+    %% Update the callback context with the real passphrase
+    %% This is used in TUI mode where passphrase is obtained after engine start
+    OldContext = State#cryptic_engine_state.callback_context,
+    NewContext = OldContext#{passphrase => Passphrase},
+    NewState = State#cryptic_engine_state{callback_context = NewContext},
+    log_info("Engine initialized with passphrase", [], NewState),
+    {reply, ok, NewState};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 

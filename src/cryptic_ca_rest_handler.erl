@@ -564,8 +564,10 @@ status_impl(GpgFp, Req, State) ->
                     error => <<"not_found">>,
                     message => <<"GPG fingerprint not registered">>
                 }),
-                Req2 = cowboy_req:set_resp_status(404, Req),
-                {ErrorBody, Req2, State};
+                Req2 = cowboy_req:reply(404, 
+                    #{<<"content-type">> => <<"application/json">>},
+                    ErrorBody, Req),
+                {stop, Req2, State};
             {error, Reason} ->
                 ErrorBody = jsx:encode(#{
                     error => <<"query_failed">>,

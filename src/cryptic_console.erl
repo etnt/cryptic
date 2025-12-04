@@ -93,7 +93,9 @@
 %% Include ANSI escape sequence macros for terminal formatting
 -include("cryptic_ansi.hrl").
 -include("cryptic.hrl").
+-ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-endif.
 -include_lib("public_key/include/public_key.hrl").
 
 %% Internal state record
@@ -1315,14 +1317,10 @@ execute_command({db_cmd, enable}, State) ->
         false ->
             %% Initialize storage
             Username = binary_to_list(State#console_state.username),
-            ServerHost = State#console_state.server_host,
-            ServerPort = State#console_state.server_port,
             Passphrase = State#console_state.passphrase,
 
             case
-                cryptic_chat_storage:init_storage(
-                    Username, ServerHost, ServerPort, Passphrase
-                )
+                cryptic_chat_storage:init_storage(Username, Passphrase)
             of
                 ok ->
                     cryptic_shell:print_success("Database storage enabled"),
