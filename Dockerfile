@@ -45,7 +45,8 @@ RUN apk add --no-cache \
     sqlite-libs \
     gnupg \
     su-exec \
-    netcat-openbsd
+    netcat-openbsd \
+    openssl
 
 # Create cryptic user and group
 RUN addgroup -S cryptic && adduser -S cryptic -G cryptic
