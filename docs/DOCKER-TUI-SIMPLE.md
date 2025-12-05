@@ -137,7 +137,6 @@ Your `~/.cryptic` directory will look like:
 │       │   ├── alice.crt          # Client certificate
 │       │   ├── alice.key          # Private key (mode 600)
 │       │   └── ca.crt             # CA certificate
-│       ├── gpg_secret_key.asc     # GPG secret key for auto-renewal
 │       ├── keys.encrypted         # Identity keys (X3DH)
 │       ├── sessions/              # Double Ratchet states
 │       │   ├── bob.session
@@ -147,6 +146,12 @@ Your `~/.cryptic` directory will look like:
 └── logs/
     └── cryptic-tui.log.YYYY-MM-DD # Daily log files
 ```
+
+### GPG Keys for Certificate Renewal
+
+The container also mounts `~/.gnupg` (read-write) to provide access to your GPG keyring.
+This is required for automatic certificate renewal, which signs certificate renewal
+requests with your GPG key.
 
 ### Why Read-Write Access?
 

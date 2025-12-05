@@ -15,22 +15,29 @@ This guide explains how to deploy the Cryptic client and or the
 docker pull ghcr.io/etnt/cryptic-tui:latest
 
 # Run the Cryptic Onboarding script
-#  1. Generate a GPG key pair
+#  1. Generate a GPG key pair (or use existing one from ~/.gnupg)
 #  2. Export the generated key
 #  3. Send the key and fingerprint to the admin
 #  4. WAIT! - Do not exit the onboard script (the container will be gone) 
 #  5. When admin has registered your key: Request a TLS certificate from server
-#    If you server is running on localhost on your Host machine, specify:
+#    If your server is running on localhost on your Host machine, specify:
 #    cryptic-server as your server address (see the: `--add-host` below)
 #  6. Exit the onboard script
-# You should now see your certificates at ~/.cryptic/<user>/cryptic-server_<port> 
-docker run -it --rm --name cryptic-client -v ~/.cryptic:/home/cryptic/.cryptic \
+# You should now see your certificates at ~/.cryptic/<user>/cryptic-server_<port>
+#
+# NOTE: ~/.gnupg is mounted so your GPG keyring is shared with the container.
+#       This is required for automatic certificate renewal.
+docker run -it --rm --name cryptic-client \
+           -v ~/.cryptic:/home/cryptic/.cryptic \
+           -v ~/.gnupg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
            ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
 
 # Start the Cryptic client with your username (e.g `franz`)
 # You'll be prompted for a Passphrase which is used to encrypt your local DB
-docker run -it --rm --name cryptic-client -v ~/.cryptic:/home/cryptic/.cryptic \
+docker run -it --rm --name cryptic-client \
+           -v ~/.cryptic:/home/cryptic/.cryptic \
+           -v ~/.gnupg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
            ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic -u franz --enable-db --tui'
 ```
@@ -66,6 +73,48 @@ docker logs -f cryptic-server
 
 # Stop the server
 docker stop cryptic-server && docker rm cryptic-server
+```
+
+### First Admin Bootstrap
+
+Before any users can obtain certificates, you need to register the first admin user.
+The server container includes a `bootstrap-admin` script that makes this easy:
+
+```bash
+# With the server running, bootstrap the first admin user
+docker exec -it cryptic-server bootstrap-admin alice
+```
+
+This script will:
+1. Create a GPG key for the admin user (inside the container)
+2. Export the public key to the bootstrap directory
+3. Reload the registration in the running server
+
+**Now the admin can onboard** from their client machine:
+
+```bash
+docker run -it --rm --name cryptic-client \
+  -v ~/.cryptic:/home/cryptic/.cryptic \
+  -v ~/.gnupg:/home/cryptic/.gnupg \
+  --add-host=cryptic-server:host-gateway \
+  ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
+```
+
+During onboarding:
+1. Generate a GPG key (or use existing one)
+2. The fingerprint is already registered (from the bootstrap step)
+3. Request your TLS certificate
+4. Start using Cryptic!
+
+Once the first admin has a certificate, they can register other users' GPG keys
+through the admin interface, allowing those users to complete onboarding.
+
+**Note**: If you need to bootstrap multiple admin users before starting, you can
+run the bootstrap script multiple times:
+
+```bash
+docker exec -it cryptic-server bootstrap-admin alice
+docker exec -it cryptic-server bootstrap-admin bob
 ```
 
 ## The Client

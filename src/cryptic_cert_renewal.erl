@@ -568,11 +568,6 @@ perform_renewal_process(State) ->
 
     ?info("Starting certificate renewal process for ~s", [Username]),
 
-    %% Store state in process dictionary for GPG key import if needed
-    %% (the sign_csr_with_gpg function may need to import the GPG key
-    %% and needs access to server info to find the key file)
-    erlang:put(renewal_state, State),
-
     Result =
         maybe
             %% Step 1: Generate CSR
@@ -935,9 +930,8 @@ find_cn_in_attributes([_ | Rest]) ->
 %% - Subsequent calls use cached passphrase
 %%
 %% == Container Support ==
-%% In Docker containers, the GPG keyring is initially empty. This function
-%% will attempt to import the GPG secret key from the cryptic data directory
-%% if signing fails due to a missing key.
+%% In Docker containers, the host's ~/.gnupg directory should be mounted
+%% to make the GPG keyring available for certificate renewal.
 %%
 %% @param CsrPem The PEM-encoded CSR to sign
 %% @param GpgFingerprint The GPG key fingerprint to sign with
@@ -945,49 +939,6 @@ find_cn_in_attributes([_ | Rest]) ->
 %%          detached signature, or {error, Reason} on failure
 -spec sign_csr_with_gpg(binary(), binary()) -> {ok, binary()} | {error, term()}.
 sign_csr_with_gpg(CsrPem, GpgFingerprint) ->
-    %% Try signing first
-    case do_sign_csr_with_gpg(CsrPem, GpgFingerprint) of
-        {ok, _} = Success ->
-            Success;
-        {error, {gpg_sign_failed, _}} = Error ->
-            %% Signing failed - check if key is missing and try to import
-            ?warning("GPG signing failed, checking if key needs to be imported...", []),
-            case cryptic_gpg_helper:check_secret_key_available(GpgFingerprint) of
-                true ->
-                    %% Key is available, signing failed for another reason
-                    ?error("GPG key is available but signing failed", []),
-                    Error;
-                false ->
-                    %% Key not in keyring - try to import from cryptic data dir
-                    ?info("GPG key not found in keyring, attempting to import...", []),
-                    %% We need server info to find the key file
-                    %% Get it from the calling process state if available
-                    case erlang:get(renewal_state) of
-                        undefined ->
-                            ?error("Cannot import GPG key: renewal state not available", []),
-                            Error;
-                        State ->
-                            Username = State#renewal_state.username,
-                            ServerHost = State#renewal_state.server_host,
-                            ServerPort = State#renewal_state.server_port,
-                            case cryptic_gpg_helper:import_secret_key(Username, ServerHost, ServerPort) of
-                                {ok, _ImportedFp} ->
-                                    ?info("GPG key imported, retrying signing...", []),
-                                    do_sign_csr_with_gpg(CsrPem, GpgFingerprint);
-                                {error, ImportError} ->
-                                    ?error("Failed to import GPG key: ~p", [ImportError]),
-                                    Error
-                            end
-                    end
-            end;
-        Error ->
-            Error
-    end.
-
-%% @private
-%% @doc Actually perform the GPG signing.
--spec do_sign_csr_with_gpg(binary(), binary()) -> {ok, binary()} | {error, term()}.
-do_sign_csr_with_gpg(CsrPem, GpgFingerprint) ->
     try
         %% Use erl_gpg_api to sign (GPG agent handles passphrase)
         KeyID = binary_to_list(GpgFingerprint),

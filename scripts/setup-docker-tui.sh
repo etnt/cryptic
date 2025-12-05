@@ -143,6 +143,6 @@ Note: The entire ~/.cryptic directory is mounted read-write
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-For help, see: docs/DOCKER-TUI-SIMPLE.md
+For help, see: docs/DOCKER.md
 
 EOF

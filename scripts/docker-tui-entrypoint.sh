@@ -98,41 +98,23 @@ check_certificates() {
     return 0
 }
 
-# Import GPG secret key for certificate auto-renewal
-import_gpg_key() {
-    local gpg_key_file="/home/cryptic/.cryptic/${CRYPTIC_USERNAME}/${CRYPTIC_SERVER_HOST}_${CRYPTIC_SERVER_PORT}/gpg_secret_key.asc"
+# Check GPG keyring is available (mounted from host)
+check_gpg_keyring() {
     local gpg_home="/home/cryptic/.gnupg"
     
-    if [ ! -f "$gpg_key_file" ]; then
-        warn "GPG secret key not found: $gpg_key_file"
-        warn "Certificate auto-renewal will not work."
-        warn "To export your GPG key, re-run: cryptic-onboard request"
+    if [ ! -d "$gpg_home" ]; then
+        warn "GPG keyring not mounted: $gpg_home"
+        warn "Certificate auto-renewal requires ~/.gnupg to be mounted."
         return 1
     fi
     
-    info "Importing GPG secret key for certificate auto-renewal..."
-    
-    # Ensure .gnupg directory exists with proper permissions
-    mkdir -p "$gpg_home"
-    chmod 700 "$gpg_home"
-    chown -R cryptic:cryptic "$gpg_home"
-    
-    # Import the key as the cryptic user
-    # Using --batch for non-interactive import
-    # Note: The key is passphrase-protected, GPG agent will cache the passphrase
-    if su-exec cryptic gpg --batch --import "$gpg_key_file" 2>/dev/null; then
-        success "GPG secret key imported successfully"
-        
-        # Show imported key info
-        local key_info=$(su-exec cryptic gpg --list-secret-keys --keyid-format LONG 2>/dev/null | head -5)
-        if [ -n "$key_info" ]; then
-            info "Imported key:"
-            echo "$key_info" | sed 's/^/  /'
-        fi
+    # Check if there are any secret keys
+    if su-exec cryptic gpg --list-secret-keys 2>/dev/null | grep -q "^sec"; then
+        success "GPG keyring available with secret keys"
         return 0
     else
-        warn "Failed to import GPG secret key"
-        warn "Certificate auto-renewal may not work."
+        warn "No GPG secret keys found in mounted keyring"
+        warn "Generate a GPG key or ensure ~/.gnupg is properly mounted"
         return 1
     fi
 }
@@ -172,8 +154,8 @@ main() {
     # Check certificates (warn but don't fail - user might be onboarding)
     check_certificates || warn "Continuing without certificates (use --onboard to set up)..."
     
-    # Import GPG key for certificate auto-renewal (warn but don't fail)
-    import_gpg_key || warn "Continuing without GPG key..."
+    # Check GPG keyring is available (warn but don't fail)
+    check_gpg_keyring || warn "Continuing without GPG keyring..."
     
     # Show connection info
     show_connection_info

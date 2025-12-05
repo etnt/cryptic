@@ -31,13 +31,18 @@ services:
       - ./priv/ssl/server.crt:/opt/cryptic/certs/server.crt:ro
       - ./priv/ssl/server.key:/opt/cryptic/certs/server.key:ro
       - ./priv/ssl/ca.crt:/opt/cryptic/certs/ca.crt:ro
-      
+
       # Mount CA cert and key to release priv directory for certificate issuance
       - ./priv/ssl/ca.crt:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt:ro
       - ./priv/ssl/ca.key:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.key:ro
 
       # Bootstrap GPG fingerprints for pre-verified users
-      - ./priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:ro
+      # Read-write so bootstrap script can export GPG keys from inside container
+      - ./priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:rw
+
+      # Shared GPG keyring - allows GPG key generation inside container
+      # Keys generated in container are available on host and vice versa
+      - ${HOME}/.gnupg:/home/cryptic/.gnupg:rw
 
       # Persistent data volumes (logs and CA database)
       - cryptic-logs:/opt/cryptic/logs
@@ -61,7 +66,7 @@ services:
 
   # Cryptic TUI Client (interactive terminal UI)
   # NOTE: Requires cryptic-tui repository as sibling directory during build
-  # See QUICKSTART-DOCKER-TUI.md for setup instructions
+  # See docs/DOCKER.md for setup instructions
   cryptic-tui:
     build:
       context: ..  # Parent directory to access both cryptic/ and cryptic-tui/
@@ -115,6 +120,11 @@ services:
       # - cryptic_chat_storage writes to SQLite database
       # - Application writes log files
       - ${HOME}/.cryptic:/home/cryptic/.cryptic
+      
+      # Shared GPG keyring - required for certificate auto-renewal
+      # The GPG secret key is needed to sign CSRs when renewing certificates
+      # Keys are shared between host and container
+      - ${HOME}/.gnupg:/home/cryptic/.gnupg:rw
     
     # NOTE: No depends_on - client can connect to any server (local or remote)
     # If connecting to local cryptic-server, start it separately first
