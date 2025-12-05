@@ -73,37 +73,37 @@ services:
       dockerfile: cryptic/Dockerfile.tui
     image: cryptic-tui:latest
     container_name: cryptic-tui
-    
+
     # Interactive mode with TTY
     stdin_open: true
     tty: true
-    
+
     # Environment variables (map to bin/cryptic script options)
     environment:
       # Username for authentication (required)
       # Set via CRYPTIC_USERNAME environment variable when running:
       # CRYPTIC_USERNAME=kalle docker compose run --rm cryptic-tui
       - CRYPTIC_USERNAME=${CRYPTIC_USERNAME:-alice}
-      
+
       # Server connection details (can be overridden)
       # Default to host.docker.internal which maps to host machine via extra_hosts
       # Override with CRYPTIC_SERVER_HOST=cryptic-server for Docker server
       # or CRYPTIC_SERVER_HOST=relay.example.com for remote server
       - CRYPTIC_SERVER_HOST=${CRYPTIC_SERVER_HOST:-host.docker.internal}
       - CRYPTIC_SERVER_PORT=${CRYPTIC_SERVER_PORT:-8443}
-      
+
       # Erlang node configuration
       - CRYPTIC_NODE_NAME=${CRYPTIC_NODE_NAME:-localhost}
-      
+
       # Enable encrypted message storage (optional)
       - CRYPTIC_ENABLE_DB=${CRYPTIC_ENABLE_DB:-false}
-      
+
       # Debug logging (optional)
       - CRYPTIC_DEBUG=${CRYPTIC_DEBUG:-false}
-      
+
       # Terminal configuration
       - TERM=xterm-256color
-    
+
     # Volume mounts for cryptographic keys, database, and logs
     volumes:
       # CRITICAL: Mount entire .cryptic directory for persistent storage
@@ -120,25 +120,25 @@ services:
       # - cryptic_chat_storage writes to SQLite database
       # - Application writes log files
       - ${HOME}/.cryptic:/home/cryptic/.cryptic
-      
+
       # Shared GPG keyring - required for certificate auto-renewal
       # The GPG secret key is needed to sign CSRs when renewing certificates
       # Keys are shared between host and container
       - ${HOME}/.gnupg:/home/cryptic/.gnupg:rw
-    
+
     # NOTE: No depends_on - client can connect to any server (local or remote)
     # If connecting to local cryptic-server, start it separately first
-    
+
     # Network configuration (only needed if connecting to local server)
     networks:
       - cryptic-network
-    
+
     # Map host.docker.internal in container to host machine (for Mac/Windows Docker Desktop)
     # This allows container to connect to server running on host machine
     # Note: Don't use "localhost" as it conflicts with container's own 127.0.0.1
     extra_hosts:
       - "cryptic-server:host-gateway"
-    
+
     # Don't auto-restart (this is an interactive client)
     restart: "no"
 

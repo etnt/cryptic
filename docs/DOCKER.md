@@ -50,19 +50,36 @@ docker pull ghcr.io/etnt/cryptic:latest
 
 # Setup the server certificates (one-time step)
 # Creates ca.crt, ca.key, server.crt, server.key in ./priv/ssl/
-mkdir -p priv/ssl
+mkdir -p priv/ssl priv/ca/bootstrap
 docker run -it --rm \
   -v $(pwd)/priv/ssl:/opt/cryptic/certs \
   ghcr.io/etnt/cryptic:latest sh -c 'DIR=/opt/cryptic/certs generate-mtls-certs.sh'
 
+# Bootstrap the first admin user BEFORE starting the server
+# This creates a GPG key and exports it to priv/ca/bootstrap/
+# The server will read this directory at startup to register the admin
+docker run -it --rm \
+  -v $(pwd)/priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:rw \
+  -v ~/.gnupg:/home/cryptic/.gnupg:rw \
+  ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin alice'
+
 # Run the server (requires certificates in ./priv/ssl/)
-# Make sure you have: server.crt, server.key, ca.crt
+# Mounts:
+#   - Server certs (ro): server.crt, server.key, ca.crt
+#   - CA certs for issuance (ro): ca.crt, ca.key in release priv dir
+#   - Bootstrap dir (ro): pre-registered admin GPG keys
+#   - GPG keyring (rw): shared with host for signing operations
+#   - Persistent volumes: logs and CA database
 docker run -d \
   --name cryptic-server \
   -p 8443:8443 \
   -v $(pwd)/priv/ssl/server.crt:/opt/cryptic/certs/server.crt:ro \
   -v $(pwd)/priv/ssl/server.key:/opt/cryptic/certs/server.key:ro \
   -v $(pwd)/priv/ssl/ca.crt:/opt/cryptic/certs/ca.crt:ro \
+  -v $(pwd)/priv/ssl/ca.crt:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt:ro \
+  -v $(pwd)/priv/ssl/ca.key:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.key:ro \
+  -v $(pwd)/priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:ro \
+  -v ~/.gnupg:/home/cryptic/.gnupg:rw \
   -v cryptic-logs:/opt/cryptic/logs \
   -v cryptic-data:/opt/cryptic/data \
   -e CRYPTIC_SERVER_HOST=0.0.0.0 \
@@ -77,18 +94,9 @@ docker stop cryptic-server && docker rm cryptic-server
 
 ### First Admin Bootstrap
 
-Before any users can obtain certificates, you need to register the first admin user.
-The server container includes a `bootstrap-admin` script that makes this easy:
-
-```bash
-# With the server running, bootstrap the first admin user
-docker exec -it cryptic-server bootstrap-admin alice
-```
-
-This script will:
-1. Create a GPG key for the admin user (inside the container)
-2. Export the public key to the bootstrap directory
-3. Reload the registration in the running server
+The admin bootstrap happens **before** starting the server (see above). The `bootstrap-admin`
+script creates a GPG key and exports it to the bootstrap directory, which the server reads
+at startup.
 
 **Now the admin can onboard** from their client machine:
 
@@ -109,12 +117,23 @@ During onboarding:
 Once the first admin has a certificate, they can register other users' GPG keys
 through the admin interface, allowing those users to complete onboarding.
 
-**Note**: If you need to bootstrap multiple admin users before starting, you can
-run the bootstrap script multiple times:
+**Note**: If you need to bootstrap multiple admin users before starting the server,
+run the bootstrap script multiple times before `docker run`:
 
 ```bash
-docker exec -it cryptic-server bootstrap-admin alice
-docker exec -it cryptic-server bootstrap-admin bob
+# Bootstrap multiple admins (before starting server)
+docker run -it --rm \
+  -v $(pwd)/priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:rw \
+  -v ~/.gnupg:/home/cryptic/.gnupg:rw \
+  ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin alice'
+
+docker run -it --rm \
+  -v $(pwd)/priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:rw \
+  -v ~/.gnupg:/home/cryptic/.gnupg:rw \
+  ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin bob'
+
+# Then start the server (it will read all GPG keys from priv/ca/bootstrap/)
+docker run -d --name cryptic-server ...
 ```
 
 ## The Client
