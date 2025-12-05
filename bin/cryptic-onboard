@@ -681,6 +681,36 @@ EOF
     fi
     echo ""
 
+    # Export GPG secret key for container-based certificate renewal
+    # This allows Docker containers to import the GPG key and sign CSRs for renewal
+    GPG_SECRET_KEY_FILE="${CERT_DIR}/gpg_secret_key.asc"
+    info "Exporting GPG secret key for container certificate renewal..."
+    echo ""
+    warn "SECURITY NOTE: Your GPG secret key will be exported to:"
+    echo "  $GPG_SECRET_KEY_FILE"
+    echo ""
+    echo "This is needed for automatic certificate renewal in Docker containers."
+    echo "The key is passphrase-protected. Keep this file secure!"
+    echo ""
+    read -p "Export GPG secret key? [Y/n]: " export_gpg
+    export_gpg=${export_gpg:-Y}
+
+    if [[ "$export_gpg" =~ ^[Yy] ]]; then
+        # Export the secret key with ! suffix to force exact key match
+        if gpg --armor --export-secret-keys "${GPG_FP}!" > "$GPG_SECRET_KEY_FILE" 2>/dev/null; then
+            chmod 600 "$GPG_SECRET_KEY_FILE"
+            success "GPG secret key exported"
+            echo "  File: $GPG_SECRET_KEY_FILE"
+        else
+            warn "Failed to export GPG secret key."
+            warn "Certificate auto-renewal in containers will not work."
+        fi
+    else
+        info "Skipped GPG secret key export."
+        warn "Certificate auto-renewal in containers will not work without the GPG key."
+    fi
+    echo ""
+
     # Save server-specific config for this user/server combination
     SERVER_CONFIG="${CERT_DIR}/config.json"
     jq -n \

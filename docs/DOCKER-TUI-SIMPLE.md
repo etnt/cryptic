@@ -137,6 +137,7 @@ Your `~/.cryptic` directory will look like:
 │       │   ├── alice.crt          # Client certificate
 │       │   ├── alice.key          # Private key (mode 600)
 │       │   └── ca.crt             # CA certificate
+│       ├── gpg_secret_key.asc     # GPG secret key for auto-renewal
 │       ├── keys.encrypted         # Identity keys (X3DH)
 │       ├── sessions/              # Double Ratchet states
 │       │   ├── bob.session

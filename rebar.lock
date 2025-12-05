@@ -3,7 +3,7 @@
  {<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.16.0">>},0},
  {<<"erl_gpg">>,
   {git,"https://github.com/etnt/erl_gpg.git",
-       {ref,"8c2ef8a0edd037a867de1ab7098cd7cb8a8186cf"}},
+       {ref,"adea5da8a7f78964d84b50c8a921a44ffa7af3e1"}},
   0},
  {<<"esqlite">>,
   {git,"https://github.com/mmzeeman/esqlite.git",
