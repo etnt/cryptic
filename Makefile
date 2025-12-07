@@ -35,7 +35,7 @@ clean:
 lux-tests: send_messages-lux console_basic_flow-lux
 
 console_basic_flow-lux:
-./_build/default/lib/lux/bin/lux test/lux/console_basic_flow.lux
+	./_build/default/lib/lux/bin/lux test/lux/console_basic_flow.lux
 
 send_messages-lux:
 	./_build/default/lib/lux/bin/lux ./test/send_messages.lux

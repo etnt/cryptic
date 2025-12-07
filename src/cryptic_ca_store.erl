@@ -184,10 +184,25 @@ init_ca_environment() ->
 %%
 %% Reads and parses the CA root certificate. Returns an OTPCertificate
 %% record that can be used for certificate operations.
+%%
+%% Checks in order:
+%% 1. CRYPTIC_CA_CERT_FILE environment variable
+%% 2. ca_cert_file application environment
 -spec load_ca_cert() -> {ok, #'OTPCertificate'{}} | {error, term()}.
 load_ca_cert() ->
-    case application:get_env(cryptic, ca_cert_file) of
-        {ok, CertFile} ->
+    CertFile = case os:getenv("CRYPTIC_CA_CERT_FILE") of
+        false ->
+            case application:get_env(cryptic, ca_cert_file) of
+                {ok, File} -> File;
+                undefined -> undefined
+            end;
+        EnvFile ->
+            EnvFile
+    end,
+    case CertFile of
+        undefined ->
+            {error, ca_cert_file_not_configured};
+        _ ->
             case file:read_file(CertFile) of
                 {ok, CertPEM} ->
                     try
@@ -204,9 +219,7 @@ load_ca_cert() ->
                     ?error("Failed to read CA certificate ~s: ~p",
                            [CertFile, Reason]),
                     Error
-            end;
-        undefined ->
-            {error, ca_cert_file_not_configured}
+            end
     end.
 
 %% @doc Load CA private key from PEM file
@@ -215,10 +228,25 @@ load_ca_cert() ->
 %% record for ECDSA keys or RSAPrivateKey for RSA keys.
 %%
 %% The key must match the algorithm used in the CA certificate.
+%%
+%% Checks in order:
+%% 1. CRYPTIC_CA_KEY_FILE environment variable
+%% 2. ca_key_file application environment
 -spec load_ca_key() -> {ok, tuple()} | {error, term()}.
 load_ca_key() ->
-    case application:get_env(cryptic, ca_key_file) of
-        {ok, KeyFile} ->
+    KeyFile = case os:getenv("CRYPTIC_CA_KEY_FILE") of
+        false ->
+            case application:get_env(cryptic, ca_key_file) of
+                {ok, File} -> File;
+                undefined -> undefined
+            end;
+        EnvFile ->
+            EnvFile
+    end,
+    case KeyFile of
+        undefined ->
+            {error, ca_key_file_not_configured};
+        _ ->
             case file:read_file(KeyFile) of
                 {ok, KeyPEM} ->
                     try
@@ -235,9 +263,7 @@ load_ca_key() ->
                     ?error("Failed to read CA private key ~s: ~p",
                            [KeyFile, Reason]),
                     Error
-            end;
-        undefined ->
-            {error, ca_key_file_not_configured}
+            end
     end.
 
 %% @doc Create database tables

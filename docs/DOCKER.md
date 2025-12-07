@@ -76,6 +76,8 @@ docker run -d \
   -e CRYPTIC_SERVER_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.crt \
   -e CRYPTIC_SERVER_KEY=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.key \
   -e CRYPTIC_CA_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt \
+  -e CRYPTIC_CA_CERT_FILE=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt \
+  -e CRYPTIC_CA_KEY_FILE=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.key \
   ghcr.io/etnt/cryptic:latest
 
 # Check server logs
