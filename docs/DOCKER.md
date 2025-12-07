@@ -61,31 +61,22 @@ docker run -it --rm \
 gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 
 # Step 2: Export your GPG public key to the bootstrap directory
-docker run -it --rm \
-  -v $(pwd)/priv/ca/bootstrap:/bootstrap:rw \
-  -v ~/.gnupg:/gnupg:ro \
-  ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin alice'
+gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
 
 # Run the server (requires certificates in ./priv/ssl/)
 # Mounts:
-#   - Server certs (ro): server.crt, server.key, ca.crt
-#   - CA certs for issuance (ro): ca.crt, ca.key in release priv dir
-#   - Bootstrap dir (ro): pre-registered admin GPG keys
-#   - GPG keyring (rw): shared with host for signing operations
+#   - priv dir: certificates (ssl/), bootstrap GPG keys (ca/bootstrap/)
 #   - Persistent volumes: logs and CA database
 docker run -d \
   --name cryptic-server \
   -p 8443:8443 \
-  -v $(pwd)/priv/ssl/server.crt:/opt/cryptic/certs/server.crt:ro \
-  -v $(pwd)/priv/ssl/server.key:/opt/cryptic/certs/server.key:ro \
-  -v $(pwd)/priv/ssl/ca.crt:/opt/cryptic/certs/ca.crt:ro \
-  -v $(pwd)/priv/ssl/ca.crt:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt:ro \
-  -v $(pwd)/priv/ssl/ca.key:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.key:ro \
-  -v $(pwd)/priv/ca/bootstrap:/opt/cryptic/lib/cryptic-1.0.0/priv/ca/bootstrap:ro \
-  -v ~/.gnupg:/home/cryptic/.gnupg:rw \
-  -v cryptic-logs:/opt/cryptic/logs \
-  -v cryptic-data:/opt/cryptic/data \
+  -v $(pwd)/priv:/opt/cryptic/lib/cryptic-1.0.0/priv:ro \
+  -v logs:/opt/cryptic/logs \
+  -v data:/opt/cryptic/data \
   -e CRYPTIC_SERVER_HOST=0.0.0.0 \
+  -e CRYPTIC_SERVER_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.crt \
+  -e CRYPTIC_SERVER_KEY=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.key \
+  -e CRYPTIC_CA_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt \
   ghcr.io/etnt/cryptic:latest
 
 # Check server logs
@@ -104,12 +95,9 @@ The admin bootstrap happens **before** starting the server:
    gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
    ```
 
-2. **Export the key** to the bootstrap directory:
+2. **Export the public key** to the bootstrap directory:
    ```bash
-   docker run -it --rm \
-     -v $(pwd)/priv/ca/bootstrap:/bootstrap:rw \
-     -v ~/.gnupg:/gnupg:ro \
-     ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin alice'
+   gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
    ```
 
 3. **Start the server** - it will read the bootstrap directory and register the admin.
@@ -125,7 +113,7 @@ docker run -it --rm --name cryptic-client \
 ```
 
 During onboarding:
-1. Generate a GPG key (or use existing one)
+1. Use your existing GPG key (the one you just created)
 2. The fingerprint is already registered (from the bootstrap step)
 3. Request your TLS certificate
 4. Start using Cryptic!
@@ -137,20 +125,13 @@ through the admin interface, allowing those users to complete onboarding.
 each admin generates their GPG key and exports it:
 
 ```bash
-# Each admin generates their key on their machine
+# Each admin generates their key on their machine (no passphrase needed)
 gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 gpg --quick-generate-key 'bob <bob@cryptic.local>' rsa4096
 
-# Export each key to the bootstrap directory
-docker run -it --rm \
-  -v $(pwd)/priv/ca/bootstrap:/bootstrap:rw \
-  -v ~/.gnupg:/gnupg:ro \
-  ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin alice'
-
-docker run -it --rm \
-  -v $(pwd)/priv/ca/bootstrap:/bootstrap:rw \
-  -v ~/.gnupg:/gnupg:ro \
-  ghcr.io/etnt/cryptic:latest sh -c 'bootstrap-admin bob'
+# Export each public key to the bootstrap directory
+gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
+gpg --armor --export bob@cryptic.local > priv/ca/bootstrap/bob.gpg
 
 # Then start the server (it will read all GPG keys from priv/ca/bootstrap/)
 docker run -d --name cryptic-server ...
