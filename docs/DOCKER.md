@@ -64,13 +64,12 @@ gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
 
 # Run the server (requires certificates in ./priv/ssl/)
-# Mounts:
-#   - priv dir: certificates (ssl/), bootstrap GPG keys (ca/bootstrap/)
-#   - Persistent volumes: logs and CA database
+# NOTE: Mount subdirectories only, NOT the entire priv/ dir (it contains the NIF)
 docker run -d \
   --name cryptic-server \
   -p 8443:8443 \
-  -v $(pwd)/priv:/opt/cryptic/lib/cryptic-1.0.0/priv:ro \
+  -v $(pwd)/priv/ssl:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl:ro \
+  -v $(pwd)/priv/ca:/opt/cryptic/lib/cryptic-1.0.0/priv/ca:ro \
   -v logs:/opt/cryptic/logs \
   -v data:/opt/cryptic/data \
   -e CRYPTIC_SERVER_HOST=0.0.0.0 \
