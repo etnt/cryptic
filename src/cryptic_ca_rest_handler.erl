@@ -363,14 +363,24 @@ issue_certificate(Req, State, DbRef, CsrPem, GpgFp, Identity) ->
                 ok -> 
                     ok;
                 {error, 1555} ->
-                    %% Duplicate serial number - this indicates the serial counter is out of sync
-                    %% This can happen if the server crashed after issuing a cert but before 
-                    %% persisting the serial counter. The solution is to restart the server
-                    %% so it re-syncs from the database.
-                    ?error("Certificate serial ~s already exists - serial counter out of sync. "
-                           "Please restart the server to re-sync serial numbers.", [Serial]),
-                    error({duplicate_serial, Serial, 
-                           "Serial counter out of sync. Restart server to fix."});
+                    %% Duplicate serial number - serial counter is out of sync with database.
+                    %% This can happen if:
+                    %% 1. Server crashed between cert issue and serial backup
+                    %% 2. Certificate insert failed but serial counter was already incremented
+                    %% 
+                    %% Solution: Re-sync the counter with database and retry
+                    ?warning("Certificate serial ~s already exists - re-syncing serial counter", [Serial]),
+
+                    case cryptic_ca_serial:resync() of
+                        {ok, NewSerial} ->
+                            ?info("Serial counter re-synced to ~p. Please retry the certificate request.", [NewSerial]),
+                            error({duplicate_serial_retry, Serial, NewSerial,
+                                   "Serial counter was out of sync and has been corrected. Please retry your request."});
+                        {error, ResyncReason} ->
+                            ?error("Failed to re-sync serial counter: ~p. Server restart required.", [ResyncReason]),
+                            error({duplicate_serial, Serial, 
+                                   "Serial counter out of sync. Restart server to fix."})
+                    end;
                 {error, Reason} ->
                     ?error("Failed to insert certificate ~s: ~p", [Serial, Reason]),
                     error({cert_insert_failed, Reason})

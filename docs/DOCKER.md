@@ -64,14 +64,15 @@ gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
 
 # Run the server (requires certificates in ./priv/ssl/)
-# NOTE: Mount subdirectories only, NOT the entire priv/ dir (it contains the NIF)
+# Here we show how to expose port 9898 instead of the default (8443)
+mkdir -p logs data/ca/bootstrap
 docker run -d \
   --name cryptic-server \
-  -p 8443:8443 \
+  -p 9898:8443 \
   -v $(pwd)/priv/ssl:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl:ro \
   -v $(pwd)/priv/ca:/opt/cryptic/lib/cryptic-1.0.0/priv/ca:ro \
-  -v logs:/opt/cryptic/logs \
-  -v data:/opt/cryptic/data \
+  -v $(pwd)/logs:/opt/cryptic/logs \
+  -v $(pwd)/data:/opt/cryptic/data \
   -e CRYPTIC_SERVER_HOST=0.0.0.0 \
   -e CRYPTIC_SERVER_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.crt \
   -e CRYPTIC_SERVER_KEY=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.key \

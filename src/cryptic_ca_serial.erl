@@ -20,7 +20,8 @@
          current/0,
          reset/1,
          backup/0,
-         restore/1]).
+         restore/1,
+         resync/0]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -85,6 +86,12 @@ backup() ->
 restore(DbRef) ->
     gen_server:call(?SERVER, {restore, DbRef}).
 
+%% @doc Re-sync serial counter with database (query MAX and update)
+%% Use this when duplicate serial errors occur to recover without restart.
+-spec resync() -> {ok, NewSerial :: non_neg_integer()} | {error, term()}.
+resync() ->
+    gen_server:call(?SERVER, resync).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -136,6 +143,19 @@ handle_call({restore, DbRef}, _From, State) ->
             {reply, ok, State#state{db_ref = DbRef}};
         {error, _} = Error ->
             {reply, Error, State}
+    end;
+
+handle_call(resync, _From, State) ->
+    case State#state.db_ref of
+        undefined ->
+            {reply, {error, no_database}, State};
+        DbRef ->
+            case resync_from_db(DbRef) of
+                {ok, NewSerial} ->
+                    {reply, {ok, NewSerial}, State};
+                {error, _} = Error ->
+                    {reply, Error, State}
+            end
     end;
 
 handle_call(_Request, _From, State) ->
@@ -278,3 +298,40 @@ write_to_db(DbRef, Serial) ->
 should_backup(Serial, Now, LastBackup) ->
     % Backup every 100 serials or every 5 minutes
     (Serial rem 100 == 0) orelse (Now - LastBackup >= 300).
+
+%% @private Re-sync counter from database by querying MAX serial
+resync_from_db(DbRef) ->
+    MaxSerialSQL = <<"SELECT MAX(CAST(serial AS INTEGER)) FROM certificates">>,
+    case esqlite3:q(DbRef, MaxSerialSQL) of
+        [[MaxSerial]] when is_integer(MaxSerial) ->
+            % Start from next serial
+            NextSerial = MaxSerial + 1,
+            ets:insert(?TABLE, {?COUNTER_KEY, NextSerial}),
+            error_logger:info_msg(
+                "~p: Re-synced serial counter to ~p (from max certificate serial ~p)~n",
+                [?MODULE, NextSerial, MaxSerial]),
+            % Also update database backup
+            write_to_db(DbRef, NextSerial),
+            {ok, NextSerial};
+        [[null]] ->
+            % No certificates yet, start from 1
+            ets:insert(?TABLE, {?COUNTER_KEY, 1}),
+            error_logger:info_msg(
+                "~p: Re-synced serial counter to 1 (no certificates found)~n",
+                [?MODULE]),
+            write_to_db(DbRef, 1),
+            {ok, 1};
+        [[undefined]] ->
+            % No certificates yet (undefined variant), start from 1
+            ets:insert(?TABLE, {?COUNTER_KEY, 1}),
+            error_logger:info_msg(
+                "~p: Re-synced serial counter to 1 (no certificates found - undefined)~n",
+                [?MODULE]),
+            write_to_db(DbRef, 1),
+            {ok, 1};
+        {error, Reason} ->
+            error_logger:error_msg(
+                "~p: Failed to re-sync serial counter: ~p~n",
+                [?MODULE, Reason]),
+            {error, Reason}
+    end.
