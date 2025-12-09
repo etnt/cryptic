@@ -36,7 +36,7 @@ fix_permissions() {
         # Get the actual owner UID
         local owner_uid=$(stat -c %u "$dir" 2>/dev/null || stat -f %u "$dir" 2>/dev/null || echo "0")
         local cryptic_uid=$(id -u cryptic)
-        
+
         if [ "$owner_uid" != "$cryptic_uid" ]; then
             info "Fixing permissions for $dir..."
             chown -R cryptic:cryptic "$dir" 2>/dev/null || warn "Could not change ownership of $dir"
@@ -47,7 +47,7 @@ fix_permissions() {
 # Set up Erlang cookie
 setup_erlang_cookie() {
     local cookie_file="/home/cryptic/.erlang.cookie"
-    
+
     if [ -n "$ERLANG_COOKIE" ]; then
         info "Setting up Erlang cookie from environment..."
         echo -n "$ERLANG_COOKIE" > "$cookie_file"
@@ -74,14 +74,14 @@ setup_erlang_cookie() {
 # Verify certificate files exist
 check_certificates() {
     local cert_dir="/home/cryptic/.cryptic/${CRYPTIC_USERNAME}/${CRYPTIC_SERVER_HOST}_${CRYPTIC_SERVER_PORT}/certificates"
-    
+
     if [ ! -d "$cert_dir" ]; then
         warn "Certificate directory not found: $cert_dir"
         warn "You may need to run onboarding first:"
         warn "  docker compose run --rm cryptic-tui sh -c \"cryptic --onboard\""
         return 1
     fi
-    
+
     if [ ! -f "$cert_dir/${CRYPTIC_USERNAME}.crt" ] || \
        [ ! -f "$cert_dir/${CRYPTIC_USERNAME}.key" ] || \
        [ ! -f "$cert_dir/ca.crt" ]; then
@@ -93,7 +93,7 @@ check_certificates() {
         warn "Run onboarding: docker compose run --rm cryptic-tui sh -c \"cryptic --onboard\""
         return 1
     fi
-    
+
     success "Certificates found in $cert_dir"
     return 0
 }
@@ -101,13 +101,13 @@ check_certificates() {
 # Check GPG keyring is available (mounted from host)
 check_gpg_keyring() {
     local gpg_home="/home/cryptic/.gnupg"
-    
+
     if [ ! -d "$gpg_home" ]; then
         warn "GPG keyring not mounted: $gpg_home"
         warn "Certificate auto-renewal requires ~/.gnupg to be mounted."
         return 1
     fi
-    
+
     # Check if there are any secret keys
     if su-exec cryptic gpg --list-secret-keys 2>/dev/null | grep -q "^sec"; then
         success "GPG keyring available with secret keys"
@@ -143,39 +143,35 @@ EOF
 
 # Main execution
 main() {
-    info "Cryptic TUI Container Starting..."
-    
     # Fix permissions on mounted volumes
     fix_permissions "/home/cryptic/.cryptic"
-    
+
     # Set up Erlang cookie
     setup_erlang_cookie
-    
-    # Check certificates (warn but don't fail - user might be onboarding)
-    check_certificates || warn "Continuing without certificates (use --onboard to set up)..."
-    
-    # Check GPG keyring is available (warn but don't fail)
-    check_gpg_keyring || warn "Continuing without GPG keyring..."
-    
-    # Show connection info
-    show_connection_info
-    
-    # If command is cryptic-tui (default), run bin/cryptic --tui
-    if [ "$1" = "cryptic-tui" ]; then
-        info "Starting Cryptic TUI via bin/cryptic --tui..."
-        
-        # Execute as cryptic user with bin/cryptic script
-        exec su-exec cryptic /opt/cryptic/bin/cryptic --tui \
-            -u "${CRYPTIC_USERNAME}" \
-            -s "${CRYPTIC_SERVER_HOST}" \
-            -p "${CRYPTIC_SERVER_PORT}" \
-            --name "${CRYPTIC_NODE_NAME}" \
-            $([ "${CRYPTIC_ENABLE_DB}" = "true" ] && echo "--enable-db")
-    else
-        # Run custom command as cryptic user
-        info "Running custom command: $@"
+
+    # If arguments are given, just execute the command directly as cryptic user
+    if [ $# -gt 0 ]; then
         exec su-exec cryptic "$@"
     fi
+
+    # Check certificates (warn but don't fail - user might need to onboard)
+    check_certificates || warn "Continuing without certificates (use --onboard to set up)..."
+
+    # Check GPG keyring is available (warn but don't fail)
+    check_gpg_keyring || warn "Continuing without GPG keyring..."
+
+    # Show connection info
+    show_connection_info
+
+    info "Starting Cryptic TUI via bin/cryptic --tui..."
+
+    # Execute as cryptic user with bin/cryptic script
+    exec su-exec cryptic /opt/cryptic/bin/cryptic --tui \
+        -u "${CRYPTIC_USERNAME}" \
+        -s "${CRYPTIC_SERVER_HOST}" \
+        -p "${CRYPTIC_SERVER_PORT}" \
+        --name "${CRYPTIC_NODE_NAME}" \
+        $([ "${CRYPTIC_ENABLE_DB}" = "true" ] && echo "--enable-db")
 }
 
 main "$@"

@@ -8,36 +8,51 @@ This guide explains how to deploy the Cryptic client and or the
 
 **Run the latest client image:**
 
-[Demo](https://youtu.be/acNHqzHia3o?si=_4mQuE4KQooxb1UM)
+[Video Demo](https://youtu.be/acNHqzHia3o?si=_4mQuE4KQooxb1UM)
 
 ```bash
 # Get the latest Client docker image
 docker pull ghcr.io/etnt/cryptic-tui:latest
 
+# Create a separate GPG directory for Docker (avoids conflicts with host's keyboxd)
+mkdir -p ~/.cryptic-gpg
+
 # Run the Cryptic Onboarding script
-#  1. Generate a GPG key pair (or use existing one from ~/.gnupg)
+#  1. Generate a GPG key pair (stored in ~/.cryptic-gpg on host)
 #  2. Export the generated key
 #  3. Send the key and fingerprint to the admin
-#  4. WAIT! - Do not exit the onboard script (the container will be gone) 
+#  4. WAIT! - Do not exit the onboard script until certificate is received
 #  5. When admin has registered your key: Request a TLS certificate from server
 #    If your server is running on localhost on your Host machine, specify:
 #    cryptic-server as your server address (see the: `--add-host` below)
 #  6. Exit the onboard script
 # You should now see your certificates at ~/.cryptic/<user>/cryptic-server_<port>
 #
-# NOTE: ~/.gnupg is mounted so your GPG keyring is shared with the container.
-#       This is required for automatic certificate renewal.
+# NOTE: We use ~/.cryptic-gpg instead of ~/.gnupg because modern macOS/Linux
+#       GPG uses keyboxd daemon which doesn't work across container boundaries.
+#       The container manages its own GPG keyring that persists on the host.
 docker run -it --rm --name cryptic-client \
            -v ~/.cryptic:/home/cryptic/.cryptic \
-           -v ~/.gnupg:/home/cryptic/.gnupg \
+           -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
            ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
 
 # Start the Cryptic client with your username (e.g `franz`)
 # You'll be prompted for a Passphrase which is used to encrypt your local DB
+
+# Method 1: Using environment variables
 docker run -it --rm --name cryptic-client \
            -v ~/.cryptic:/home/cryptic/.cryptic \
-           -v ~/.gnupg:/home/cryptic/.gnupg \
+           -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
+           --add-host=cryptic-server:host-gateway \
+           -e CRYPTIC_USERNAME=franz \
+           -e CRYPTIC_ENABLE_DB=true \
+           ghcr.io/etnt/cryptic-tui:latest
+
+# Method 2: Using command-line flags 
+docker run -it --rm --name cryptic-client \
+           -v ~/.cryptic:/home/cryptic/.cryptic \
+           -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
            ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic -u franz --enable-db --tui'
 ```
@@ -47,6 +62,10 @@ docker run -it --rm --name cryptic-client \
 ```bash
 # Get the latest Server docker image
 docker pull ghcr.io/etnt/cryptic:latest
+
+# Create a directory for storing the Cryptic server data
+mkdir ~/.cryptic_server
+cd ~/.cryptic_server
 
 # Setup the server certificates (one-time step)
 # Creates ca.crt, ca.key, server.crt, server.key in ./priv/ssl/
@@ -65,6 +84,7 @@ gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
 
 # Run the server (requires certificates in ./priv/ssl/)
 # Here we show how to expose port 9898 instead of the default (8443)
+# For debug log output, add: -e CRYPTIC_DEBUG=true
 mkdir -p logs data/ca/bootstrap
 docker run -d \
   --name cryptic-server \
@@ -84,59 +104,8 @@ docker run -d \
 # Check server logs
 docker logs -f cryptic-server
 
-# Stop the server
+# Stop the server and remove the container
 docker stop cryptic-server && docker rm cryptic-server
-```
-
-### First Admin Bootstrap
-
-The admin bootstrap happens **before** starting the server:
-
-1. **Generate a GPG key** on your host machine (if you don't have one):
-   ```bash
-   gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
-   ```
-
-2. **Export the public key** to the bootstrap directory:
-   ```bash
-   gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
-   ```
-
-3. **Start the server** - it will read the bootstrap directory and register the admin.
-
-**Now the admin can onboard** from their client machine:
-
-```bash
-docker run -it --rm --name cryptic-client \
-  -v ~/.cryptic:/home/cryptic/.cryptic \
-  -v ~/.gnupg:/home/cryptic/.gnupg \
-  --add-host=cryptic-server:host-gateway \
-  ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
-```
-
-During onboarding:
-1. Use your existing GPG key (the one you just created)
-2. The fingerprint is already registered (from the bootstrap step)
-3. Request your TLS certificate
-4. Start using Cryptic!
-
-Once the first admin has a certificate, they can register other users' GPG keys
-through the admin interface, allowing those users to complete onboarding.
-
-**Note**: If you need to bootstrap multiple admin users before starting the server,
-each admin generates their GPG key and exports it:
-
-```bash
-# Each admin generates their key on their machine (no passphrase needed)
-gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
-gpg --quick-generate-key 'bob <bob@cryptic.local>' rsa4096
-
-# Export each public key to the bootstrap directory
-gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
-gpg --armor --export bob@cryptic.local > priv/ca/bootstrap/bob.gpg
-
-# Then start the server (it will read all GPG keys from priv/ca/bootstrap/)
-docker run -d --name cryptic-server ...
 ```
 
 ## The Client
@@ -336,14 +305,34 @@ The entrypoint script (`docker-tui-entrypoint.sh`) handles:
 
 #### Building the Image
 
+**Important**: The Dockerfile expects to be run from the **parent directory** containing both `cryptic/` and `cryptic-tui/` as subdirectories.
+
 Build the Docker image:
 ```bash
+# From the parent directory (containing both cryptic/ and cryptic-tui/)
+cd /path/to/parent-directory
+docker build -t cryptic-tui:latest -f cryptic/Dockerfile.tui .
+```
+
+Or using Docker Compose (handles build context automatically):
+```bash
+# From the cryptic directory
 docker compose build cryptic-tui
 ```
 
 Build without cache (fresh build):
 ```bash
 docker compose build --no-cache cryptic-tui
+```
+
+**Common Error**: If you get `COPY failed: file not found` errors, ensure you're building from the parent directory, not from within `cryptic/`:
+```bash
+# Wrong (from inside cryptic/)
+docker build -t cryptic-tui:latest -f Dockerfile.tui .  # ❌ Will fail
+
+# Correct (from parent directory)
+cd ..
+docker build -t cryptic-tui:latest -f cryptic/Dockerfile.tui .  # ✅ Works
 ```
 
 #### Running the Client
