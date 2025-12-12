@@ -177,7 +177,8 @@
     check_otpk_usage/2,
     cleanup_old_otpk/2,
     get_cryptic_dir/0,
-    get_cryptic_dir/3
+    get_cryptic_dir/3,
+    get_server_file/2
 ]).
 
 -include("cryptic.hrl").
@@ -1745,3 +1746,27 @@ get_cryptic_dir(Username, Server, Port) when is_binary(Server) ->
 get_cryptic_dir(Username, Server, Port) when is_list(Username), is_list(Server), is_integer(Port) ->
     ServerDir = Server ++ "_" ++ integer_to_list(Port),
     filename:join([get_cryptic_dir(), Username, ServerDir]).
+
+
+%% @doc Get server file path from environment variable or application config.
+%% If both are set, environment variable takes precedence.
+-spec get_server_file(string(), atom()) -> string() | undefined.
+get_server_file(EnvVar, AppVar) ->
+    case os:getenv(EnvVar) of
+        Empty when Empty == false orelse Empty == "" ->
+            %% Environment variable not set, use application config
+            case application:get_env(cryptic, AppVar) of
+                {ok, File} ->
+                    case os:getenv("CRYPTIC_SERVER_DIR") of
+                        false ->
+                            File;
+                        ServerDir ->
+                            filename:join([ServerDir, File])
+                    end;
+                undefined ->
+                    undefined
+            end;
+        EnvFile ->
+            %% Environment variable set with a value, use it directly
+            EnvFile
+    end.

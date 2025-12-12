@@ -73,12 +73,10 @@ RUN mkdir -p /opt/cryptic/certs /opt/cryptic/logs /opt/cryptic/data/ca /opt/cryp
 EXPOSE 8443
 
 # Set environment variables with defaults
+# Note: Certificate paths are configured in sys.config as relative paths
+# CRYPTIC_SERVER_DIR will be prepended by cryptic_lib:get_server_file/2
 ENV CRYPTIC_SERVER_HOST=0.0.0.0 \
     CRYPTIC_SERVER_PORT=8443 \
-    CRYPTIC_SERVER_CERT=/opt/cryptic/certs/server.crt \
-    CRYPTIC_SERVER_KEY=/opt/cryptic/certs/server.key \
-    CRYPTIC_CA_CERT=/opt/cryptic/certs/ca.crt \
-    CRYPTIC_CA_DB_FILE=/opt/cryptic/data/ca/cryptic_ca.db \
     CRYPTIC_EVENT_HANDLERS=cryptic_file_logger
 
 # Health check

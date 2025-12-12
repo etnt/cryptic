@@ -25,8 +25,10 @@
 %% @doc Get the bootstrap directory path
 -spec get_bootstrap_dir() -> file:filename().
 get_bootstrap_dir() ->
-    PrivDir = code:priv_dir(cryptic),
-    filename:join([PrivDir, "ca", "bootstrap"]).
+    cryptic_lib:get_server_file(
+        "CRYPTIC_BOOTSTRAP_DIR",
+        bootstrap_dir
+    ).
 
 %% @doc Load all GPG bootstrap registrations from filesystem
 %%

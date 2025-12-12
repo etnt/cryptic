@@ -550,40 +550,12 @@ start_websocket_mtls(Config) ->
         end,
 
     %% Get certificate paths from environment variables or defaults
-    PrivDir = code:priv_dir(cryptic),
-    CertFile =
-        case os:getenv("CRYPTIC_SERVER_CERT") of
-            false ->
-                maps:get(
-                    certfile,
-                    Config,
-                    filename:join([PrivDir, "ssl", "server.crt"])
-                );
-            EnvCert ->
-                EnvCert
-        end,
-    KeyFile =
-        case os:getenv("CRYPTIC_SERVER_KEY") of
-            false ->
-                maps:get(
-                    keyfile,
-                    Config,
-                    filename:join([PrivDir, "ssl", "server.key"])
-                );
-            EnvKey ->
-                EnvKey
-        end,
-    CACertFile =
-        case os:getenv("CRYPTIC_CA_CERT") of
-            false ->
-                maps:get(
-                    cacertfile,
-                    Config,
-                    filename:join([PrivDir, "ssl", "ca.crt"])
-                );
-            EnvCA ->
-                EnvCA
-        end,
+    CertFile = cryptic_lib:get_server_file("CRYPTIC_SERVER_CERT",
+                                           server_cert_file),
+    KeyFile = cryptic_lib:get_server_file("CRYPTIC_SERVER_KEY",
+                                           server_key_file),
+    CACertFile =cryptic_lib:get_server_file("CRYPTIC_CA_CERT",
+                                            ca_cert_file),
 
     %% WebSocket and CA API routes
     Dispatch = cowboy_router:compile([

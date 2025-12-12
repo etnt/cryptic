@@ -96,7 +96,7 @@ init_ca() ->
     %% Get database file path from config
     DbFile = get_ca_db_file(),
 
-    ?info("Initializing CA database: ~s", [DbFile]),
+    ?info("Initializing CA database at: ~p", [DbFile]),
 
     %% Ensure directory exists
     DbDir = filename:dirname(DbFile),
@@ -142,18 +142,27 @@ get_ca_db() ->
 %% @doc Get CA database file path from configuration.
 -spec get_ca_db_file() -> string().
 get_ca_db_file() ->
-    %% Try environment variable first
-    case os:getenv("CRYPTIC_CA_DB_FILE") of
-        false ->
-            %% Try application config
-            case application:get_env(cryptic, ca_db_file) of
-                {ok, Path} ->
-                    Path;
-                undefined ->
-                    %% Use default path
-                    PrivDir = code:priv_dir(cryptic),
-                    filename:join([PrivDir, "ca", "cryptic_ca.db"])
+    %% Debug: Check application environment
+    AppEnvResult = application:get_env(cryptic, ca_db_file),
+    ?info("DEBUG: application:get_env(cryptic, ca_db_file) = ~p", [AppEnvResult]),
+    
+    EnvVar = os:getenv("CRYPTIC_CA_DB_FILE"),
+    ?info("DEBUG: os:getenv(CRYPTIC_CA_DB_FILE) = ~p", [EnvVar]),
+    
+    ServerDir = os:getenv("CRYPTIC_SERVER_DIR"),
+    ?info("DEBUG: os:getenv(CRYPTIC_SERVER_DIR) = ~p", [ServerDir]),
+    
+    case cryptic_lib:get_server_file("CRYPTIC_CA_DB_FILE", ca_db_file) of
+        undefined ->
+            ?info("DEBUG: get_server_file returned undefined, using fallback", []),
+            %% Fallback to default path under CRYPTIC_SERVER_DIR
+            case ServerDir of
+                false ->
+                    "data/ca/cryptic_ca.db";
+                _ ->
+                    filename:join([ServerDir, "data/ca/cryptic_ca.db"])
             end;
-        EnvPath ->
-            EnvPath
+        DbFile ->
+            ?info("DEBUG: get_server_file returned: ~p", [DbFile]),
+            DbFile
     end.

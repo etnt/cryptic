@@ -190,15 +190,7 @@ init_ca_environment() ->
 %% 2. ca_cert_file application environment
 -spec load_ca_cert() -> {ok, #'OTPCertificate'{}} | {error, term()}.
 load_ca_cert() ->
-    CertFile = case os:getenv("CRYPTIC_CA_CERT_FILE") of
-        false ->
-            case application:get_env(cryptic, ca_cert_file) of
-                {ok, File} -> File;
-                undefined -> undefined
-            end;
-        EnvFile ->
-            EnvFile
-    end,
+    CertFile = get_cert_file(),
     case CertFile of
         undefined ->
             {error, ca_cert_file_not_configured};
@@ -222,6 +214,9 @@ load_ca_cert() ->
             end
     end.
 
+get_cert_file() ->
+    cryptic_lib:get_server_file("CRYPTIC_CA_CERT_FILE",  ca_cert_file).
+
 %% @doc Load CA private key from PEM file
 %%
 %% Reads and parses the CA private key. Returns an ECPrivateKey
@@ -234,15 +229,7 @@ load_ca_cert() ->
 %% 2. ca_key_file application environment
 -spec load_ca_key() -> {ok, tuple()} | {error, term()}.
 load_ca_key() ->
-    KeyFile = case os:getenv("CRYPTIC_CA_KEY_FILE") of
-        false ->
-            case application:get_env(cryptic, ca_key_file) of
-                {ok, File} -> File;
-                undefined -> undefined
-            end;
-        EnvFile ->
-            EnvFile
-    end,
+    KeyFile = get_ca_key(),
     case KeyFile of
         undefined ->
             {error, ca_key_file_not_configured};
@@ -266,10 +253,14 @@ load_ca_key() ->
             end
     end.
 
+get_ca_key() ->
+   cryptic_lib:get_server_file("CRYPTIC_CA_KEY_FILE",  ca_key_file).
+
+
 %% @doc Create database tables
 -spec create_tables(db_ref()) -> ok | {error, term()}.
 create_tables(Conn) ->
-    
+
     GpgIdentitiesTable =
         <<
             "\n"

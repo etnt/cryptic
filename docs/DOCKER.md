@@ -63,16 +63,17 @@ docker run -it --rm --name cryptic-client \
 # Get the latest Server docker image
 docker pull ghcr.io/etnt/cryptic:latest
 
-# Create a directory for storing the Cryptic server data
+# Create a directory for storing all Cryptic server data
 mkdir ~/.cryptic_server
 cd ~/.cryptic_server
 
 # Setup the server certificates (one-time step)
 # Creates ca.crt, ca.key, server.crt, server.key in ./priv/ssl/
-mkdir -p priv/ssl priv/ca/bootstrap
 docker run -it --rm \
-  -v $(pwd)/priv/ssl:/opt/cryptic/certs \
-  ghcr.io/etnt/cryptic:latest sh -c 'DIR=/opt/cryptic/certs generate-mtls-certs.sh'
+  -v $(pwd):/opt/cryptic/server_data \
+  -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
+  ghcr.io/etnt/cryptic:latest \
+  sh -c 'DIR=${CRYPTIC_SERVER_DIR}/priv/ssl generate-mtls-certs.sh'
 
 # Bootstrap the first admin user BEFORE starting the server
 # Step 1: Generate a GPG key on your host (if you don't have one)
@@ -80,25 +81,19 @@ docker run -it --rm \
 gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 
 # Step 2: Export your GPG public key to the bootstrap directory
+mkdir -p priv/ca/bootstrap
 gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
 
-# Run the server (requires certificates in ./priv/ssl/)
-# Here we show how to expose port 9898 instead of the default (8443)
+# Run the server with single directory mount
+# All server data (priv/, logs/, data/) will be in ~/.cryptic_server/
+# Note: Mount to /opt/cryptic/server_data (not /opt/cryptic which contains the Erlang release)
 # For debug log output, add: -e CRYPTIC_DEBUG=true
-mkdir -p logs data/ca/bootstrap
 docker run -d \
   --name cryptic-server \
-  -p 9898:8443 \
-  -v $(pwd)/priv/ssl:/opt/cryptic/lib/cryptic-1.0.0/priv/ssl:ro \
-  -v $(pwd)/priv/ca:/opt/cryptic/lib/cryptic-1.0.0/priv/ca:ro \
-  -v $(pwd)/logs:/opt/cryptic/logs \
-  -v $(pwd)/data:/opt/cryptic/data \
+  -p 8443:8443 \
+  -v $(pwd):/opt/cryptic/server_data:rw \
   -e CRYPTIC_SERVER_HOST=0.0.0.0 \
-  -e CRYPTIC_SERVER_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.crt \
-  -e CRYPTIC_SERVER_KEY=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/server.key \
-  -e CRYPTIC_CA_CERT=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt \
-  -e CRYPTIC_CA_CERT_FILE=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.crt \
-  -e CRYPTIC_CA_KEY_FILE=/opt/cryptic/lib/cryptic-1.0.0/priv/ssl/ca.key \
+  -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
   ghcr.io/etnt/cryptic:latest
 
 # Check server logs

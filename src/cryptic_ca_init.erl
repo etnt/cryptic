@@ -42,10 +42,18 @@ get_db_ref() ->
 
 %% @doc Initialize the CA database.
 init([]) ->
+    LogDir =
+        case os:getenv("CRYPTIC_SERVER_DIR") of
+            false ->
+                "logs";
+            ServerDir ->
+                filename:join([ServerDir, "logs"])
+        end,
+
     %% Set up event handlers for logging (event manager is already started by supervisor)
     cryptic_event_manager:setup_event_handlers(#{
         log_type => server,
-        log_dir => "logs"
+        log_dir => LogDir
     }),
 
     ?info("CA initializer starting...", []),
