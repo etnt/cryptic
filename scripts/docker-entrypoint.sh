@@ -25,10 +25,19 @@ echo "  ${CRYPTIC_SERVER_DIR}/priv/ca/bootstrap/*.gpg - Bootstrap GPG keys"
 echo "  ${CRYPTIC_SERVER_DIR}/data/                   - Database files"
 echo "  ${CRYPTIC_SERVER_DIR}/logs/                   - Log files"
 
-# Check if CA certificates exist, generate if missing
+# Check if CA certificates exist
 if [ ! -f "${CRYPTIC_SERVER_DIR}/priv/ssl/ca.crt" ] || [ ! -f "${CRYPTIC_SERVER_DIR}/priv/ssl/ca.key" ]; then
-    echo "INFO: CA certificates not found, generating..."
-    DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" /usr/local/bin/generate-mtls-certs.sh
+    echo "ERROR: CA certificates not found!"
+    echo "Please generate certificates before starting the server:"
+    echo ""
+    echo "  docker run -it --rm \\"
+    echo "    --entrypoint '' \\"
+    echo "    -v \$(pwd):/opt/cryptic/server_data \\"
+    echo "    -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \\"
+    echo "    <image-name> \\"
+    echo "    sh -c 'DIR=\"\${CRYPTIC_SERVER_DIR}/priv/ssl\" generate-mtls-certs.sh'"
+    echo ""
+    exit 1
 else
     echo "INFO: CA certificates found"
 fi
@@ -45,10 +54,10 @@ if [ "${CRYPTIC_DEBUG}" = "true" ]; then
     ls -ld "${CRYPTIC_SERVER_DIR}/data/ca"
     echo "DEBUG: ${CRYPTIC_SERVER_DIR}/data/ca contents:"
     ls -la "${CRYPTIC_SERVER_DIR}/data/ca/" || echo "Directory empty or not readable"
-    
+
     echo "DEBUG: ${CRYPTIC_SERVER_DIR}/priv contents:"
     ls -laR "${CRYPTIC_SERVER_DIR}/priv" 2>/dev/null || echo "Directory not readable"
-    
+
     echo "DEBUG: Environment variables:"
     echo "  CRYPTIC_SERVER_DIR=${CRYPTIC_SERVER_DIR}"
     echo "  CRYPTIC_CA_DB_FILE=${CRYPTIC_CA_DB_FILE}"

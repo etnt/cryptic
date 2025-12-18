@@ -578,7 +578,10 @@ EOF
     CSR_DATA=${CSR_DATA%x}
     # Use fingerprint with ! suffix to force exact key match
     # Sign the exact CSR data we're going to send
-    GPG_SIG=$(printf '%s' "$CSR_DATA" | gpg --armor --detach-sign --local-user "${GPG_FP}!" 2>/dev/null)
+    # Set GPG_TTY so pinentry knows which terminal to use for passphrase prompt
+    export GPG_TTY=$(tty)
+    # Redirect stderr to terminal (not /dev/null) so passphrase prompts appear
+    GPG_SIG=$(printf '%s' "$CSR_DATA" | gpg --armor --detach-sign --local-user "${GPG_FP}!" 2>/dev/tty)
     if [ $? -ne 0 ]; then
         echo ""
         error "Failed to sign CSR with GPG key.\n\nFingerprint: $GPG_FP\nUID: $GPG_EMAIL\n\nMake sure you have the private key and it's not expired."

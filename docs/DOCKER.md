@@ -37,7 +37,7 @@ docker run -it --rm --name cryptic-client \
            --add-host=cryptic-server:host-gateway \
            ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
 
-# Start the Cryptic client with your username (e.g `franz`)
+# Start the Cryptic client with your username (e.g `bob`)
 # You'll be prompted for a Passphrase which is used to encrypt your local DB
 
 # Method 1: Using environment variables
@@ -45,16 +45,18 @@ docker run -it --rm --name cryptic-client \
            -v ~/.cryptic:/home/cryptic/.cryptic \
            -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
-           -e CRYPTIC_USERNAME=franz \
+           -e CRYPTIC_USERNAME=bob \
            -e CRYPTIC_ENABLE_DB=true \
            ghcr.io/etnt/cryptic-tui:latest
 
-# Method 2: Using command-line flags 
+# Method 2: Using command-line flags
+#           (but here also increase log output details)
 docker run -it --rm --name cryptic-client \
            -v ~/.cryptic:/home/cryptic/.cryptic \
            -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
-           ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic -u franz --enable-db --tui'
+           -e CRYPTIC_DEBUG=true \
+           ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic -u bob --enable-db --tui'
 ```
 
 **Run the latest server image:**
@@ -64,27 +66,28 @@ docker run -it --rm --name cryptic-client \
 docker pull ghcr.io/etnt/cryptic:latest
 
 # Create a directory for storing all Cryptic server data
-mkdir ~/.cryptic_server
+mkdir -p ~/.cryptic_server
 cd ~/.cryptic_server
 
-# Setup the server certificates (one-time step)
-# Creates ca.crt, ca.key, server.crt, server.key in ./priv/ssl/
+# Step 1: Generate CA and server certificates (one-time setup)
+# This will prompt for optional DNS Subject Alternative Names (SANs)
 docker run -it --rm \
+  --entrypoint '' \
   -v $(pwd):/opt/cryptic/server_data \
   -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
   ghcr.io/etnt/cryptic:latest \
-  sh -c 'DIR=${CRYPTIC_SERVER_DIR}/priv/ssl generate-mtls-certs.sh'
+  sh -c 'DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" generate-mtls-certs.sh'
 
-# Bootstrap the first admin user BEFORE starting the server
-# Step 1: Generate a GPG key on your host (if you don't have one)
-#         No passphrase needed - it's only used for signing CSRs
+# Step 2: Bootstrap the first admin user
+# Generate a GPG key on your host (if you don't have one)
+# No passphrase needed - it's only used for signing CSRs
 gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 
-# Step 2: Export your GPG public key to the bootstrap directory
+# Export your GPG public key to the bootstrap directory
 mkdir -p priv/ca/bootstrap
 gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
 
-# Run the server with single directory mount
+# Step 3: Run the server
 # All server data (priv/, logs/, data/) will be in ~/.cryptic_server/
 # Note: Mount to /opt/cryptic/server_data (not /opt/cryptic which contains the Erlang release)
 # For debug log output, add: -e CRYPTIC_DEBUG=true
@@ -96,11 +99,28 @@ docker run -d \
   -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
   ghcr.io/etnt/cryptic:latest
 
-# Check server logs
+# Check server logs (you'll see certificate information on first start)
 docker logs -f cryptic-server
 
 # Stop the server and remove the container
 docker stop cryptic-server && docker rm cryptic-server
+```
+
+### Manual Certificate Generation (Optional)
+
+The Quick Deployment section above includes certificate generation as Step 1.
+If you need to regenerate certificates or add additional DNS SANs later:
+
+```bash
+cd ~/.cryptic_server
+
+# Run certificate generation interactively (will prompt for DNS SANs)
+docker run -it --rm \
+  --entrypoint '' \
+  -v $(pwd):/opt/cryptic/server_data \
+  -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
+  ghcr.io/etnt/cryptic:latest \
+  sh -c 'DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" generate-mtls-certs.sh'
 ```
 
 ## The Client

@@ -22,8 +22,8 @@ if [ ! -f "${DIR}/serial" ]; then
 fi
 
 DNS_SANS=""
-echo "Enter DNS Subject Alternative Name (SAN) (unless localhost only) - press Enter to skip:"
-printf "DNS names (comma-separated): " ; read DNS_SANS
+printf "Enter DNS Subject Alternative Name (SAN) - press Enter to skip\nDNS names (comma-separated): "
+read DNS_SANS
 
 # Build SAN string for OpenSSL config file format (DNS.3 = hostname, DNS.4 = hostname, ...)
 SAN_LINES=""
@@ -38,7 +38,7 @@ if [ -n "$DNS_SANS" ]; then
         if [ -n "$name" ]; then
             if [ -n "$SAN_LINES" ]; then
                 SAN_LINES="${SAN_LINES}
-DNS.$INDEX = $name"
+                DNS.$INDEX = $name"
             else
                 SAN_LINES="DNS.$INDEX = $name"
             fi
@@ -79,11 +79,13 @@ echo "Using OpenSSL config: $OPENSSL_CNF"
 
 # Create temporary config file with SAN extension
 TEMP_CONFIG="/tmp/openssl_san_server.cnf"
+rm -f "$TEMP_CONFIG"
 cp "$OPENSSL_CNF" "$TEMP_CONFIG"
 
 # Update the dir path in the config to match our $DIR
 # This replaces "dir = priv/ssl" (or similar) with the actual DIR path
-sed -i "s|^dir[[:space:]]*=.*|dir = $DIR|" "$TEMP_CONFIG"
+# Use temporary file for POSIX compatibility (Alpine/BusyBox doesn't support sed -i the same way)
+sed "s|^dir[[:space:]]*=.*|dir = $DIR|" "$TEMP_CONFIG" > "$TEMP_CONFIG.tmp" && mv "$TEMP_CONFIG.tmp" "$TEMP_CONFIG"
 
 # Add SAN to the [ alt_names_server ] section after DNS.2 line
 if [ -n "$SAN_LINES" ]; then
@@ -113,7 +115,8 @@ openssl ca -config ${CONFIG_FILE} -extensions v3_server -batch -notext \
 
 
 # Clean up temporary files
-rm ${DIR}/server.csr
+rm -f ${DIR}/server.csr
+rm -f "$TEMP_CONFIG"
 
 # Set appropriate permissions
 chmod 600 ${DIR}/*.key ${DIR}/*.pem
