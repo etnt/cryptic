@@ -44,10 +44,13 @@ See: [cryptic-tui](https://github.com/etnt/cryptic-tui)
 
 ## Demo
 
-- [Demo](https://youtu.be/R2lM5GLypc0?si=2Ux8TrRuQXZTkZFN)
-- [Setup the Cryptic Server](https://youtu.be/24vEPienlwE?si=O-htRZRZVKu9wySO)
-- [Onboard a new User](https://youtu.be/vcqmaE-D8ZA?si=CRIEiaveoTe4XMzL)
-- [Onboard a new User in Docker container](https://youtu.be/acNHqzHia3o?si=_4mQuE4KQooxb1UM)
+- [Client Setup](https://youtu.be/Wq_1-shCmso?si=3cDmipt-EKDGqacV)
+- [Server Setup](https://youtu.be/prfl27pbZds?si=2By0Rt2VFpaWarWR)
+
+## Quick deployment
+
+Follow the [containerized deployment](docs/DOCKER.md) instructions for
+a quick way to try out Cryptic.
 
 ## Documentation
 
@@ -268,7 +271,7 @@ script can for example call `notify-send` and on Mac it can call
 
 Example (Mac):
 ```bash
-> ./bin/cryptic -u alice --notifier /home/alice/.cryptic/notify.sh
+> ./bin/cryptic -u alice --notifier $HOME/.cryptic/notify.sh
 
 > cat /home/alice/.cryptic/notify.sh
 #!/bin/bash
@@ -292,7 +295,7 @@ external file watchers.
 
 # In another terminal, watch the file
 > brew install fswatch
-> fswatch -0 ~/.cryptic/alice/cryptic-server_8443/sender.msg | xargs -0 -n1 -I{} /full/path/to/your-script.sh {}
+> fswatch -0 ~/.cryptic/alice/cryptic-server_8443/sender.msg | xargs -0 -n1 -I{} $HOME/.cryptic/notify.sh {}
 ```
 
 **Linux (using inotify-tools):**
@@ -302,7 +305,7 @@ external file watchers.
 
 # In another terminal, watch the file
 > sudo apt install inotify-tools
-> while inotifywait -e modify ~/.cryptic/alice/cryptic-server_8443/sender.msg; do /full/path/to/your-script.sh; done
+> while inotifywait -e modify ~/.cryptic/alice/cryptic-server_8443/sender.msg; do $HOME/.cryptic/notify.sh; done
 ```
 
 **Docker Example:**

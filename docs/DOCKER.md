@@ -6,26 +6,39 @@ This guide explains how to deploy the Cryptic client and or the
 
 ## Quick Deployment
 
-**Run the latest client image:**
+Video demos:
+- [Client Setup](https://youtu.be/Wq_1-shCmso?si=3cDmipt-EKDGqacV)
+- [Server Setup](https://youtu.be/prfl27pbZds?si=2By0Rt2VFpaWarWR)
 
-[Video Demo](https://youtu.be/acNHqzHia3o?si=_4mQuE4KQooxb1UM)
+### Fetch the Docker images
 
+**Start by fetching the Docker images:**
 ```bash
-# Get the latest Client docker image
+# Get the latest Client Docker image
 docker pull ghcr.io/etnt/cryptic-tui:latest
 
-# Create a separate GPG directory for Docker (avoids conflicts with host's keyboxd)
+# Get the latest Server Docker image
+# (only necessary of you want to run the Cryptic server)
+docker pull ghcr.io/etnt/cryptic:latest
+```
+
+### Run the Client container
+
+**Run the latest client image:**
+```bash
+# STEP 1: Create a separate GPG directory for Docker
 mkdir -p ~/.cryptic-gpg
 
-# Run the Cryptic Onboarding script
-#  1. Generate a GPG key pair (stored in ~/.cryptic-gpg on host)
+# STEP 2: Run the Cryptic Onboarding script
+#  1. Generate a GPG key pair (stored in ~/.cryptic-gpg on Host)
 #  2. Export the generated key
-#  3. Send the key and fingerprint to the admin
-#  4. WAIT! - Do not exit the onboard script until certificate is received
-#  5. When admin has registered your key: Request a TLS certificate from server
-#    If your server is running on localhost on your Host machine, specify:
-#    cryptic-server as your server address (see the: `--add-host` below)
-#  6. Exit the onboard script
+#  3. Send the key (and fingerprint) to the admin
+#  4. When admin has registered your key: 
+#     - Request a TLS certificate from server
+#     - If your server is running on localhost on your Host machine, specify:
+#       cryptic-server as your server address (see the: `--add-host` below)
+#  5. Exit the onboard script
+#
 # You should now see your certificates at ~/.cryptic/<user>/cryptic-server_<port>
 #
 # NOTE: We use ~/.cryptic-gpg instead of ~/.gnupg because modern macOS/Linux
@@ -38,58 +51,61 @@ docker run -it --rm --name cryptic-client \
            ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
 
 # Start the Cryptic client with your username (e.g `bob`)
-# You'll be prompted for a Passphrase which is used to encrypt your local DB
-
-# Method 1: Using environment variables
-docker run -it --rm --name cryptic-client \
-           -v ~/.cryptic:/home/cryptic/.cryptic \
-           -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
-           --add-host=cryptic-server:host-gateway \
-           -e CRYPTIC_USERNAME=bob \
-           -e CRYPTIC_ENABLE_DB=true \
-           ghcr.io/etnt/cryptic-tui:latest
-
-# Method 2: Using command-line flags
-#           (but here also increase log output details)
+# - You'll be prompted for a Passphrase which is used to encrypt your local DB
+# - Here we also increase the log output details
+# - The incoming sender's username will be written to the file: sender.msg
 docker run -it --rm --name cryptic-client \
            -v ~/.cryptic:/home/cryptic/.cryptic \
            -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
            --add-host=cryptic-server:host-gateway \
            -e CRYPTIC_DEBUG=true \
-           ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic -u bob --enable-db --tui'
+           ghcr.io/etnt/cryptic-tui:latest \
+           sh -c 'cryptic -u bob --enable-db --file-notify sender.msg --tui'
+
+# To get notified of incoming messages, run (on MAC):
+# - brew install fswatch terminal-notifier
+fswatch -0 ~/.cryptic/bob/cryptic-server_8443/sender.msg | xargs -0 -n1 -I{} $HOME/.cryptic/notify_script.sh {}
+
+# Content of notification script
+> cat $HOME/.cryptic/notify_script.sh 
+#!/bin/bash
+terminal-notifier -title "Cryptic" -message "Cryptic message from: $1" -sound Pong
 ```
 
+
+### Run the Server container
+
 **Run the latest server image:**
-
 ```bash
-# Get the latest Server docker image
-docker pull ghcr.io/etnt/cryptic:latest
-
-# Create a directory for storing all Cryptic server data
+# STEP 1: Create a directory for storing all Cryptic server data
 mkdir -p ~/.cryptic_server
 cd ~/.cryptic_server
 
-# Step 1: Generate CA and server certificates (one-time setup)
+# STEP 2: Generate CA and server certificates (one-time setup)
 # This will prompt for optional DNS Subject Alternative Names (SANs)
 docker run -it --rm \
-  --entrypoint '' \
-  -v $(pwd):/opt/cryptic/server_data \
-  -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
-  ghcr.io/etnt/cryptic:latest \
-  sh -c 'DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" generate-mtls-certs.sh'
+           --entrypoint '' \
+           -v $(pwd):/opt/cryptic/server_data \
+           -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
+           ghcr.io/etnt/cryptic:latest \
+           sh -c 'DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" generate-mtls-certs.sh'
 
-# Step 2: Bootstrap the first admin user
-# Generate a GPG key on your host (if you don't have one)
-# No passphrase needed - it's only used for signing CSRs
-gpg --quick-generate-key 'alice <alice@cryptic.local>' rsa4096
 
-# Export your GPG public key to the bootstrap directory
-mkdir -p priv/ca/bootstrap
-gpg --armor --export alice@cryptic.local > priv/ca/bootstrap/alice.gpg
+# STEP 3: Bootstrap the first admin user (one-time setup)
+# Generate and Export a GPG key for the admin user
+# Take note of the name of the exported filename
+mkdir -p ~/.cryptic ~/.cryptic-gpg
+docker run -it --rm --name cryptic-client \
+           -v ~/.cryptic:/home/cryptic/.cryptic \
+           -v ~/.cryptic-gpg:/home/cryptic/.gnupg \
+           --add-host=cryptic-server:host-gateway \
+           ghcr.io/etnt/cryptic-tui:latest sh -c 'cryptic --onboard'
 
-# Step 3: Run the server
-# All server data (priv/, logs/, data/) will be in ~/.cryptic_server/
-# Note: Mount to /opt/cryptic/server_data (not /opt/cryptic which contains the Erlang release)
+# STEP 4: Copy the exported GPG key where Cryptic will find it
+mkdir -p ~/.cryptic_server/priv/ca/bootstrap
+cp ~/.cryptic/gpg-export/<filename> ~/.cryptic_server/priv/ca/bootstrap/admin.gpg
+
+# STEP 5: Run the server
 # For debug log output, add: -e CRYPTIC_DEBUG=true
 docker run -d \
   --name cryptic-server \
@@ -99,11 +115,25 @@ docker run -d \
   -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \
   ghcr.io/etnt/cryptic:latest
 
-# Check server logs (you'll see certificate information on first start)
-docker logs -f cryptic-server
+# STEP 6: Connect (login) the admin user
+# See `Run the Client container` above
+
+# Check the server logs
+docker logs cryptic-server
+tail -f ./logs/server.log
 
 # Stop the server and remove the container
-docker stop cryptic-server && docker rm cryptic-server
+docker stop cryptic-server
+docker rm cryptic-server
+
+# Remove all server data
+rm -rf ~/.cryptic_server
+
+# Remove all GPG keys
+rm -rf ~/.cryptic-gpg
+
+# Remove all user data
+rm -rf ~/.cryptic
 ```
 
 ### Manual Certificate Generation (Optional)
