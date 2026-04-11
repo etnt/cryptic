@@ -63,6 +63,20 @@ check_dependencies() {
     fi
 }
 
+check_admin_dependencies() {
+    local missing_deps=()
+
+    for cmd in qrencode argon2; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_deps+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        error "Missing admin dependencies: ${missing_deps[*]}\n\nFor mobile enrollment, install:\n  macOS: brew install qrencode argon2\n  Linux: apt install qrencode argon2"
+    fi
+}
+
 parse_server_url() {
     local url="$1"
 
@@ -228,6 +242,631 @@ select_gpg_key() {
         error "Invalid selection: $key_num"
     fi
     return 0  # Success
+}
+
+#
+# Command: create-enrollment
+# Generate enrollment package for mobile users (admin use only)
+#
+cmd_create_enrollment() {
+    check_admin_dependencies
+
+    draw_box "Cryptic Admin - Create Mobile Enrollment Package"
+    echo ""
+
+    # Parse arguments
+    local username=""
+    local server_host=""
+    local server_port="8443"
+    local passphrase=""
+    local output_file=""
+    local ca_cert_file=""
+    local batch_mode=false
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --username|-u)
+                username="$2"
+                shift 2
+                ;;
+            --server|-s)
+                server_host="$2"
+                shift 2
+                ;;
+            --port|-p)
+                server_port="$2"
+                shift 2
+                ;;
+            --passphrase)
+                passphrase="$2"
+                shift 2
+                ;;
+            --output|-o)
+                output_file="$2"
+                shift 2
+                ;;
+            --ca-cert)
+                ca_cert_file="$2"
+                shift 2
+                ;;
+            --batch)
+                batch_mode=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1\n\nUsage: cryptic-onboard create-enrollment --username <user> --server <host> [options]"
+                ;;
+        esac
+    done
+
+    # Interactive prompts if not in batch mode
+    if [ "$batch_mode" = false ]; then
+        # Prompt for username
+        if [ -z "$username" ]; then
+            read -p "Username for mobile user: " username
+            if [ -z "$username" ]; then
+                error "Username is required"
+            fi
+        fi
+
+        # Prompt for server
+        if [ -z "$server_host" ]; then
+            read -p "Server hostname [localhost]: " server_host
+            server_host=${server_host:-localhost}
+        fi
+
+        # Prompt for port
+        read -p "Server port [$server_port]: " input_port
+        server_port=${input_port:-$server_port}
+
+        # Prompt for CA cert
+        if [ -z "$ca_cert_file" ]; then
+            read -p "Path to server CA certificate (optional): " ca_cert_file
+        fi
+
+        # Prompt for passphrase
+        if [ -z "$passphrase" ]; then
+            read -s -p "Enrollment passphrase (keep this secret): " passphrase
+            echo ""
+            if [ -z "$passphrase" ]; then
+                error "Passphrase is required"
+            fi
+            read -s -p "Confirm passphrase: " passphrase_confirm
+            echo ""
+            if [ "$passphrase" != "$passphrase_confirm" ]; then
+                error "Passphrases do not match"
+            fi
+        fi
+    else
+        # Batch mode - require all parameters
+        if [ -z "$username" ] || [ -z "$server_host" ] || [ -z "$passphrase" ]; then
+            error "Batch mode requires: --username, --server, --passphrase"
+        fi
+    fi
+
+    # Set default output file
+    if [ -z "$output_file" ]; then
+        output_file="${username}_enrollment.png"
+    fi
+
+    echo ""
+    info "Creating enrollment package for: $username"
+    info "Server: $server_host:$server_port"
+    echo ""
+
+    # Step 1: Check if GPG key exists for username
+    GPG_KEY_EXISTS=$(gpg --list-keys "$username" 2>/dev/null || true)
+    
+    if [ -z "$GPG_KEY_EXISTS" ]; then
+        info "No existing GPG key found for $username"
+        info "Generating new GPG key..."
+        echo ""
+        
+        # Generate GPG key in batch mode
+        # Note: For macOS, we need to use --pinentry-mode loopback to avoid passphrase prompt
+        gpg --batch --pinentry-mode loopback --passphrase '' --quick-gen-key "${username}@cryptic.local" rsa2048 default 2y 2>/dev/null
+        
+        if [ $? -ne 0 ]; then
+            # Try alternative method if quick-gen-key fails
+            gpg --batch --gen-key <<EOF 2>/dev/null
+%no-protection
+Key-Type: RSA
+Key-Length: 2048
+Subkey-Type: RSA
+Subkey-Length: 2048
+Name-Real: $username
+Name-Email: ${username}@cryptic.local
+Expire-Date: 2y
+%commit
+EOF
+            if [ $? -ne 0 ]; then
+                error "Failed to generate GPG key"
+            fi
+        fi
+        success "GPG key generated for $username"
+        echo ""
+    else
+        success "Using existing GPG key for $username"
+        echo ""
+    fi
+
+    # Step 2: Export GPG keys
+    info "Exporting GPG keys..."
+    GPG_PUBLIC=$(gpg --armor --export "$username" 2>/dev/null | base64 | tr -d '\n')
+    GPG_PRIVATE=$(gpg --armor --export-secret-keys "$username" 2>/dev/null | base64 | tr -d '\n')
+    GPG_KEYID=$(gpg --list-keys --keyid-format=long "$username" 2>/dev/null | grep pub | awk '{print $2}' | cut -d'/' -f2 | head -1)
+
+    if [ -z "$GPG_PUBLIC" ] || [ -z "$GPG_PRIVATE" ] || [ -z "$GPG_KEYID" ]; then
+        error "Failed to export GPG keys"
+    fi
+
+    # Step 3: Load CA certificate if provided
+    CA_CERT_BASE64=""
+    if [ -n "$ca_cert_file" ] && [ -f "$ca_cert_file" ]; then
+        CA_CERT_BASE64=$(base64 < "$ca_cert_file" | tr -d '\n')
+        success "Loaded CA certificate from $ca_cert_file"
+    else
+        info "No CA certificate provided (will be fetched during enrollment)"
+    fi
+
+    # Step 4: Generate enrollment token
+    ENROLLMENT_TOKEN=$(uuidgen | tr '[:upper:]' '[:lower:]')
+
+    # Step 5: Create enrollment JSON
+    ISSUED_AT=$(date +%s)
+    EXPIRES_AT=$((ISSUED_AT + 31536000))  # 1 year
+
+    ENROLLMENT_JSON=$(jq -n \
+        --arg username "$username" \
+        --arg host "$server_host" \
+        --argjson port "$server_port" \
+        --arg gpg_pub "$GPG_PUBLIC" \
+        --arg gpg_priv "$GPG_PRIVATE" \
+        --arg keyid "$GPG_KEYID" \
+        --arg token "$ENROLLMENT_TOKEN" \
+        --arg ca_cert "$CA_CERT_BASE64" \
+        --argjson issued "$ISSUED_AT" \
+        --argjson expires "$EXPIRES_AT" \
+        '{
+            version: 1,
+            username: $username,
+            server: {
+                host: $host,
+                port: $port,
+                ca_cert: $ca_cert,
+                enrollment_token: $token
+            },
+            gpg_keypair: {
+                public_key: $gpg_pub,
+                private_key: $gpg_priv,
+                key_id: $keyid
+            },
+            issued_at: $issued,
+            expires_at: $expires
+        }'
+    )
+
+    # Step 6: Encrypt with Argon2 + AES-256-CBC + HMAC
+    info "Encrypting enrollment package..."
+    
+    # Generate salt and IV
+    SALT=$(openssl rand -hex 16)
+    IV=$(openssl rand -hex 16)
+    
+    # Derive keys using Argon2id
+    # Derive 64 bytes: 32 for encryption key, 32 for HMAC key
+    DERIVED_KEYS=$(echo -n "$passphrase" | argon2 "$SALT" -id -t 3 -m 16 -p 4 -l 64 -r)
+    
+    if [ -z "$DERIVED_KEYS" ]; then
+        error "Failed to derive encryption keys"
+    fi
+    
+    # Split into encryption key and HMAC key
+    ENC_KEY="${DERIVED_KEYS:0:64}"   # First 32 bytes (64 hex chars)
+    HMAC_KEY="${DERIVED_KEYS:64:64}" # Next 32 bytes (64 hex chars)
+
+    # Encrypt the enrollment JSON using AES-256-CBC
+    TEMP_PLAIN=$(mktemp)
+    TEMP_CIPHER=$(mktemp)
+    echo -n "$ENROLLMENT_JSON" > "$TEMP_PLAIN"
+    
+    openssl enc -aes-256-cbc -K "$ENC_KEY" -iv "$IV" -in "$TEMP_PLAIN" -out "$TEMP_CIPHER" 2>/dev/null
+    
+    if [ $? -ne 0 ]; then
+        rm -f "$TEMP_PLAIN" "$TEMP_CIPHER"
+        error "Failed to encrypt enrollment package"
+    fi
+    
+    # Read encrypted data and encode as base64
+    CIPHERTEXT=$(base64 < "$TEMP_CIPHER" | tr -d '\n')
+    
+    # Calculate HMAC over ciphertext for authenticity
+    HMAC=$(echo -n "$CIPHERTEXT" | openssl dgst -sha256 -mac hmac -macopt "hexkey:$HMAC_KEY" | awk '{print $2}')
+    
+    rm -f "$TEMP_PLAIN" "$TEMP_CIPHER"
+    
+    if [ -z "$CIPHERTEXT" ] || [ -z "$HMAC" ]; then
+        error "Failed to encrypt and authenticate enrollment package"
+    fi
+
+    # Step 7: Create QR payload
+    QR_PAYLOAD=$(jq -n \
+        --arg salt "$SALT" \
+        --arg iv "$IV" \
+        --arg cipher "$CIPHERTEXT" \
+        --arg hmac "$HMAC" \
+        '{v: 1, salt: $salt, iv: $iv, ciphertext: $cipher, hmac: $hmac}'
+    )
+
+    # Check payload size
+    PAYLOAD_SIZE=$(echo -n "$QR_PAYLOAD" | wc -c | tr -d ' ')
+    if [ "$PAYLOAD_SIZE" -gt 2953 ]; then
+        warn "Payload size ($PAYLOAD_SIZE bytes) exceeds ideal QR code capacity (2953 bytes)"
+        warn "QR code generation may fail or require special scanning app"
+        echo ""
+    fi
+
+    # Step 8: Generate QR code
+    info "Generating QR code..."
+    if echo -n "$QR_PAYLOAD" | qrencode -o "$output_file" -s 10 -l L -m 2 2>/dev/null; then
+        success "QR code generated successfully!"
+    elif echo -n "$QR_PAYLOAD" | qrencode -o "$output_file" -s 8 -l L -m 1 2>/dev/null; then
+        success "QR code generated with reduced size!"
+    else
+        # Last resort: save as text file for manual entry or alternative encoding
+        TEXT_FILE="${output_file%.png}.txt"
+        echo -n "$QR_PAYLOAD" > "$TEXT_FILE"
+        warn "QR code too large to generate. Saved payload to: $TEXT_FILE"
+        warn "Consider using alternative delivery method (file transfer, NFC, etc.)"
+        output_file="$TEXT_FILE"
+    fi
+
+    echo ""
+    success "Enrollment package created successfully!"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "QR Code:            $output_file"
+    echo "Username:           $username"
+    echo "Server:             $server_host:$server_port"
+    echo "Enrollment Token:   $ENROLLMENT_TOKEN"
+    echo "Payload Size:       $PAYLOAD_SIZE bytes"
+    echo "Expires:            $(date -r $EXPIRES_AT '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d @$EXPIRES_AT '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    warn "Important: Store the enrollment token on the server for validation!"
+    info "Share the QR code and passphrase with the user via secure channels."
+    echo ""
+}
+
+#
+# Command: create-mobile-enrollment
+# Generate Ed25519-based enrollment package for mobile users (admin use only)
+# Uses v2 payload format that fits in a single QR code
+#
+cmd_create_mobile_enrollment() {
+    check_admin_dependencies
+
+    draw_box "Cryptic Admin - Create Mobile Enrollment Package (Ed25519)"
+    echo ""
+
+    # Parse arguments
+    local username=""
+    local server_url=""
+    local server_host=""
+    local server_port="8443"
+    local passphrase=""
+    local output_file=""
+    local admin_cert=""
+    local admin_key=""
+    local ca_cert_file=""
+    local batch_mode=false
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --username|-u)
+                username="$2"
+                shift 2
+                ;;
+            --server|-s)
+                server_url="$2"
+                shift 2
+                ;;
+            --port|-p)
+                server_port="$2"
+                shift 2
+                ;;
+            --passphrase)
+                passphrase="$2"
+                shift 2
+                ;;
+            --output|-o)
+                output_file="$2"
+                shift 2
+                ;;
+            --admin-cert)
+                admin_cert="$2"
+                shift 2
+                ;;
+            --admin-key)
+                admin_key="$2"
+                shift 2
+                ;;
+            --ca-cert)
+                ca_cert_file="$2"
+                shift 2
+                ;;
+            --batch)
+                batch_mode=true
+                shift
+                ;;
+            *)
+                error "Unknown option: $1\n\nUsage: cryptic-onboard create-mobile-enrollment --username <user> --server <host> [options]"
+                ;;
+        esac
+    done
+
+    # Interactive prompts if not in batch mode
+    if [ "$batch_mode" = false ]; then
+        if [ -z "$username" ]; then
+            read -p "Username for mobile user: " username
+            if [ -z "$username" ]; then
+                error "Username is required"
+            fi
+        fi
+
+        if [ -z "$server_url" ]; then
+            read -p "Server URL [https://localhost:8443]: " server_url
+            server_url=${server_url:-https://localhost:8443}
+        fi
+
+        if [ -z "$admin_cert" ]; then
+            read -p "Path to admin client certificate: " admin_cert
+            if [ -z "$admin_cert" ] || [ ! -f "$admin_cert" ]; then
+                error "Admin client certificate is required for registration"
+            fi
+        fi
+
+        if [ -z "$admin_key" ]; then
+            read -p "Path to admin client key: " admin_key
+            if [ -z "$admin_key" ] || [ ! -f "$admin_key" ]; then
+                error "Admin client key is required for registration"
+            fi
+        fi
+
+        if [ -z "$ca_cert_file" ]; then
+            read -p "Path to CA certificate: " ca_cert_file
+        fi
+
+        if [ -z "$passphrase" ]; then
+            read -s -p "Enrollment passphrase (share with user securely): " passphrase
+            echo ""
+            if [ -z "$passphrase" ]; then
+                error "Passphrase is required"
+            fi
+            read -s -p "Confirm passphrase: " passphrase_confirm
+            echo ""
+            if [ "$passphrase" != "$passphrase_confirm" ]; then
+                error "Passphrases do not match"
+            fi
+        fi
+    else
+        if [ -z "$username" ] || [ -z "$server_url" ] || [ -z "$passphrase" ] || [ -z "$admin_cert" ] || [ -z "$admin_key" ]; then
+            error "Batch mode requires: --username, --server, --passphrase, --admin-cert, --admin-key"
+        fi
+    fi
+
+    # Parse server URL into host and port
+    parse_server_url "$server_url"
+
+    # Set default output file
+    if [ -z "$output_file" ]; then
+        output_file="${username}_mobile_enrollment.png"
+    fi
+
+    echo ""
+    info "Creating mobile enrollment package for: $username"
+    info "Server: $SERVER_HOST:$SERVER_PORT"
+    echo ""
+
+    # Step 1: Generate Ed25519 keypair
+    info "Generating Ed25519 enrollment keypair..."
+    TEMP_ED_KEY=$(mktemp)
+    TEMP_ED_PUB=$(mktemp)
+
+    openssl genpkey -algorithm ed25519 -out "$TEMP_ED_KEY" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        rm -f "$TEMP_ED_KEY" "$TEMP_ED_PUB"
+        error "Failed to generate Ed25519 keypair"
+    fi
+
+    openssl pkey -in "$TEMP_ED_KEY" -pubout -out "$TEMP_ED_PUB" 2>/dev/null
+
+    # Extract raw 32-byte public key (skip PEM/DER headers)
+    ED_PUB_RAW_B64=$(openssl pkey -in "$TEMP_ED_KEY" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
+    # Extract raw 64-byte secret key (32 seed + 32 pub, or just 32-byte seed depending on openssl version)
+    ED_SEC_RAW_B64=$(openssl pkey -in "$TEMP_ED_KEY" -outform DER 2>/dev/null | tail -c 64 | base64 | tr -d '\n')
+
+    rm -f "$TEMP_ED_KEY" "$TEMP_ED_PUB"
+
+    if [ -z "$ED_PUB_RAW_B64" ] || [ -z "$ED_SEC_RAW_B64" ]; then
+        error "Failed to extract Ed25519 key material"
+    fi
+
+    # Compute fingerprint = SHA-256 of raw public key bytes (hex)
+    ED_PUB_RAW=$(echo -n "$ED_PUB_RAW_B64" | base64 -d)
+    ENROLLMENT_FP=$(echo -n "$ED_PUB_RAW_B64" | base64 -d | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
+
+    if [ -z "$ENROLLMENT_FP" ]; then
+        error "Failed to compute enrollment fingerprint"
+    fi
+
+    success "Ed25519 keypair generated"
+    info "Fingerprint: $ENROLLMENT_FP"
+    echo ""
+
+    # Step 2: Get CA certificate fingerprint
+    CA_FP=""
+    if [ -n "$ca_cert_file" ] && [ -f "$ca_cert_file" ]; then
+        CA_FP=$(openssl x509 -in "$ca_cert_file" -outform DER 2>/dev/null | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
+        success "CA certificate fingerprint: $CA_FP"
+    else
+        info "No CA certificate provided — will try to fetch from server"
+        # Try to fetch from the server's ca-cert endpoint
+        TEMP_CA=$(mktemp)
+        if curl -sk "${server_url}/ca/v1/ca-cert" -o "$TEMP_CA" 2>/dev/null; then
+            if [ -s "$TEMP_CA" ] && grep -q "BEGIN CERTIFICATE" "$TEMP_CA"; then
+                CA_FP=$(openssl x509 -in "$TEMP_CA" -outform DER 2>/dev/null | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')
+                success "Fetched CA certificate fingerprint: $CA_FP"
+            fi
+        fi
+        rm -f "$TEMP_CA"
+
+        if [ -z "$CA_FP" ]; then
+            warn "Could not obtain CA certificate fingerprint"
+            warn "Mobile client will skip CA verification (less secure)"
+        fi
+    fi
+    echo ""
+
+    # Step 3: Register enrollment key on the server
+    info "Registering enrollment key on server..."
+    REGISTER_JSON=$(jq -n \
+        --arg fp "$ENROLLMENT_FP" \
+        --arg pub "$ED_PUB_RAW_B64" \
+        --arg user "$username" \
+        '{enrollment_fp: $fp, enrollment_pub_b64: $pub, username: $user}'
+    )
+
+    # Build curl args for mTLS
+    CURL_ARGS=(-s -X POST)
+    CURL_ARGS+=(-H "Content-Type: application/json")
+    CURL_ARGS+=(-d "$REGISTER_JSON")
+    CURL_ARGS+=(--cert "$admin_cert")
+    CURL_ARGS+=(--key "$admin_key")
+    if [ -n "$ca_cert_file" ] && [ -f "$ca_cert_file" ]; then
+        CURL_ARGS+=(--cacert "$ca_cert_file")
+    else
+        CURL_ARGS+=(-k)
+    fi
+    CURL_ARGS+=("${server_url}/ca/v1/admin/register-enrollment")
+
+    REGISTER_RESP=$(curl "${CURL_ARGS[@]}" 2>/dev/null)
+    REGISTER_STATUS=$(echo "$REGISTER_RESP" | jq -r '.status // empty' 2>/dev/null)
+
+    if [ "$REGISTER_STATUS" != "registered" ]; then
+        REGISTER_ERR=$(echo "$REGISTER_RESP" | jq -r '.message // .error // "Unknown error"' 2>/dev/null)
+        error "Failed to register enrollment key on server: $REGISTER_ERR"
+    fi
+
+    success "Enrollment key registered on server"
+    echo ""
+
+    # Step 4: Build v2 enrollment payload JSON
+    ISSUED_AT=$(date +%s)
+    EXPIRES_AT=$((ISSUED_AT + 31536000))  # 1 year
+
+    PAYLOAD_JSON=$(jq -n \
+        --arg username "$username" \
+        --arg host "$SERVER_HOST" \
+        --argjson port "$server_port" \
+        --arg ca_fp "$CA_FP" \
+        --arg e_pub "$ED_PUB_RAW_B64" \
+        --arg e_sec "$ED_SEC_RAW_B64" \
+        --argjson issued "$ISSUED_AT" \
+        --argjson expires "$EXPIRES_AT" \
+        '{
+            username: $username,
+            server_host: $host,
+            server_port: $port,
+            ca_fingerprint: $ca_fp,
+            enrollment_pub: $e_pub,
+            enrollment_sec: $e_sec,
+            issued_at: $issued,
+            expires_at: $expires
+        }'
+    )
+
+    # Step 5: Encrypt with Argon2id + AES-256-CBC + HMAC-SHA256
+    info "Encrypting enrollment package..."
+
+    SALT=$(openssl rand -hex 16)
+    IV=$(openssl rand -hex 16)
+
+    # Derive 64 bytes: 32 for AES key, 32 for HMAC key
+    DERIVED_KEYS=$(echo -n "$passphrase" | argon2 "$SALT" -id -t 3 -m 16 -p 4 -l 64 -r)
+
+    if [ -z "$DERIVED_KEYS" ]; then
+        error "Failed to derive encryption keys"
+    fi
+
+    ENC_KEY="${DERIVED_KEYS:0:64}"
+    HMAC_KEY="${DERIVED_KEYS:64:64}"
+
+    TEMP_PLAIN=$(mktemp)
+    TEMP_CIPHER=$(mktemp)
+    echo -n "$PAYLOAD_JSON" > "$TEMP_PLAIN"
+
+    openssl enc -aes-256-cbc -K "$ENC_KEY" -iv "$IV" -in "$TEMP_PLAIN" -out "$TEMP_CIPHER" 2>/dev/null
+
+    if [ $? -ne 0 ]; then
+        rm -f "$TEMP_PLAIN" "$TEMP_CIPHER"
+        error "Failed to encrypt enrollment package"
+    fi
+
+    CIPHERTEXT=$(base64 < "$TEMP_CIPHER" | tr -d '\n')
+    HMAC=$(echo -n "$CIPHERTEXT" | openssl dgst -sha256 -mac hmac -macopt "hexkey:$HMAC_KEY" | awk '{print $2}')
+
+    rm -f "$TEMP_PLAIN" "$TEMP_CIPHER"
+
+    if [ -z "$CIPHERTEXT" ] || [ -z "$HMAC" ]; then
+        error "Failed to encrypt and authenticate enrollment package"
+    fi
+
+    # Step 6: Build QR envelope (v2 format)
+    QR_PAYLOAD=$(jq -n \
+        --arg salt "$SALT" \
+        --arg iv "$IV" \
+        --arg cipher "$CIPHERTEXT" \
+        --arg hmac "$HMAC" \
+        '{v: 2, salt: $salt, iv: $iv, ct: $cipher, hmac: $hmac}'
+    )
+
+    PAYLOAD_SIZE=$(echo -n "$QR_PAYLOAD" | wc -c | tr -d ' ')
+
+    # Step 7: Generate QR code
+    info "Generating QR code ($PAYLOAD_SIZE bytes)..."
+    if [ "$PAYLOAD_SIZE" -gt 2953 ]; then
+        warn "Payload ($PAYLOAD_SIZE bytes) exceeds QR V40-L capacity (2953 bytes)"
+        warn "Consider shorter username or check key sizes"
+    fi
+
+    if echo -n "$QR_PAYLOAD" | qrencode -o "$output_file" -s 10 -l L -m 2 2>/dev/null; then
+        success "QR code generated successfully!"
+    elif echo -n "$QR_PAYLOAD" | qrencode -o "$output_file" -s 8 -l L -m 1 2>/dev/null; then
+        success "QR code generated with reduced size!"
+    else
+        TEXT_FILE="${output_file%.png}.json"
+        echo -n "$QR_PAYLOAD" > "$TEXT_FILE"
+        warn "QR code too large. Saved payload to: $TEXT_FILE"
+        output_file="$TEXT_FILE"
+    fi
+
+    echo ""
+    success "Mobile enrollment package created successfully!"
+    echo ""
+    draw_box ""
+    echo "QR Code:            $output_file"
+    echo "Username:           $username"
+    echo "Server:             $SERVER_HOST:$SERVER_PORT"
+    echo "Enrollment FP:      $ENROLLMENT_FP"
+    echo "Payload Size:       $PAYLOAD_SIZE bytes"
+    echo "Payload Version:    2 (Ed25519)"
+    echo "Expires:            $(date -r $EXPIRES_AT '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d @$EXPIRES_AT '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    draw_box ""
+    echo ""
+    info "Share the QR code and passphrase with the user via separate secure channels."
+    warn "The passphrase should NEVER be sent alongside the QR code."
+    echo ""
 }
 
 #
@@ -1051,6 +1690,28 @@ Direct Commands:
   info [cert_file]                  Display certificate information
   help                              Show this help message
 
+Admin Commands (for mobile enrollment):
+  create-enrollment                 Create enrollment package for mobile users
+    --username, -u <user>             Username for mobile user (required)
+    --server, -s <host>               Server hostname (required)
+    --port, -p <port>                 Server port (default: 8443)
+    --passphrase <pass>               Enrollment passphrase (will prompt if not provided)
+    --output, -o <file>               Output QR code file (default: <username>_enrollment.png)
+    --ca-cert <file>                  Path to server CA certificate (optional)
+    --batch                           Non-interactive mode (requires all options)
+
+  Examples:
+    # Interactive mode
+    cryptic-onboard create-enrollment
+
+    # Batch mode
+    cryptic-onboard create-enrollment \
+      --username alice \
+      --server cryptic.example.com \
+      --passphrase "correct-horse-battery-staple" \
+      --ca-cert /path/to/ca.crt \
+      --batch
+
 Admin-Mediated Onboarding Flow:
   1. Generate or select your GPG key:
        cryptic-onboard generate-gpg
@@ -1106,6 +1767,12 @@ main() {
     case "$command" in
         generate-gpg|generate)
             generate_gpg_key
+            ;;
+        create-enrollment)
+            cmd_create_enrollment "$@"
+            ;;
+        create-mobile-enrollment)
+            cmd_create_mobile_enrollment "$@"
             ;;
         export-gpg|export)
             cmd_export_gpg "$@"

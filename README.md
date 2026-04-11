@@ -126,6 +126,30 @@ A new User has to be approved by an _admin user_. This is done by sending
 the User's GPG Public key and the corresponding GPG fingerprint to the 
 admin user. This process is taken care of by the `cryptic --onboard` script.
 
+### Admin Requirements for Mobile Enrollment
+
+For administrators creating enrollment packages for mobile users, additional
+dependencies are required:
+
+**macOS:**
+```bash
+brew install qrencode argon2
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt install qrencode argon2
+```
+
+**Linux (RHEL/Fedora):**
+```bash
+sudo yum install qrencode argon2
+```
+
+These tools enable the `cryptic-onboard create-enrollment` command to generate
+QR codes for mobile user enrollment. The standard onboarding workflow only
+requires `curl`, `openssl`, `gpg`, and `jq` (already documented as dependencies).
+
 ### ./bin/cryptic --onboard
 
 This is the Wizard menu system of the `./bin/cryptic --onboard` script.

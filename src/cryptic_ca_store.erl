@@ -54,6 +54,13 @@
     insert_audit_log/2,
     get_audit_logs/3,
 
+    %% Enrollment identity operations
+    insert_enrollment_identity/2,
+    get_enrollment_identity/2,
+    update_enrollment_status/3,
+    update_enrollment_last_seen/2,
+    list_enrollment_identities/1,
+
     %% Database inspection (for debugging)
     list_tables/1,
     describe_table/2,
@@ -311,6 +318,24 @@ create_tables(Conn) ->
             "    "
         >>,
 
+    EnrollmentIdentitiesTable =
+        <<
+            "\n"
+            "        CREATE TABLE IF NOT EXISTS enrollment_identities (\n"
+            "            enrollment_fp TEXT PRIMARY KEY,\n"
+            "            enrollment_pub BLOB NOT NULL,\n"
+            "            username TEXT NOT NULL,\n"
+            "            status TEXT NOT NULL DEFAULT 'active'\n"
+            "                CHECK(status IN ('active','consumed','suspended','revoked')),\n"
+            "            registered_by TEXT,\n"
+            "            registered_at INTEGER NOT NULL,\n"
+            "            consumed_at INTEGER,\n"
+            "            last_seen INTEGER,\n"
+            "            metadata TEXT\n"
+            "        )\n"
+            "    "
+        >>,
+
     %% Create indexes
     Indexes = [
         <<"CREATE INDEX IF NOT EXISTS idx_gpg_status ON gpg_identities(status)">>,
@@ -319,7 +344,9 @@ create_tables(Conn) ->
         <<"CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_log(event_type)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_certs_gpg_fp ON certificates(gpg_fp)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_certs_expires ON certificates(expires_at)">>,
-        <<"CREATE INDEX IF NOT EXISTS idx_certs_status ON certificates(status)">>
+        <<"CREATE INDEX IF NOT EXISTS idx_certs_status ON certificates(status)">>,
+        <<"CREATE INDEX IF NOT EXISTS idx_enrollment_status ON enrollment_identities(status)">>,
+        <<"CREATE INDEX IF NOT EXISTS idx_enrollment_username ON enrollment_identities(username)">>
     ],
 
     try
@@ -337,6 +364,11 @@ create_tables(Conn) ->
         case esqlite3:exec(Conn, CertificatesTable) of
             ok -> ?info("certificates table created", []);
             {error, E3} -> ?error("Failed to create certificates: ~p", [E3]), error({error, E3})
+        end,
+        ?info("Creating enrollment_identities table...", []),
+        case esqlite3:exec(Conn, EnrollmentIdentitiesTable) of
+            ok -> ?info("enrollment_identities table created", []);
+            {error, E5} -> ?error("Failed to create enrollment_identities: ~p", [E5]), error({error, E5})
         end,
         ?info("Creating indexes...", []),
         lists:foreach(fun(Idx) -> 
@@ -602,6 +634,135 @@ update_user_status(Conn, GpgFp, NewStatus) ->
             ok;
         {error, Reason} = Error ->
             ?error("Failed to update user status for ~s: ~p", [GpgFp, Reason]),
+            Error
+    end.
+
+%%====================================================================
+%% Enrollment Identity Operations
+%%====================================================================
+
+%% @doc Insert a new enrollment identity (Ed25519-based mobile enrollment).
+-spec insert_enrollment_identity(db_ref(), #enrollment_identity{}) -> ok | {error, term()}.
+insert_enrollment_identity(Conn, #enrollment_identity{} = Identity) ->
+    SQL =
+        <<
+            "INSERT INTO enrollment_identities \n"
+            "             (enrollment_fp, enrollment_pub, username, status, registered_by, registered_at, consumed_at, last_seen, metadata) \n"
+            "             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        >>,
+    Params = [
+        Identity#enrollment_identity.enrollment_fp,
+        Identity#enrollment_identity.enrollment_pub,
+        Identity#enrollment_identity.username,
+        Identity#enrollment_identity.status,
+        Identity#enrollment_identity.registered_by,
+        Identity#enrollment_identity.registered_at,
+        Identity#enrollment_identity.consumed_at,
+        Identity#enrollment_identity.last_seen,
+        Identity#enrollment_identity.metadata
+    ],
+    case esqlite3:q(Conn, SQL, Params) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to insert enrollment identity ~s: ~p", [
+                Identity#enrollment_identity.enrollment_fp, Reason
+            ]),
+            Error
+    end.
+
+%% @doc Look up an enrollment identity by fingerprint.
+-spec get_enrollment_identity(db_ref(), binary()) ->
+    {ok, #enrollment_identity{}} | {error, not_found} | {error, term()}.
+get_enrollment_identity(Conn, EnrollmentFp) ->
+    SQL =
+        <<
+            "SELECT enrollment_fp, enrollment_pub, username, status, registered_by, "
+            "registered_at, consumed_at, last_seen, metadata "
+            "FROM enrollment_identities WHERE enrollment_fp = ?1"
+        >>,
+    case esqlite3:q(Conn, SQL, [EnrollmentFp]) of
+        [[Fp, Pub, Username, Status, RegisteredBy, RegAt, ConsumedAt, LastSeen, Metadata]] ->
+            {ok, #enrollment_identity{
+                enrollment_fp = Fp,
+                enrollment_pub = Pub,
+                username = Username,
+                status = Status,
+                registered_by = RegisteredBy,
+                registered_at = RegAt,
+                consumed_at = ConsumedAt,
+                last_seen = LastSeen,
+                metadata = Metadata
+            }};
+        Result when Result =:= [] orelse Result =:= ok ->
+            {error, not_found};
+        {error, Reason} = Error ->
+            ?error("Failed to get enrollment identity ~s: ~p", [EnrollmentFp, Reason]),
+            Error
+    end.
+
+%% @doc Update enrollment identity status.
+-spec update_enrollment_status(db_ref(), binary(), binary()) -> ok | {error, term()}.
+update_enrollment_status(Conn, EnrollmentFp, NewStatus) ->
+    SQL = case NewStatus of
+        <<"consumed">> ->
+            <<"UPDATE enrollment_identities SET status = ?1, consumed_at = ?2 WHERE enrollment_fp = ?3">>;
+        _ ->
+            <<"UPDATE enrollment_identities SET status = ?1 WHERE enrollment_fp = ?3">>
+    end,
+    Now = erlang:system_time(second),
+    case esqlite3:q(Conn, SQL, [NewStatus, Now, EnrollmentFp]) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to update enrollment status for ~s: ~p", [EnrollmentFp, Reason]),
+            Error
+    end.
+
+%% @doc Update last_seen timestamp for an enrollment identity.
+-spec update_enrollment_last_seen(db_ref(), binary()) -> ok | {error, term()}.
+update_enrollment_last_seen(Conn, EnrollmentFp) ->
+    Now = erlang:system_time(second),
+    SQL = <<"UPDATE enrollment_identities SET last_seen = ?1 WHERE enrollment_fp = ?2">>,
+    case esqlite3:q(Conn, SQL, [Now, EnrollmentFp]) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to update enrollment last_seen for ~s: ~p", [EnrollmentFp, Reason]),
+            Error
+    end.
+
+%% @doc List all enrollment identities.
+-spec list_enrollment_identities(db_ref()) ->
+    {ok, [#enrollment_identity{}]} | {error, term()}.
+list_enrollment_identities(Conn) ->
+    SQL =
+        <<
+            "SELECT enrollment_fp, enrollment_pub, username, status, registered_by, "
+            "registered_at, consumed_at, last_seen, metadata "
+            "FROM enrollment_identities ORDER BY registered_at DESC"
+        >>,
+    case esqlite3:q(Conn, SQL) of
+        Rows when is_list(Rows) ->
+            Identities = lists:map(
+                fun([Fp, Pub, Username, Status, RegisteredBy, RegAt, ConsumedAt, LastSeen, Metadata]) ->
+                    #enrollment_identity{
+                        enrollment_fp = Fp,
+                        enrollment_pub = Pub,
+                        username = Username,
+                        status = Status,
+                        registered_by = RegisteredBy,
+                        registered_at = RegAt,
+                        consumed_at = ConsumedAt,
+                        last_seen = LastSeen,
+                        metadata = Metadata
+                    }
+                end,
+                Rows
+            ),
+            {ok, Identities};
+        {error, Reason} = Error ->
+            ?error("Failed to list enrollment identities: ~p", [Reason]),
             Error
     end.
 

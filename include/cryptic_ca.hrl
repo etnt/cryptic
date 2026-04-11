@@ -68,3 +68,17 @@
     %% Certificate data
     cert_pem :: binary()                       % PEM-encoded certificate
 }).
+
+%% @doc Mobile enrollment identity (Ed25519-based)
+%% Status transitions: active → consumed → (optionally suspended/revoked)
+-record(enrollment_identity, {
+    enrollment_fp   :: binary(),               % SHA-256 hex of public key
+    enrollment_pub  :: binary(),               % 32-byte raw Ed25519 public key
+    username        :: binary(),
+    status          :: binary(),               % <<"active">> | <<"consumed">> | <<"suspended">> | <<"revoked">>
+    registered_by   :: binary() | undefined,   % Admin identifier
+    registered_at   :: non_neg_integer(),
+    consumed_at     :: non_neg_integer() | undefined,
+    last_seen       :: non_neg_integer() | undefined,
+    metadata        :: binary() | undefined    % JSON
+}).

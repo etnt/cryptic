@@ -578,6 +578,14 @@ start_websocket_mtls(Config) ->
                 operation => status
             }},
 
+            %% Mobile enrollment endpoints
+            {"/ca/v1/mobile-csr", cryptic_ca_mobile_handler, #{
+                operation => mobile_csr
+            }},
+            {"/ca/v1/admin/register-enrollment", cryptic_ca_admin_handler, #{
+                operation => register_enrollment
+            }},
+
             %% Static files
             {"/", cowboy_static, {priv_file, cryptic, "index.html"}}
         ]}
