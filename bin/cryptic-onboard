@@ -551,6 +551,8 @@ cmd_create_mobile_enrollment() {
 
     # Parse arguments
     local username=""
+    local full_name=""
+    local email=""
     local server_url=""
     local server_host=""
     local server_port="8443"
@@ -565,6 +567,14 @@ cmd_create_mobile_enrollment() {
         case $1 in
             --username|-u)
                 username="$2"
+                shift 2
+                ;;
+            --full-name)
+                full_name="$2"
+                shift 2
+                ;;
+            --email)
+                email="$2"
                 shift 2
                 ;;
             --server|-s)
@@ -607,43 +617,130 @@ cmd_create_mobile_enrollment() {
 
     # Interactive prompts if not in batch mode
     if [ "$batch_mode" = false ]; then
+        # --- User identity ---
+        info "New Mobile User"
+        echo ""
+
+        if [ -z "$email" ]; then
+            read -p "Email address of new user: " email
+            if [ -z "$email" ]; then
+                error "Email address is required"
+            fi
+        fi
+
+        # Derive username from email (part before @)
         if [ -z "$username" ]; then
-            read -p "Username for mobile user: " username
+            username=$(echo "$email" | sed 's/@.*//')
+            read -p "Username [${username}]: " input_username
+            username=${input_username:-$username}
             if [ -z "$username" ]; then
                 error "Username is required"
             fi
         fi
+
+        if [ -z "$full_name" ]; then
+            read -p "Full name: " full_name
+        fi
+        echo ""
+
+        # --- Server ---
+        info "Server"
+        echo ""
 
         if [ -z "$server_url" ]; then
             read -p "Server URL [https://localhost:8443]: " server_url
             server_url=${server_url:-https://localhost:8443}
         fi
 
-        if [ -z "$admin_cert" ]; then
-            read -p "Path to admin client certificate: " admin_cert
+        # Parse early so we can use SERVER_HOST/SERVER_PORT for cert discovery
+        parse_server_url "$server_url"
+        echo ""
+
+        # --- Admin credentials (mTLS cert used to authenticate this admin to the server) ---
+        info "Admin Credentials"
+        echo "  The server requires mTLS authentication to register the new user."
+        echo "  Provide your own (admin) client certificate and key."
+        echo ""
+
+        # Try to auto-discover admin certs from ~/.cryptic/
+        if [ -z "$admin_cert" ] || [ -z "$admin_key" ]; then
+            local discovered_certs=()
+            local cert_dir="${CONFIG_DIR}"
+
+            if [ -d "$cert_dir" ]; then
+                local server_dir_name="${SERVER_HOST}_${SERVER_PORT}"
+                for user_dir in "$cert_dir"/*/; do
+                    local uname=$(basename "$user_dir")
+                    local crt="${user_dir}${server_dir_name}/certificates/${uname}.crt"
+                    local key="${user_dir}${server_dir_name}/certificates/${uname}.key"
+                    if [ -f "$crt" ] && [ -f "$key" ]; then
+                        discovered_certs+=("${uname}|${crt}|${key}")
+                    fi
+                done
+            fi
+
+            if [ ${#discovered_certs[@]} -gt 0 ]; then
+                echo "  Found certificates in ~/.cryptic/:"
+                echo ""
+                local i=1
+                for entry in "${discovered_certs[@]}"; do
+                    local dname=$(echo "$entry" | cut -d'|' -f1)
+                    echo "    $i) $dname"
+                    i=$((i + 1))
+                done
+                echo "    $i) Enter path manually"
+                echo ""
+                read -p "  Select admin certificate [1]: " cert_choice
+                cert_choice=${cert_choice:-1}
+
+                if [ "$cert_choice" -ge 1 ] && [ "$cert_choice" -le ${#discovered_certs[@]} ]; then
+                    local selected="${discovered_certs[$((cert_choice - 1))]}"
+                    admin_cert=$(echo "$selected" | cut -d'|' -f2)
+                    admin_key=$(echo "$selected" | cut -d'|' -f3)
+                    local selected_name=$(echo "$selected" | cut -d'|' -f1)
+                    success "Using certificate for: $selected_name"
+                fi
+            fi
+
+            if [ -z "$admin_cert" ]; then
+                read -p "  Path to admin client certificate (.crt): " admin_cert
+            fi
             if [ -z "$admin_cert" ] || [ ! -f "$admin_cert" ]; then
                 error "Admin client certificate is required for registration"
             fi
-        fi
 
-        if [ -z "$admin_key" ]; then
-            read -p "Path to admin client key: " admin_key
+            if [ -z "$admin_key" ]; then
+                read -p "  Path to admin client key (.key): " admin_key
+            fi
             if [ -z "$admin_key" ] || [ ! -f "$admin_key" ]; then
                 error "Admin client key is required for registration"
             fi
         fi
 
+        # Auto-discover CA cert from the same directory as admin cert
         if [ -z "$ca_cert_file" ]; then
-            read -p "Path to CA certificate: " ca_cert_file
+            local auto_ca="$(dirname "$admin_cert")/ca.crt"
+            if [ -f "$auto_ca" ]; then
+                ca_cert_file="$auto_ca"
+                success "Using CA certificate: $ca_cert_file"
+            else
+                read -p "  Path to CA certificate (optional, press Enter to skip): " ca_cert_file
+            fi
         fi
+        echo ""
 
+        # --- Passphrase ---
         if [ -z "$passphrase" ]; then
-            read -s -p "Enrollment passphrase (share with user securely): " passphrase
+            info "Enrollment Passphrase"
+            echo "  This passphrase protects the QR code. Share it with the"
+            echo "  new user via a separate secure channel (e.g. in person)."
+            echo ""
+            read -s -p "  Passphrase: " passphrase
             echo ""
             if [ -z "$passphrase" ]; then
                 error "Passphrase is required"
             fi
-            read -s -p "Confirm passphrase: " passphrase_confirm
+            read -s -p "  Confirm passphrase: " passphrase_confirm
             echo ""
             if [ "$passphrase" != "$passphrase_confirm" ]; then
                 error "Passphrases do not match"
@@ -655,7 +752,7 @@ cmd_create_mobile_enrollment() {
         fi
     fi
 
-    # Parse server URL into host and port
+    # Parse server URL into host and port (needed for batch mode; no-op if already parsed)
     parse_server_url "$server_url"
 
     # Set default output file
@@ -664,8 +761,11 @@ cmd_create_mobile_enrollment() {
     fi
 
     echo ""
-    info "Creating mobile enrollment package for: $username"
-    info "Server: $SERVER_HOST:$SERVER_PORT"
+    info "Creating mobile enrollment package for:"
+    info "  Username:  $username"
+    [ -n "$full_name" ] && info "  Name:      $full_name"
+    [ -n "$email" ]     && info "  Email:     $email"
+    info "  Server:    $SERVER_HOST:$SERVER_PORT"
     echo ""
 
     # Step 1: Generate Ed25519 keypair
@@ -730,12 +830,22 @@ cmd_create_mobile_enrollment() {
 
     # Step 3: Register enrollment key on the server
     info "Registering enrollment key on server..."
-    REGISTER_JSON=$(jq -n \
-        --arg fp "$ENROLLMENT_FP" \
-        --arg pub "$ED_PUB_RAW_B64" \
-        --arg user "$username" \
-        '{enrollment_fp: $fp, enrollment_pub_b64: $pub, username: $user}'
+    local jq_args=(
+        --arg fp "$ENROLLMENT_FP"
+        --arg pub "$ED_PUB_RAW_B64"
+        --arg user "$username"
     )
+    local jq_expr='{enrollment_fp: $fp, enrollment_pub_b64: $pub, username: $user'
+    if [ -n "$full_name" ]; then
+        jq_args+=(--arg fname "$full_name")
+        jq_expr="$jq_expr, full_name: \$fname"
+    fi
+    if [ -n "$email" ]; then
+        jq_args+=(--arg email "$email")
+        jq_expr="$jq_expr, email: \$email"
+    fi
+    jq_expr="$jq_expr}"
+    REGISTER_JSON=$(jq -n "${jq_args[@]}" "$jq_expr")
 
     # Build curl args for mTLS
     CURL_ARGS=(-s -X POST)
@@ -765,16 +875,17 @@ cmd_create_mobile_enrollment() {
     ISSUED_AT=$(date +%s)
     EXPIRES_AT=$((ISSUED_AT + 31536000))  # 1 year
 
-    PAYLOAD_JSON=$(jq -n \
-        --arg username "$username" \
-        --arg host "$SERVER_HOST" \
-        --argjson port "$server_port" \
-        --arg ca_fp "$CA_FP" \
-        --arg e_pub "$ED_PUB_RAW_B64" \
-        --arg e_sec "$ED_SEC_RAW_B64" \
-        --argjson issued "$ISSUED_AT" \
-        --argjson expires "$EXPIRES_AT" \
-        '{
+    local payload_jq_args=(
+        --arg username "$username"
+        --arg host "$SERVER_HOST"
+        --argjson port "$server_port"
+        --arg ca_fp "$CA_FP"
+        --arg e_pub "$ED_PUB_RAW_B64"
+        --arg e_sec "$ED_SEC_RAW_B64"
+        --argjson issued "$ISSUED_AT"
+        --argjson expires "$EXPIRES_AT"
+    )
+    local payload_jq_expr='{
             username: $username,
             server_host: $host,
             server_port: $port,
@@ -782,9 +893,17 @@ cmd_create_mobile_enrollment() {
             enrollment_pub: $e_pub,
             enrollment_sec: $e_sec,
             issued_at: $issued,
-            expires_at: $expires
-        }'
-    )
+            expires_at: $expires'
+    if [ -n "$full_name" ]; then
+        payload_jq_args+=(--arg fname "$full_name")
+        payload_jq_expr="$payload_jq_expr, full_name: \$fname"
+    fi
+    if [ -n "$email" ]; then
+        payload_jq_args+=(--arg email "$email")
+        payload_jq_expr="$payload_jq_expr, email: \$email"
+    fi
+    payload_jq_expr="$payload_jq_expr}"
+    PAYLOAD_JSON=$(jq -n "${payload_jq_args[@]}" "$payload_jq_expr")
 
     # Step 5: Encrypt with Argon2id + AES-256-CBC + HMAC-SHA256
     info "Encrypting enrollment package..."
@@ -857,6 +976,8 @@ cmd_create_mobile_enrollment() {
     draw_box ""
     echo "QR Code:            $output_file"
     echo "Username:           $username"
+    [ -n "$full_name" ] && echo "Full Name:          $full_name"
+    [ -n "$email" ]     && echo "Email:              $email"
     echo "Server:             $SERVER_HOST:$SERVER_PORT"
     echo "Enrollment FP:      $ENROLLMENT_FP"
     echo "Payload Size:       $PAYLOAD_SIZE bytes"
@@ -1520,9 +1641,13 @@ show_wizard() {
     echo "  4) Check certificate status and expiration"
     echo "  5) Complete onboarding walkthrough (steps 1-3)"
     echo "  6) Show help and documentation"
+    echo ""
+    echo "  Admin Commands:"
+    echo "  7) Create mobile enrollment package"
+    echo ""
     echo "  0) Exit"
     echo ""
-    read -p "Enter your choice [0-6]: " choice
+    read -p "Enter your choice [0-7]: " choice
 
     case "$choice" in
         1)
@@ -1658,6 +1783,13 @@ show_wizard() {
         6)
             clear
             show_help
+            echo ""
+            read -p "Press Enter to return to main menu..."
+            show_wizard
+            ;;
+        7)
+            clear
+            cmd_create_mobile_enrollment
             echo ""
             read -p "Press Enter to return to main menu..."
             show_wizard

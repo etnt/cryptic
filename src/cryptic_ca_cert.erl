@@ -458,16 +458,12 @@ convert_subject_pk_info(
             {DecParams, #'ECPoint'{point = PublicKey}};
             
         {1,3,101,112} ->
-            % id-Ed25519 (EdDSA)
-            % Params: NULL or absent
-            % Key: Must be wrapped in ECPoint record
-            {{namedCurve, AlgOID}, #'ECPoint'{point = PublicKey}};
+            % id-Ed25519 — parameters MUST be absent per RFC 8410
+            {asn1_NOVALUE, #'ECPoint'{point = PublicKey}};
             
         {1,3,101,113} ->
-            % id-Ed448 (EdDSA)
-            % Params: NULL or absent
-            % Key: Must be wrapped in ECPoint record
-            {{namedCurve, AlgOID}, #'ECPoint'{point = PublicKey}};
+            % id-Ed448 — parameters MUST be absent per RFC 8410
+            {asn1_NOVALUE, #'ECPoint'{point = PublicKey}};
             
         {1,2,840,113549,1,1,1} ->
             % rsaEncryption
@@ -542,12 +538,12 @@ extract_public_key_for_verification(
             {#'ECPoint'{point = PublicKey}, DecParams};
             
         {1,3,101,112} ->
-            % id-Ed25519 (EdDSA)
-            {{namedCurve, AlgOID}, #'ECPoint'{point = PublicKey}};
+            % id-Ed25519 — public_key:verify/4 expects {ed_pub, ed25519, Bytes}
+            {ed_pub, ed25519, PublicKey};
             
         {1,3,101,113} ->
-            % id-Ed448 (EdDSA)
-            {{namedCurve, AlgOID}, #'ECPoint'{point = PublicKey}};
+            % id-Ed448 — public_key:verify/4 expects {ed_pub, ed448, Bytes}
+            {ed_pub, ed448, PublicKey};
             
         {1,2,840,113549,1,1,1} ->
             % rsaEncryption
