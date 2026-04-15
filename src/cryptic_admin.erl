@@ -126,6 +126,18 @@ status() ->
         {error, _} ->
             io:format("  CA database:   not available~n")
     end,
+
+    %% Database location
+    io:format("~n  Paths~n"),
+    io:format("  ─────~n"),
+    DbPath = filename:absname(get_ca_db_path()),
+    io:format("  CA database:     ~ts~n", [DbPath]),
+    BootstrapDir = filename:absname(cryptic_ca_bootstrap:get_bootstrap_dir()),
+    io:format("  Bootstrap dir:   ~ts~n", [BootstrapDir]),
+
+    %% List bootstrap admin files and names
+    print_bootstrap_admins(BootstrapDir),
+
     io:format("~n"),
     ok.
 
@@ -510,6 +522,60 @@ get_db_ref() ->
         error:badarg -> {error, not_available}
     end.
 
+%% @private Resolve the CA database file path using the same logic as cryptic_ca_app.
+-spec get_ca_db_path() -> string().
+get_ca_db_path() ->
+    case cryptic_lib:get_server_file("CRYPTIC_CA_DB_FILE", ca_db_file) of
+        undefined ->
+            case os:getenv("CRYPTIC_SERVER_DIR") of
+                false -> "data/ca/cryptic_ca.db";
+                ServerDir -> filename:join([ServerDir, "data/ca/cryptic_ca.db"])
+            end;
+        Path ->
+            Path
+    end.
+
+%% @private Print bootstrap admin GPG files and the names from their keys.
+-spec print_bootstrap_admins(file:filename()) -> ok.
+print_bootstrap_admins(Dir) ->
+    case file:list_dir(Dir) of
+        {ok, Files} ->
+            GpgFiles = lists:sort([F || F <- Files, filename:extension(F) =:= ".gpg"]),
+            case GpgFiles of
+                [] ->
+                    io:format("  Bootstrap admins: (none)~n");
+                _ ->
+                    io:format("~n  Bootstrap Admins (~p)~n", [length(GpgFiles)]),
+                    io:format("  ─────────────────~n"),
+                    lists:foreach(fun(F) ->
+                        FilePath = filename:join(Dir, F),
+                        NameStr = case file:read_file(FilePath) of
+                            {ok, PubArmor} ->
+                                try
+                                    case erl_gpg_api:get_key_info(PubArmor, "") of
+                                        {ok, KeyInfo} ->
+                                            UIDs = maps:get(user_ids, KeyInfo, []),
+                                            case UIDs of
+                                                [UID | _] ->
+                                                    unicode:characters_to_list(UID);
+                                                [] ->
+                                                    "(no UID)"
+                                            end;
+                                        _ -> "(unreadable key)"
+                                    end
+                                catch _:_ -> "(parse error)"
+                                end;
+                            {error, _} -> "(read error)"
+                        end,
+                        io:format("    ~ts  ->  ~ts~n", [F, NameStr])
+                    end, GpgFiles)
+            end;
+        {error, enoent} ->
+            io:format("  Bootstrap admins: (directory not found)~n");
+        {error, _} ->
+            io:format("  Bootstrap admins: (unreadable)~n")
+    end.
+
 %% @private Check if a chat user is currently connected.
 -spec is_online(string()) -> boolean().
 is_online(User) when is_list(User) ->
@@ -562,9 +628,9 @@ format_bytes(B) ->
 %% @private Print the user table with columns.
 -spec print_users_table(term(), [#gpg_identity{}]) -> ok.
 print_users_table(DbRef, Identities) ->
-    io:format("  ~-16ts ~-10ts ~-8ts ~-22ts ~-22ts  GPG Fingerprint~n",
-              ["Name", "Status", "Online", "Registered", "Last Seen"]),
-    io:format("  ~ts~n", [lists:duplicate(105, $─)]),
+    io:format("  ~-16ts ~-10ts ~-6ts ~-8ts ~-22ts ~-22ts  GPG Fingerprint~n",
+              ["Name", "Status", "Admin", "Online", "Registered", "Last Seen"]),
+    io:format("  ~ts~n", [lists:duplicate(112, $─)]),
     lists:foreach(fun(I) ->
         Fp = I#gpg_identity.gpg_fp,
         UserStatus = I#gpg_identity.status,
@@ -574,6 +640,10 @@ print_users_table(DbRef, Identities) ->
         DisplayName = case get_username_for_gpg(DbRef, Fp) of
             undefined -> "-";
             N -> N
+        end,
+        AdminStr = case I#gpg_identity.registered_by of
+            undefined -> "yes";
+            _         -> "-"
         end,
         CertCN = get_cn_from_cert(DbRef, Fp),
         OnlineStr = case CertCN of
@@ -591,8 +661,9 @@ print_users_table(DbRef, Identities) ->
             false -> binary_to_list(Fp)
         end,
 
-        io:format("  ~-16ts ~-10ts ~-8ts ~-22ts ~-22ts  ~ts~n",
-                  [DisplayName, StatusStr, OnlineStr, RegStr, SeenStr, ShortFp])
+        io:format("  ~-16ts ~-10ts ~-6ts ~-8ts ~-22ts ~-22ts  ~ts~n",
+                  [DisplayName, StatusStr, AdminStr, OnlineStr,
+                   RegStr, SeenStr, ShortFp])
     end, Identities),
     ok.
 
@@ -746,6 +817,8 @@ print_user_detail(DbRef, I) ->
         CN -> io:format("  Certificate CN:  ~ts~n", [CN])
     end,
     io:format("  Status:          ~ts~n", [I#gpg_identity.status]),
+    IsAdmin = I#gpg_identity.registered_by =:= undefined,
+    io:format("  Admin:           ~ts~n", [case IsAdmin of true -> "yes"; false -> "no" end]),
     io:format("  Registered at:   ~ts~n",
               [format_timestamp(I#gpg_identity.registered_at)]),
     io:format("  Last seen:       ~ts~n",
