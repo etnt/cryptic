@@ -10,7 +10,7 @@ init(Req0, State) ->
     Method = cowboy_req:method(Req0),
     Response =
         try
-            handle_request(Method, Req0)
+            handle_request(Method, Req0, State)
         catch
             _:Reason:Stack ->
                 ?error("MCP admin handler crashed: ~p~nStack: ~p", [Reason, Stack]),
@@ -32,8 +32,8 @@ reply_json({StatusCode, BodyMap, Req}, State) ->
     ),
     {ok, Req2, State}.
 
-handle_request(<<"GET">>, Req0) ->
-    Operation = cowboy_req:binding(operation, Req0),
+handle_request(<<"GET">>, Req0, State) ->
+    Operation = maps:get(operation, State, undefined),
     case Operation of
         <<"list_users">> ->
             with_admin(
@@ -74,13 +74,13 @@ handle_request(<<"GET">>, Req0) ->
                 message => <<"not_found">>
             }, Req0}
     end;
-handle_request(<<"POST">>, Req0) ->
+handle_request(<<"POST">>, Req0, State) ->
     {ok, RawBody, Req1} = cowboy_req:read_body(Req0),
     case decode_json_body(RawBody) of
         {error, Reason} ->
             bad_request(Reason, Req1);
         {ok, BodyMap} ->
-            Operation = cowboy_req:binding(operation, Req1),
+            Operation = maps:get(operation, State, undefined),
             with_admin(
                 Req1,
                 BodyMap,
@@ -89,7 +89,7 @@ handle_request(<<"POST">>, Req0) ->
                 end
             )
     end;
-handle_request(_, Req0) ->
+handle_request(_, Req0, _State) ->
     {405, #{
         type => <<"error">>,
         status => <<"error">>,
@@ -128,10 +128,11 @@ handle_post_operation(<<"suspend_user">>, BodyMap, AdminFp, DbRef, Req) ->
             case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"suspended">>) of
                 ok ->
                     Now = erlang:system_time(second),
-                    log_audit(DbRef, <<"user_suspended">>, GpgFp, #{
+                    AuditResult = log_audit(DbRef, <<"user_suspended">>, GpgFp, #{
                         suspended_by => AdminFp,
                         reason => Reason
                     }),
+                    log_audit_result(AuditResult, <<"user_suspended">>, GpgFp),
                     {200, #{
                         type => <<"suspend_user_response">>,
                         status => <<"success">>,
@@ -156,10 +157,11 @@ handle_post_operation(<<"revoke_user">>, BodyMap, AdminFp, DbRef, Req) ->
             case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"revoked">>) of
                 ok ->
                     Now = erlang:system_time(second),
-                    log_audit(DbRef, <<"user_revoked">>, GpgFp, #{
+                    AuditResult = log_audit(DbRef, <<"user_revoked">>, GpgFp, #{
                         revoked_by => AdminFp,
                         reason => Reason
                     }),
+                    log_audit_result(AuditResult, <<"user_revoked">>, GpgFp),
                     {200, #{
                         type => <<"revoke_user_response">>,
                         status => <<"success">>,
@@ -199,9 +201,10 @@ handle_post_operation(<<"reactivate_user">>, BodyMap, AdminFp, DbRef, Req) ->
                     case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"active">>) of
                         ok ->
                             Now = erlang:system_time(second),
-                            log_audit(DbRef, <<"user_reactivated">>, GpgFp, #{
+                            AuditResult = log_audit(DbRef, <<"user_reactivated">>, GpgFp, #{
                                 reactivated_by => AdminFp
                             }),
+                            log_audit_result(AuditResult, <<"user_reactivated">>, GpgFp),
                             {200, #{
                                 type => <<"reactivate_user_response">>,
                                 status => <<"success">>,
@@ -419,7 +422,7 @@ encode_user(DbRef, #gpg_identity{
 }) ->
     Username = case get_username_from_gpg_fp(DbRef, Fp) of
         {ok, Name} -> list_to_binary(Name);
-        {error, not_found} -> <<"unknown">>
+        {error, _Reason} -> <<"unknown">>
     end,
     UserMap = #{
         gpg_fp => Fp,
@@ -518,6 +521,15 @@ log_audit(DbRef, EventType, GpgFp, DetailsMap) ->
         ip_address = <<"127.0.0.1">>
     },
     cryptic_ca_store:insert_audit_log(DbRef, AuditLog).
+
+log_audit_result(ok, _EventType, _GpgFp) ->
+    ok;
+log_audit_result({error, Reason}, EventType, GpgFp) ->
+    ?warning("Failed to write audit log for ~s on ~s: ~p", [EventType, GpgFp, Reason]),
+    ok;
+log_audit_result(Other, EventType, GpgFp) ->
+    ?warning("Unexpected audit log result for ~s on ~s: ~p", [EventType, GpgFp, Other]),
+    ok.
 
 bad_request(Reason, Req) ->
     {400, #{
