@@ -385,6 +385,25 @@ continue(CfgMap) ->
             ?info("WebSocket mTLS server disabled~n", [])
     end,
 
+    %% Optional localhost-only MCP admin HTTP endpoint (plain TCP)
+    MCPEnabled =
+        case application:get_env(cryptic, mcp_tcp_enabled) of
+            {ok, true} -> true;
+            undefined -> false;
+            _ -> false
+        end,
+    case MCPEnabled of
+        true ->
+            MCPPort =
+                case application:get_env(cryptic, mcp_tcp_port) of
+                    {ok, Port} -> Port;
+                    undefined -> 8081
+                end,
+            start_mcp_localhost_tcp(#{port => MCPPort});
+        false ->
+            ?info("MCP localhost TCP endpoint disabled~n", [])
+    end,
+
     {noreply, CfgMap}.
 
 %% @doc Returns the list of ETS table names to create
@@ -463,6 +482,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, _State) ->
     %% Stop WebSocket mTLS server (if it was started)
     catch cowboy:stop_listener(cryptic_ws_listener),
+    catch cowboy:stop_listener(cryptic_mcp_listener),
 
     %% Clean up ETS tables
     [ets:delete(Table) || Table <- ets_tables()],
@@ -628,6 +648,59 @@ start_websocket_mtls(Config) ->
     ),
 
     ?info("Cryptic WebSocket server with mTLS started on port ~p~n", [Port]),
+    {ok, started}.
+
+start_mcp_localhost_tcp(Config) ->
+    application:ensure_all_started(cowboy),
+
+    Port =
+        case os:getenv("CRYPTIC_MCP_PORT") of
+            false ->
+                maps:get(port, Config, 8081);
+            PortStr ->
+                list_to_integer(PortStr)
+        end,
+
+    Dispatch = cowboy_router:compile([
+        {'_', [
+            {"/mcp/v1/admin/list_users", cryptic_mcp_admin_handler, #{
+                operation => <<"list_users">>
+            }},
+            {"/mcp/v1/admin/user/:gpg_fp", cryptic_mcp_admin_handler, #{
+                operation => <<"get_user_info">>
+            }},
+            {"/mcp/v1/admin/user/:gpg_fp/certificates", cryptic_mcp_admin_handler, #{
+                operation => <<"list_certificates">>
+            }},
+            {"/mcp/v1/admin/register_user", cryptic_mcp_admin_handler, #{
+                operation => <<"register_user">>
+            }},
+            {"/mcp/v1/admin/suspend_user", cryptic_mcp_admin_handler, #{
+                operation => <<"suspend_user">>
+            }},
+            {"/mcp/v1/admin/revoke_user", cryptic_mcp_admin_handler, #{
+                operation => <<"revoke_user">>
+            }},
+            {"/mcp/v1/admin/reactivate_user", cryptic_mcp_admin_handler, #{
+                operation => <<"reactivate_user">>
+            }},
+            {"/mcp/v1/admin/revoke_certificate", cryptic_mcp_admin_handler, #{
+                operation => <<"revoke_certificate">>
+            }}
+        ]}
+    ]),
+
+    ?info("Starting MCP localhost TCP endpoint on 127.0.0.1:~p~n", [Port]),
+    {ok, _} = cowboy:start_clear(
+        cryptic_mcp_listener,
+        [
+            %% Security boundary: bind admin MCP endpoint to localhost only.
+            {ip, {127, 0, 0, 1}},
+            {port, Port}
+        ],
+        #{env => #{dispatch => Dispatch}}
+    ),
+    ?info("MCP localhost TCP endpoint started on 127.0.0.1:~p~n", [Port]),
     {ok, started}.
 
 

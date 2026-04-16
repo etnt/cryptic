@@ -26,6 +26,10 @@
         {websocket_mtls_enabled, true},
         {websocket_mtls_port, 8443},
 
+        % Localhost-only MCP admin HTTP endpoint (plain TCP)
+        {mcp_tcp_enabled, false},
+        {mcp_tcp_port, 8081},
+
         % Poll interval (seconds)
         {poll_interval, 2},
 
