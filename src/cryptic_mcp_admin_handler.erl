@@ -131,7 +131,7 @@ handle_post_operation(<<"suspend_user">>, BodyMap, AdminFp, DbRef, Req) ->
                     AuditResult = log_audit(DbRef, <<"user_suspended">>, GpgFp, #{
                         suspended_by => AdminFp,
                         reason => Reason
-                    }),
+                    }, Req),
                     log_audit_result(AuditResult, <<"user_suspended">>, GpgFp),
                     {200, #{
                         type => <<"suspend_user_response">>,
@@ -160,7 +160,7 @@ handle_post_operation(<<"revoke_user">>, BodyMap, AdminFp, DbRef, Req) ->
                     AuditResult = log_audit(DbRef, <<"user_revoked">>, GpgFp, #{
                         revoked_by => AdminFp,
                         reason => Reason
-                    }),
+                    }, Req),
                     log_audit_result(AuditResult, <<"user_revoked">>, GpgFp),
                     {200, #{
                         type => <<"revoke_user_response">>,
@@ -203,7 +203,7 @@ handle_post_operation(<<"reactivate_user">>, BodyMap, AdminFp, DbRef, Req) ->
                             Now = erlang:system_time(second),
                             AuditResult = log_audit(DbRef, <<"user_reactivated">>, GpgFp, #{
                                 reactivated_by => AdminFp
-                            }),
+                            }, Req),
                             log_audit_result(AuditResult, <<"user_reactivated">>, GpgFp),
                             {200, #{
                                 type => <<"reactivate_user_response">>,
@@ -511,16 +511,27 @@ is_online(User) ->
         not_found -> false
     end.
 
-log_audit(DbRef, EventType, GpgFp, DetailsMap) ->
+log_audit(DbRef, EventType, GpgFp, DetailsMap, Req) ->
+    IpAddress = peer_ip(Req),
     AuditLog = #audit_log{
         timestamp = erlang:system_time(second),
         event_type = EventType,
         gpg_fp = GpgFp,
         invite_id = undefined,
         details = jsx:encode(DetailsMap),
-        ip_address = <<"127.0.0.1">>
+        ip_address = IpAddress
     },
     cryptic_ca_store:insert_audit_log(DbRef, AuditLog).
+
+peer_ip(Req) ->
+    case cowboy_req:peer(Req) of
+        {{A, B, C, D}, _Port} ->
+            iolist_to_binary(io_lib:format("~b.~b.~b.~b", [A, B, C, D]));
+        {{_, _, _, _, _, _, _, _} = IPv6, _Port} ->
+            iolist_to_binary(inet:ntoa(IPv6));
+        _ ->
+            <<"unknown">>
+    end.
 
 log_audit_result(ok, _EventType, _GpgFp) ->
     ok;
