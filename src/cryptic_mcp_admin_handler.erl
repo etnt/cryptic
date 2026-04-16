@@ -131,7 +131,7 @@ handle_post_operation(<<"suspend_user">>, BodyMap, AdminFp, DbRef, Req) ->
                     AuditResult = log_audit(DbRef, <<"user_suspended">>, GpgFp, #{
                         suspended_by => AdminFp,
                         reason => Reason
-                    }, Req),
+                    }, Req, Now),
                     log_audit_result(AuditResult, <<"user_suspended">>, GpgFp),
                     {200, #{
                         type => <<"suspend_user_response">>,
@@ -160,7 +160,7 @@ handle_post_operation(<<"revoke_user">>, BodyMap, AdminFp, DbRef, Req) ->
                     AuditResult = log_audit(DbRef, <<"user_revoked">>, GpgFp, #{
                         revoked_by => AdminFp,
                         reason => Reason
-                    }, Req),
+                    }, Req, Now),
                     log_audit_result(AuditResult, <<"user_revoked">>, GpgFp),
                     {200, #{
                         type => <<"revoke_user_response">>,
@@ -203,7 +203,7 @@ handle_post_operation(<<"reactivate_user">>, BodyMap, AdminFp, DbRef, Req) ->
                             Now = erlang:system_time(second),
                             AuditResult = log_audit(DbRef, <<"user_reactivated">>, GpgFp, #{
                                 reactivated_by => AdminFp
-                            }, Req),
+                            }, Req, Now),
                             log_audit_result(AuditResult, <<"user_reactivated">>, GpgFp),
                             {200, #{
                                 type => <<"reactivate_user_response">>,
@@ -310,6 +310,7 @@ get_db_ref() ->
     end.
 
 get_admin_fingerprint(Req, BodyMap) ->
+    %% Priority order: explicit header, then JSON body, then query string.
     case cowboy_req:header(<<"x-admin-gpg-fp">>, Req) of
         undefined ->
             case maps:get(<<"admin_gpg_fp">>, BodyMap, undefined) of
@@ -512,10 +513,10 @@ is_online(User) ->
         not_found -> false
     end.
 
-log_audit(DbRef, EventType, GpgFp, DetailsMap, Req) ->
+log_audit(DbRef, EventType, GpgFp, DetailsMap, Req, Timestamp) ->
     IpAddress = peer_ip(Req),
     AuditLog = #audit_log{
-        timestamp = erlang:system_time(second),
+        timestamp = Timestamp,
         event_type = EventType,
         gpg_fp = GpgFp,
         invite_id = undefined,

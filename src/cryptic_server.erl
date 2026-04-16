@@ -389,7 +389,7 @@ continue(CfgMap) ->
     MCPEnabled =
         case application:get_env(cryptic, mcp_tcp_enabled) of
             {ok, true} -> true;
-            undefined -> true;
+            undefined -> false;
             _ -> false
         end,
     case MCPEnabled of
@@ -686,6 +686,7 @@ start_mcp_localhost_tcp(Config) ->
     {ok, _} = cowboy:start_clear(
         cryptic_mcp_listener,
         [
+            %% Security boundary: bind admin MCP endpoint to localhost only.
             {ip, {127, 0, 0, 1}},
             {port, Port}
         ],
