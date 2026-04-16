@@ -325,6 +325,7 @@ get_admin_fingerprint(Req, BodyMap) ->
 is_admin(undefined, _DbRef) ->
     false;
 is_admin(GpgFp, DbRef) ->
+    %% Bootstrap/root admins are identities with no registered_by owner.
     case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
         {ok, #gpg_identity{registered_by = undefined}} -> true;
         _ -> false
@@ -527,8 +528,13 @@ peer_ip(Req) ->
     case cowboy_req:peer(Req) of
         {{A, B, C, D}, _Port} ->
             iolist_to_binary(io_lib:format("~b.~b.~b.~b", [A, B, C, D]));
-        {{_, _, _, _, _, _, _, _} = IPv6, _Port} ->
-            iolist_to_binary(inet:ntoa(IPv6));
+        {Addr, _Port} when is_tuple(Addr) ->
+            case inet:ntoa(Addr) of
+                Ip when is_list(Ip) ->
+                    iolist_to_binary(Ip);
+                _ ->
+                    <<"unknown">>
+            end;
         _ ->
             <<"unknown">>
     end.
