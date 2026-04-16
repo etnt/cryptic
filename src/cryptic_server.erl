@@ -396,7 +396,7 @@ continue(CfgMap) ->
         true ->
             MCPPort =
                 case application:get_env(cryptic, mcp_tcp_port) of
-                    {ok, Port} -> Port;
+                    {ok, MCPPort0} -> MCPPort0;
                     undefined -> 8081
                 end,
             start_mcp_localhost_tcp(#{port => MCPPort});
@@ -686,6 +686,52 @@ start_mcp_localhost_tcp(Config) ->
             }},
             {"/mcp/v1/admin/revoke_certificate", cryptic_mcp_admin_handler, #{
                 operation => <<"revoke_certificate">>
+            }},
+            %% New admin endpoints
+            {"/mcp/v1/admin/status", cryptic_mcp_admin_handler, #{
+                operation => <<"status">>
+            }},
+            {"/mcp/v1/admin/online", cryptic_mcp_admin_handler, #{
+                operation => <<"online">>
+            }},
+            {"/mcp/v1/admin/connections", cryptic_mcp_admin_handler, #{
+                operation => <<"connections">>
+            }},
+            {"/mcp/v1/admin/pending", cryptic_mcp_admin_handler, #{
+                operation => <<"pending">>
+            }},
+            {"/mcp/v1/admin/pending/:user", cryptic_mcp_admin_handler, #{
+                operation => <<"pending_for_user">>
+            }},
+            {"/mcp/v1/admin/keys", cryptic_mcp_admin_handler, #{
+                operation => <<"keys">>
+            }},
+            {"/mcp/v1/admin/keys/:user", cryptic_mcp_admin_handler, #{
+                operation => <<"keys_for_user">>
+            }},
+            {"/mcp/v1/admin/audit", cryptic_mcp_admin_handler, #{
+                operation => <<"audit">>
+            }},
+            {"/mcp/v1/admin/enrollments", cryptic_mcp_admin_handler, #{
+                operation => <<"list_enrollments">>
+            }},
+            {"/mcp/v1/admin/enrollment/:enrollment_fp", cryptic_mcp_admin_handler, #{
+                operation => <<"get_enrollment_info">>
+            }},
+            {"/mcp/v1/admin/register_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"register_enrollment">>
+            }},
+            {"/mcp/v1/admin/suspend_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"suspend_enrollment">>
+            }},
+            {"/mcp/v1/admin/revoke_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"revoke_enrollment">>
+            }},
+            {"/mcp/v1/admin/reactivate_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"reactivate_enrollment">>
+            }},
+            {"/mcp/v1/admin/delete_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"delete_enrollment">>
             }}
         ]}
     ]),

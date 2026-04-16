@@ -2,7 +2,7 @@
 
 -export([init/2]).
 
--include("cryptic.hrl").
+-include("cryptic_server.hrl").
 -include("cryptic_ca.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
@@ -64,6 +64,101 @@ handle_request(<<"GET">>, Req0, State) ->
                             bad_request(<<"missing_gpg_fp">>, Req1);
                         GpgFp ->
                             list_certificates(DbRef, GpgFp, Req1)
+                    end
+                end
+            );
+        <<"status">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, DbRef, Req1) ->
+                    get_server_status(DbRef, Req1)
+                end
+            );
+        <<"online">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    get_online_users(Req1)
+                end
+            );
+        <<"connections">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    get_connections(Req1)
+                end
+            );
+        <<"pending">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    get_pending_messages(Req1)
+                end
+            );
+        <<"pending_for_user">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    case cowboy_req:binding(user, Req1) of
+                        undefined ->
+                            bad_request(<<"missing_user">>, Req1);
+                        User ->
+                            get_pending_messages_for_user(User, Req1)
+                    end
+                end
+            );
+        <<"keys">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    get_key_bundles(Req1)
+                end
+            );
+        <<"keys_for_user">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    case cowboy_req:binding(user, Req1) of
+                        undefined ->
+                            bad_request(<<"missing_user">>, Req1);
+                        User ->
+                            get_key_bundle_for_user(User, Req1)
+                    end
+                end
+            );
+        <<"audit">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, DbRef, Req1) ->
+                    LimitBin = query_value(<<"limit">>, Req1),
+                    Limit = case LimitBin of
+                        undefined -> 20;
+                        <<>> -> 20;
+                        _ ->
+                            try binary_to_integer(LimitBin)
+                            catch _:_ -> 20
+                            end
+                    end,
+                    get_audit_log(DbRef, Limit, Req1)
+                end
+            );
+        <<"list_enrollments">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, DbRef, Req1) ->
+                    Filter = query_value(<<"filter">>, Req1),
+                    list_enrollments(DbRef, Filter, Req1)
+                end
+            );
+        <<"get_enrollment_info">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, DbRef, Req1) ->
+                    case cowboy_req:binding(enrollment_fp, Req1) of
+                        undefined ->
+                            bad_request(<<"missing_enrollment_fp">>, Req1);
+                        Fp ->
+                            get_enrollment_info(DbRef, Fp, Req1)
                     end
                 end
             );
@@ -239,6 +334,171 @@ handle_post_operation(<<"revoke_certificate">>, BodyMap, AdminFp, DbRef, Req) ->
                     }, Req};
                 {error, Reason2} ->
                     error_response(400, Reason2, Req)
+            end
+        end,
+        Req
+    );
+handle_post_operation(<<"register_enrollment">>, BodyMap, AdminFp, DbRef, Req) ->
+    with_required_fields(
+        BodyMap,
+        [<<"enrollment_fp">>, <<"enrollment_pub">>, <<"username">>],
+        fun() ->
+            EnrollmentFp = maps:get(<<"enrollment_fp">>, BodyMap),
+            EnrollmentPubB64 = maps:get(<<"enrollment_pub">>, BodyMap),
+            Username = maps:get(<<"username">>, BodyMap),
+            Metadata = maps:get(<<"metadata">>, BodyMap, undefined),
+            case base64:decode(EnrollmentPubB64) of
+                EnrollmentPub when byte_size(EnrollmentPub) =:= 32 ->
+                    Now = erlang:system_time(second),
+                    Identity = #enrollment_identity{
+                        enrollment_fp = EnrollmentFp,
+                        enrollment_pub = EnrollmentPub,
+                        username = Username,
+                        status = <<"active">>,
+                        registered_by = AdminFp,
+                        registered_at = Now,
+                        metadata = Metadata
+                    },
+                    case cryptic_ca_store:insert_enrollment_identity(DbRef, Identity) of
+                        ok ->
+                            AuditResult = log_audit(DbRef, <<"enrollment_registered">>,
+                                EnrollmentFp, #{registered_by => AdminFp, username => Username},
+                                Req, Now),
+                            log_audit_result(AuditResult, <<"enrollment_registered">>, EnrollmentFp),
+                            {200, #{
+                                type => <<"register_enrollment_response">>,
+                                status => <<"success">>,
+                                enrollment_fp => EnrollmentFp,
+                                username => Username,
+                                registered_by => AdminFp
+                            }, Req};
+                        {error, Reason} ->
+                            error_response(400, Reason, Req)
+                    end;
+                _ ->
+                    bad_request(<<"invalid_public_key_must_be_32_bytes_ed25519">>, Req)
+            end
+        end,
+        Req
+    );
+handle_post_operation(<<"suspend_enrollment">>, BodyMap, AdminFp, DbRef, Req) ->
+    with_required_fields(
+        BodyMap,
+        [<<"enrollment_fp">>],
+        fun() ->
+            EnrollmentFp = maps:get(<<"enrollment_fp">>, BodyMap),
+            Reason = maps:get(<<"reason">>, BodyMap, <<"No reason provided">>),
+            case cryptic_ca_store:update_enrollment_status(DbRef, EnrollmentFp, <<"suspended">>) of
+                ok ->
+                    Now = erlang:system_time(second),
+                    AuditResult = log_audit(DbRef, <<"enrollment_suspended">>, EnrollmentFp, #{
+                        suspended_by => AdminFp, reason => Reason
+                    }, Req, Now),
+                    log_audit_result(AuditResult, <<"enrollment_suspended">>, EnrollmentFp),
+                    {200, #{
+                        type => <<"suspend_enrollment_response">>,
+                        status => <<"success">>,
+                        enrollment_fp => EnrollmentFp,
+                        new_status => <<"suspended">>,
+                        suspended_by => AdminFp
+                    }, Req};
+                {error, Reason2} ->
+                    error_response(400, Reason2, Req)
+            end
+        end,
+        Req
+    );
+handle_post_operation(<<"revoke_enrollment">>, BodyMap, AdminFp, DbRef, Req) ->
+    with_required_fields(
+        BodyMap,
+        [<<"enrollment_fp">>],
+        fun() ->
+            EnrollmentFp = maps:get(<<"enrollment_fp">>, BodyMap),
+            Reason = maps:get(<<"reason">>, BodyMap, <<"No reason provided">>),
+            case cryptic_ca_store:update_enrollment_status(DbRef, EnrollmentFp, <<"revoked">>) of
+                ok ->
+                    Now = erlang:system_time(second),
+                    AuditResult = log_audit(DbRef, <<"enrollment_revoked">>, EnrollmentFp, #{
+                        revoked_by => AdminFp, reason => Reason
+                    }, Req, Now),
+                    log_audit_result(AuditResult, <<"enrollment_revoked">>, EnrollmentFp),
+                    {200, #{
+                        type => <<"revoke_enrollment_response">>,
+                        status => <<"success">>,
+                        enrollment_fp => EnrollmentFp,
+                        new_status => <<"revoked">>,
+                        revoked_by => AdminFp
+                    }, Req};
+                {error, Reason2} ->
+                    error_response(400, Reason2, Req)
+            end
+        end,
+        Req
+    );
+handle_post_operation(<<"reactivate_enrollment">>, BodyMap, AdminFp, DbRef, Req) ->
+    with_required_fields(
+        BodyMap,
+        [<<"enrollment_fp">>],
+        fun() ->
+            EnrollmentFp = maps:get(<<"enrollment_fp">>, BodyMap),
+            case cryptic_ca_store:get_enrollment_identity(DbRef, EnrollmentFp) of
+                {ok, #enrollment_identity{status = <<"revoked">>}} ->
+                    {400, #{
+                        type => <<"reactivate_enrollment_response">>,
+                        status => <<"error">>,
+                        error => <<"cannot_reactivate_revoked">>,
+                        message => <<"Revoked enrollments cannot be reactivated">>
+                    }, Req};
+                {ok, #enrollment_identity{status = <<"active">>}} ->
+                    {200, #{
+                        type => <<"reactivate_enrollment_response">>,
+                        status => <<"success">>,
+                        enrollment_fp => EnrollmentFp,
+                        message => <<"Enrollment already active">>
+                    }, Req};
+                {ok, _} ->
+                    case cryptic_ca_store:update_enrollment_status(DbRef, EnrollmentFp, <<"active">>) of
+                        ok ->
+                            Now = erlang:system_time(second),
+                            AuditResult = log_audit(DbRef, <<"enrollment_reactivated">>,
+                                EnrollmentFp, #{reactivated_by => AdminFp}, Req, Now),
+                            log_audit_result(AuditResult, <<"enrollment_reactivated">>, EnrollmentFp),
+                            {200, #{
+                                type => <<"reactivate_enrollment_response">>,
+                                status => <<"success">>,
+                                enrollment_fp => EnrollmentFp,
+                                new_status => <<"active">>,
+                                reactivated_by => AdminFp
+                            }, Req};
+                        {error, Reason} ->
+                            error_response(400, Reason, Req)
+                    end;
+                {error, Reason2} ->
+                    error_response(404, Reason2, Req)
+            end
+        end,
+        Req
+    );
+handle_post_operation(<<"delete_enrollment">>, BodyMap, AdminFp, DbRef, Req) ->
+    with_required_fields(
+        BodyMap,
+        [<<"enrollment_fp">>],
+        fun() ->
+            EnrollmentFp = maps:get(<<"enrollment_fp">>, BodyMap),
+            case cryptic_ca_store:delete_enrollment_identity(DbRef, EnrollmentFp) of
+                ok ->
+                    Now = erlang:system_time(second),
+                    AuditResult = log_audit(DbRef, <<"enrollment_deleted">>,
+                        EnrollmentFp, #{deleted_by => AdminFp}, Req, Now),
+                    log_audit_result(AuditResult, <<"enrollment_deleted">>, EnrollmentFp),
+                    {200, #{
+                        type => <<"delete_enrollment_response">>,
+                        status => <<"success">>,
+                        enrollment_fp => EnrollmentFp,
+                        deleted_by => AdminFp
+                    }, Req};
+                {error, Reason} ->
+                    error_response(400, Reason, Req)
             end
         end,
         Req
@@ -564,3 +824,311 @@ error_response(StatusCode, Reason, Req) ->
         status => <<"error">>,
         message => <<"operation_failed">>
     }, Req}.
+
+%%%===================================================================
+%%% Server Status
+%%%===================================================================
+
+get_server_status(DbRef, Req) ->
+    %% Listener info
+    Listener = try ranch:info(cryptic_ws_listener) of
+        Info when is_map(Info) ->
+            Port = maps:get(port, Info, null),
+            ActiveConns = ranch:procs(cryptic_ws_listener, connections),
+            #{status => <<"running">>, port => Port,
+              active_connections => length(ActiveConns)};
+        _ ->
+            #{status => <<"not_running">>}
+    catch
+        _:_ -> #{status => <<"not_running">>}
+    end,
+
+    %% ETS table sizes
+    Tables = [
+        {?CONNECTION_TABLE, <<"connections">>},
+        {?USER_TABLE, <<"registered_users">>},
+        {?MESSAGE_TABLE, <<"pending_messages">>},
+        {?PREKEY_TABLE, <<"prekey_entries">>}
+    ],
+    EtsTables = lists:map(fun({Table, Label}) ->
+        Size = case ets:info(Table, size) of
+            undefined -> null;
+            S -> S
+        end,
+        #{name => Label, size => Size}
+    end, Tables),
+
+    %% CA status
+    CaStatus = case cryptic_ca_store:list_gpg_identities(DbRef) of
+        {ok, Identities} ->
+            Active = length([I || I <- Identities,
+                                  I#gpg_identity.status =:= <<"active">>]),
+            Suspended = length([I || I <- Identities,
+                                     I#gpg_identity.status =:= <<"suspended">>]),
+            Revoked = length([I || I <- Identities,
+                                   I#gpg_identity.status =:= <<"revoked">>]),
+            #{status => <<"connected">>,
+              active => Active, suspended => Suspended, revoked => Revoked};
+        {error, _} ->
+            #{status => <<"error">>}
+    end,
+
+    {200, #{
+        type => <<"status_response">>,
+        status => <<"success">>,
+        listener => Listener,
+        ets_tables => EtsTables,
+        ca => CaStatus
+    }, Req}.
+
+%%%===================================================================
+%%% Online Users
+%%%===================================================================
+
+get_online_users(Req) ->
+    Connections = ets:tab2list(?CONNECTION_TABLE),
+    Users = lists:map(fun({Username, _Pid}) ->
+        UsernameB = if is_list(Username) -> list_to_binary(Username);
+                       is_binary(Username) -> Username;
+                       true -> list_to_binary(io_lib:format("~p", [Username]))
+                    end,
+        #{username => UsernameB}
+    end, lists:sort(Connections)),
+    {200, #{
+        type => <<"online_response">>,
+        status => <<"success">>,
+        count => length(Users),
+        users => Users
+    }, Req}.
+
+%%%===================================================================
+%%% Connections
+%%%===================================================================
+
+get_connections(Req) ->
+    Connections = ets:tab2list(?CONNECTION_TABLE),
+    ConnList = lists:map(fun({Username, Pid}) ->
+        UsernameB = if is_list(Username) -> list_to_binary(Username);
+                       is_binary(Username) -> Username;
+                       true -> list_to_binary(io_lib:format("~p", [Username]))
+                    end,
+        Alive = is_process_alive(Pid),
+        ProcInfo = case Alive of
+            true ->
+                case erlang:process_info(Pid, [message_queue_len, memory, reductions]) of
+                    undefined ->
+                        #{alive => true};
+                    Props ->
+                        MsgQ = proplists:get_value(message_queue_len, Props, 0),
+                        Mem = proplists:get_value(memory, Props, 0),
+                        Reds = proplists:get_value(reductions, Props, 0),
+                        #{alive => true, message_queue_len => MsgQ,
+                          memory_bytes => Mem, reductions => Reds}
+                end;
+            false ->
+                #{alive => false}
+        end,
+        ProcInfo#{username => UsernameB, pid => list_to_binary(pid_to_list(Pid))}
+    end, lists:sort(Connections)),
+    {200, #{
+        type => <<"connections_response">>,
+        status => <<"success">>,
+        count => length(ConnList),
+        connections => ConnList
+    }, Req}.
+
+%%%===================================================================
+%%% Pending Messages
+%%%===================================================================
+
+get_pending_messages(Req) ->
+    Messages = ets:tab2list(?MESSAGE_TABLE),
+    Grouped = lists:foldl(fun({_Id, ToUser, _Blob}, Acc) ->
+        ToUserB = if is_list(ToUser) -> list_to_binary(ToUser);
+                     is_binary(ToUser) -> ToUser;
+                     true -> list_to_binary(io_lib:format("~p", [ToUser]))
+                  end,
+        maps:update_with(ToUserB, fun(V) -> V + 1 end, 1, Acc)
+    end, #{}, Messages),
+    PerUser = maps:fold(fun(User, Count, Acc) ->
+        [#{user => User, count => Count} | Acc]
+    end, [], Grouped),
+    {200, #{
+        type => <<"pending_response">>,
+        status => <<"success">>,
+        total => length(Messages),
+        per_user => PerUser
+    }, Req}.
+
+get_pending_messages_for_user(User, Req) ->
+    UserStr = binary_to_list(User),
+    Messages = [{From, Type, Ts} ||
+        {_Id, ToUser, Blob} <- ets:tab2list(?MESSAGE_TABLE),
+        ToUser =:= UserStr,
+        From <- [maps:get(<<"from_user">>, Blob, <<"?">>)],
+        Type <- [maps:get(<<"message_type">>, Blob,
+                 maps:get(<<"type">>, Blob, <<"unknown">>))],
+        Ts <- [maps:get(<<"server_timestamp">>, Blob, 0)]
+    ],
+    MsgList = lists:map(fun({From, Type, Ts}) ->
+        #{from => From, message_type => Type, timestamp => Ts}
+    end, Messages),
+    {200, #{
+        type => <<"pending_for_user_response">>,
+        status => <<"success">>,
+        user => User,
+        count => length(MsgList),
+        messages => MsgList
+    }, Req}.
+
+%%%===================================================================
+%%% Key Bundles
+%%%===================================================================
+
+get_key_bundles(Req) ->
+    AllPrekeys = ets:tab2list(?PREKEY_TABLE),
+    UserSet = lists:foldl(fun
+        ({{Username, identity}, _}, Acc) -> sets:add_element(Username, Acc);
+        ({{Username, signed_prekey, _}, _}, Acc) -> sets:add_element(Username, Acc);
+        ({{Username, one_time_prekey, _}, _}, Acc) -> sets:add_element(Username, Acc);
+        (_, Acc) -> Acc
+    end, sets:new(), AllPrekeys),
+    Users = lists:sort(sets:to_list(UserSet)),
+    Bundles = lists:map(fun(Username) ->
+        HasIdentity = ets:member(?PREKEY_TABLE, {Username, identity}),
+        OtpkCount = length([ok || {{U, one_time_prekey, _}, _} <- AllPrekeys,
+                                   U =:= Username]),
+        UsernameB = if is_list(Username) -> list_to_binary(Username);
+                       is_binary(Username) -> Username;
+                       true -> list_to_binary(io_lib:format("~p", [Username]))
+                    end,
+        #{username => UsernameB,
+          has_identity_keys => HasIdentity,
+          one_time_prekey_count => OtpkCount}
+    end, Users),
+    {200, #{
+        type => <<"keys_response">>,
+        status => <<"success">>,
+        count => length(Bundles),
+        key_bundles => Bundles
+    }, Req}.
+
+get_key_bundle_for_user(User, Req) ->
+    UserStr = binary_to_list(User),
+    HasIdentity = ets:member(?PREKEY_TABLE, {UserStr, identity}),
+    IdentityFields = case ets:lookup(?PREKEY_TABLE, {UserStr, identity}) of
+        [{_, Data}] when is_map(Data) -> maps:keys(Data);
+        [{_, _}] -> [<<"binary_data">>];
+        [] -> []
+    end,
+    AllPrekeys = ets:tab2list(?PREKEY_TABLE),
+    OtpkIds = lists:sort([Id || {{U, one_time_prekey, Id}, _} <- AllPrekeys,
+                                 U =:= UserStr]),
+    FieldsBin = [if is_atom(F) -> atom_to_binary(F, utf8);
+                    is_binary(F) -> F;
+                    true -> list_to_binary(io_lib:format("~p", [F]))
+                 end || F <- IdentityFields],
+    {200, #{
+        type => <<"keys_for_user_response">>,
+        status => <<"success">>,
+        user => User,
+        has_identity_keys => HasIdentity,
+        identity_key_fields => FieldsBin,
+        one_time_prekey_count => length(OtpkIds),
+        one_time_prekey_ids => OtpkIds
+    }, Req}.
+
+%%%===================================================================
+%%% Audit Log
+%%%===================================================================
+
+get_audit_log(DbRef, Limit, Req) ->
+    case cryptic_ca_store:get_audit_logs(DbRef, Limit, 0) of
+        {ok, Logs} ->
+            LogList = lists:map(fun(Log) ->
+                #{
+                    timestamp => Log#audit_log.timestamp,
+                    event_type => Log#audit_log.event_type,
+                    gpg_fp => coalesce(Log#audit_log.gpg_fp, null),
+                    invite_id => coalesce(Log#audit_log.invite_id, null),
+                    details => parse_details(Log#audit_log.details),
+                    ip_address => coalesce(Log#audit_log.ip_address, null)
+                }
+            end, Logs),
+            {200, #{
+                type => <<"audit_response">>,
+                status => <<"success">>,
+                count => length(LogList),
+                limit => Limit,
+                entries => LogList
+            }, Req};
+        {error, Reason} ->
+            error_response(500, Reason, Req)
+    end.
+
+coalesce(undefined, Default) -> Default;
+coalesce(Value, _Default) -> Value.
+
+parse_details(undefined) -> null;
+parse_details(Details) ->
+    try jsx:decode(Details, [return_maps])
+    catch _:_ -> Details
+    end.
+
+%%%===================================================================
+%%% Enrollment Identities
+%%%===================================================================
+
+list_enrollments(DbRef, Filter, Req) ->
+    case cryptic_ca_store:list_enrollment_identities(DbRef) of
+        {ok, Identities} ->
+            Filtered = case Filter of
+                undefined -> Identities;
+                <<>> -> Identities;
+                FilterStatus ->
+                    [I || I <- Identities,
+                          I#enrollment_identity.status =:= FilterStatus]
+            end,
+            Enrollments = lists:map(fun(I) ->
+                E = #{
+                    enrollment_fp => I#enrollment_identity.enrollment_fp,
+                    username => I#enrollment_identity.username,
+                    status => I#enrollment_identity.status,
+                    registered_by => coalesce(I#enrollment_identity.registered_by, null),
+                    registered_at => I#enrollment_identity.registered_at,
+                    consumed_at => coalesce(I#enrollment_identity.consumed_at, null),
+                    last_seen => coalesce(I#enrollment_identity.last_seen, null)
+                },
+                maybe_attach_metadata(E, I#enrollment_identity.metadata)
+            end, Filtered),
+            {200, #{
+                type => <<"list_enrollments_response">>,
+                status => <<"success">>,
+                count => length(Enrollments),
+                enrollments => Enrollments
+            }, Req};
+        {error, Reason} ->
+            error_response(500, Reason, Req)
+    end.
+
+get_enrollment_info(DbRef, EnrollmentFp, Req) ->
+    case cryptic_ca_store:get_enrollment_identity(DbRef, EnrollmentFp) of
+        {ok, I} ->
+            Info = #{
+                enrollment_fp => I#enrollment_identity.enrollment_fp,
+                username => I#enrollment_identity.username,
+                status => I#enrollment_identity.status,
+                registered_by => coalesce(I#enrollment_identity.registered_by, null),
+                registered_at => I#enrollment_identity.registered_at,
+                consumed_at => coalesce(I#enrollment_identity.consumed_at, null),
+                last_seen => coalesce(I#enrollment_identity.last_seen, null)
+            },
+            InfoWithMeta = maybe_attach_metadata(Info, I#enrollment_identity.metadata),
+            {200, #{
+                type => <<"get_enrollment_info_response">>,
+                status => <<"success">>,
+                enrollment => InfoWithMeta
+            }, Req};
+        {error, Reason} ->
+            error_response(404, Reason, Req)
+    end.

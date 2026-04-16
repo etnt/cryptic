@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "cryptic-admin": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/mcp/.venv/bin/python",
+      "args": ["${workspaceFolder}/mcp/cryptic_mcp_server.py"],
+      "env": {
+        "CRYPTIC_ADMIN_GPG_FP": "${input:adminGpgFp}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "adminGpgFp",
+      "type": "promptString",
+      "description": "Admin GPG fingerprint for Cryptic MCP server"
+    }
+  ]
+}

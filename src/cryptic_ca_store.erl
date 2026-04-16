@@ -60,6 +60,7 @@
     update_enrollment_status/3,
     update_enrollment_last_seen/2,
     list_enrollment_identities/1,
+    delete_enrollment_identity/2,
 
     %% Database inspection (for debugging)
     list_tables/1,
@@ -763,6 +764,20 @@ list_enrollment_identities(Conn) ->
             {ok, Identities};
         {error, Reason} = Error ->
             ?error("Failed to list enrollment identities: ~p", [Reason]),
+            Error
+    end.
+
+%% @doc Delete an enrollment identity completely.
+%% This is intended for debugging: it removes all traces of the enrollment
+%% so the mobile enrollment flow can be retried from scratch.
+-spec delete_enrollment_identity(db_ref(), binary()) -> ok | {error, term()}.
+delete_enrollment_identity(Conn, EnrollmentFp) ->
+    SQL = <<"DELETE FROM enrollment_identities WHERE enrollment_fp = ?">>,
+    case esqlite3:q(Conn, SQL, [EnrollmentFp]) of
+        [] ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to delete enrollment identity ~s: ~p", [EnrollmentFp, Reason]),
             Error
     end.
 
