@@ -12,8 +12,8 @@ init(Req0, State) ->
         try
             handle_request(Method, Req0, State)
         catch
-            _:Reason:Stack ->
-                ?error("MCP admin handler crashed: ~p~nStack: ~p", [Reason, Stack]),
+            _:Reason ->
+                ?error("MCP admin handler crashed: ~p", [Reason]),
                 {500, #{
                     type => <<"error">>,
                     status => <<"error">>,
@@ -282,10 +282,11 @@ with_admin(Req, Fun) ->
 with_admin(Req, BodyMap, Fun) ->
     case get_db_ref() of
         {error, Reason} ->
+            ?error("MCP admin handler missing DB ref: ~p", [Reason]),
             {500, #{
                 type => <<"error">>,
                 status => <<"error">>,
-                message => iolist_to_binary(io_lib:format("~p", [Reason]))
+                message => <<"internal_server_error">>
             }, Req};
         {ok, DbRef} ->
             AdminFp = get_admin_fingerprint(Req, BodyMap),
@@ -310,12 +311,12 @@ get_db_ref() ->
     end.
 
 get_admin_fingerprint(Req, BodyMap) ->
-    %% Priority order: explicit header, then JSON body, then query string.
+    %% Priority order: explicit header, then JSON body.
     case cowboy_req:header(<<"x-admin-gpg-fp">>, Req) of
         undefined ->
             case maps:get(<<"admin_gpg_fp">>, BodyMap, undefined) of
                 undefined ->
-                    query_value(<<"admin_gpg_fp">>, Req);
+                    undefined;
                 Fp ->
                     Fp
             end;
@@ -557,8 +558,9 @@ bad_request(Reason, Req) ->
     }, Req}.
 
 error_response(StatusCode, Reason, Req) ->
+    ?error("MCP admin operation failed: ~p", [Reason]),
     {StatusCode, #{
         type => <<"error">>,
         status => <<"error">>,
-        message => iolist_to_binary(io_lib:format("~p", [Reason]))
+        message => <<"operation_failed">>
     }, Req}.
