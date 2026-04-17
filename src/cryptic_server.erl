@@ -264,7 +264,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, start_mcp/1]).
 
 %% gen_server callbacks
 -export([
@@ -296,6 +296,14 @@
 %% @returns {ok, Pid} if successful, {error, Reason} if startup fails
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+%% @doc Start the MCP admin HTTP endpoint on localhost.
+%% Can be called after the server has booted, e.g. from the shell or a startup script.
+-spec start_mcp(non_neg_integer()) -> {ok, started} | {error, term()}.
+start_mcp(Port) when is_integer(Port) ->
+    application:set_env(cryptic, mcp_tcp_enabled, true),
+    application:set_env(cryptic, mcp_tcp_port, Port),
+    start_mcp_localhost_tcp(#{port => Port}).
 
 %%%===================================================================
 %%% gen_server callbacks

@@ -168,7 +168,7 @@ ERL_OPTS="-sname $NODE_NAME -pa $PROJECT_ROOT/_build/default/lib/*/ebin"
 
 # Build MCP config snippet for Erlang
 if [ "$MCP_ENABLED" = true ]; then
-    MCP_ERL_CONFIG="application:set_env(cryptic, mcp_tcp_enabled, true), application:set_env(cryptic, mcp_tcp_port, $CRYPTIC_MCP_PORT),"
+    MCP_ERL_CONFIG="cryptic_server:start_mcp($CRYPTIC_MCP_PORT),"
     MCP_STATUS_LINE="io:format(\"   MCP Admin:        http://127.0.0.1:$CRYPTIC_MCP_PORT/mcp/v1/admin~n\"),"
 else
     MCP_ERL_CONFIG=""
@@ -177,9 +177,9 @@ fi
 
 # Erlang code to run
 ERL_CODE="
-$MCP_ERL_CONFIG
 application:ensure_all_started(cryptic),
 timer:sleep(1000),
+$MCP_ERL_CONFIG
 inet:i(),
 io:format(\"~nServer running!~n\"),
 io:format(\"   WebSocket mTLS:   wss://$CRYPTIC_SERVER_HOST:$CRYPTIC_SERVER_PORT/ws~n\"),

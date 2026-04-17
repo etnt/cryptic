@@ -683,20 +683,166 @@ encode_user(DbRef, #gpg_identity{
     last_seen = LastSeen,
     metadata = Meta
 }) ->
-    Username = case get_username_from_gpg_fp(DbRef, Fp) of
-        {ok, Name} -> list_to_binary(Name);
-        {error, _Reason} -> <<"unknown">>
+    DisplayName = case get_username_for_gpg(DbRef, Fp) of
+        {ok, Name} -> to_binary(Name);
+        undefined -> <<"unknown">>
+    end,
+    %% Online check: extract the chat username from the cert (SAN then CN)
+    %% which matches the key stored in the CONNECTION_TABLE.
+    ChatUsername = get_chat_username_from_cert(DbRef, Fp),
+    Online = case ChatUsername of
+        undefined -> false;
+        U -> is_online(U)
     end,
     UserMap = #{
         gpg_fp => Fp,
-        username => Username,
+        username => DisplayName,
         status => Status,
         registered_by => RegBy,
         registered_at => RegAt,
         last_seen => LastSeen,
-        online => is_online(Username)
+        online => Online
     },
     maybe_attach_metadata(UserMap, Meta).
+
+%% @private Resolve a display name for a GPG fingerprint.
+%% Tries the GPG key's user ID name first, then falls back to certificate CN.
+get_username_for_gpg(DbRef, GpgFp) ->
+    case get_name_from_gpg_key(DbRef, GpgFp) of
+        {ok, _} = Ok -> Ok;
+        undefined ->
+            case get_cn_from_cert(DbRef, GpgFp) of
+                undefined -> undefined;
+                CN -> {ok, CN}
+            end
+    end.
+
+%% @private Extract the human name from the GPG key's user ID.
+get_name_from_gpg_key(DbRef, GpgFp) ->
+    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
+        {ok, #gpg_identity{gpg_pub_armor = PubArmor}}
+          when is_binary(PubArmor), byte_size(PubArmor) > 0 ->
+            try
+                case erl_gpg_api:get_key_info(PubArmor, "") of
+                    {ok, KeyInfo} ->
+                        UIDs = maps:get(user_ids, KeyInfo, []),
+                        extract_name_from_uids(UIDs);
+                    _ ->
+                        undefined
+                end
+            catch
+                _:_ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+extract_name_from_uids([]) -> undefined;
+extract_name_from_uids([UID | Rest]) ->
+    case extract_name_from_uid(UID) of
+        {ok, _} = Ok -> Ok;
+        undefined -> extract_name_from_uids(Rest)
+    end.
+
+extract_name_from_uid(UID) when is_binary(UID) ->
+    S = unicode:characters_to_list(UID),
+    case string:split(S, "<") of
+        [S] ->
+            case string:trim(S) of
+                [] -> undefined;
+                Trimmed -> {ok, Trimmed}
+            end;
+        [Before, _] ->
+            case string:trim(Before) of
+                [] -> undefined;
+                Name -> {ok, Name}
+            end
+    end;
+extract_name_from_uid(_) -> undefined.
+
+%% @private Extract the chat username from a stored certificate PEM.
+%% Mirrors cryptic_ws_handler: tries SAN (otherName, rfc822Name, dNSName) first,
+%% then falls back to CN. Returns the string that matches the CONNECTION_TABLE key.
+get_chat_username_from_cert(DbRef, GpgFp) ->
+    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
+        {ok, [#certificate{cert_pem = CertPem} | _]} ->
+            try
+                [{'Certificate', CertDER, not_encrypted}] =
+                    public_key:pem_decode(CertPem),
+                Cert = public_key:pkix_decode_cert(CertDER, otp),
+                TBSCert = Cert#'OTPCertificate'.tbsCertificate,
+                case extract_username_from_san(TBSCert) of
+                    {ok, Username} -> Username;
+                    not_found ->
+                        Subject = TBSCert#'OTPTBSCertificate'.subject,
+                        extract_common_name(Subject)
+                end
+            catch
+                _:_ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+%% @private Extract username from cert SAN extension.
+extract_username_from_san(TBSCert) ->
+    case TBSCert#'OTPTBSCertificate'.extensions of
+        asn1_NOVALUE -> not_found;
+        Extensions ->
+            case lists:keyfind(?'id-ce-subjectAltName',
+                               #'Extension'.extnID, Extensions) of
+                false -> not_found;
+                #'Extension'{extnValue = GeneralNames}
+                  when is_list(GeneralNames) ->
+                    extract_username_from_san_names(GeneralNames);
+                _ -> not_found
+            end
+    end.
+
+extract_username_from_san_names([]) -> not_found;
+extract_username_from_san_names([{otherName, {{1,3,6,1,4,1,99999,1}, Value}} | _]) ->
+    case Value of
+        {utf8String, U} when is_binary(U) -> {ok, binary_to_list(U)};
+        {utf8String, U} when is_list(U) -> {ok, U};
+        _ -> not_found
+    end;
+extract_username_from_san_names([{rfc822Name, Email} | Rest]) ->
+    EmailStr = if is_binary(Email) -> binary_to_list(Email);
+                  is_list(Email) -> Email end,
+    case string:split(EmailStr, "@") of
+        [Local, _] -> {ok, Local};
+        _ -> extract_username_from_san_names(Rest)
+    end;
+extract_username_from_san_names([{dNSName, Name} | Rest]) ->
+    NameStr = if is_binary(Name) -> binary_to_list(Name);
+                 is_list(Name) -> Name end,
+    case string:find(NameStr, ".") of
+        nomatch -> {ok, NameStr};
+        _ -> extract_username_from_san_names(Rest)
+    end;
+extract_username_from_san_names([_ | Rest]) ->
+    extract_username_from_san_names(Rest).
+
+%% @private Extract CN from the user's certificate.
+get_cn_from_cert(DbRef, GpgFp) ->
+    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
+        {ok, [#certificate{cert_pem = CertPem} | _]} ->
+            try
+                [{'Certificate', CertDER, not_encrypted}] =
+                    public_key:pem_decode(CertPem),
+                Cert = public_key:pkix_decode_cert(CertDER, otp),
+                TBSCert = Cert#'OTPCertificate'.tbsCertificate,
+                Subject = TBSCert#'OTPTBSCertificate'.subject,
+                extract_common_name(Subject)
+            catch
+                _:_ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+to_binary(V) when is_binary(V) -> V;
+to_binary(V) when is_list(V) -> list_to_binary(V).
 
 maybe_attach_metadata(UserMap, undefined) ->
     UserMap;
@@ -708,57 +854,30 @@ maybe_attach_metadata(UserMap, Meta) ->
         _:_ -> UserMap
     end.
 
-get_username_from_gpg_fp(DbRef, GpgFp) ->
-    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
-        {ok, []} ->
-            {error, not_found};
-        {ok, [LatestCert | _]} ->
-            extract_username_from_cert_pem(LatestCert#certificate.cert_pem);
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-extract_username_from_cert_pem(CertPem) ->
-    try
-        [DecodedEntry | _] = public_key:pem_decode(CertPem),
-        CertDer = public_key:pem_entry_decode(DecodedEntry),
-        Cert = public_key:pkix_decode_cert(CertDer, otp),
-        TBSCert = Cert#'OTPCertificate'.tbsCertificate,
-        Subject = TBSCert#'OTPTBSCertificate'.subject,
-        case extract_common_name(Subject) of
-            {ok, CN} -> {ok, CN};
-            _ -> {error, no_cn}
-        end
-    catch
-        _:_ ->
-            {error, cert_decode_failed}
-    end.
-
-extract_common_name({rdnSequence, RDNs}) ->
-    extract_cn_from_rdns(RDNs).
-
-extract_cn_from_rdns([]) ->
-    {error, no_cn_found};
-extract_cn_from_rdns([RDN | Rest]) ->
-    case extract_cn_from_rdn(RDN) of
-        {ok, CN} -> {ok, CN};
-        not_found -> extract_cn_from_rdns(Rest)
-    end.
-
-extract_cn_from_rdn([]) ->
-    not_found;
-extract_cn_from_rdn([#'AttributeTypeAndValue'{
-    type = {2, 5, 4, 3},
-    value = {_Type, Value}
-} | _]) ->
-    {ok, Value};
-extract_cn_from_rdn([_ | Rest]) ->
-    extract_cn_from_rdn(Rest).
+extract_common_name({rdnSequence, RDNSeq}) ->
+    lists:foldl(fun
+        (_, Found) when is_list(Found) -> Found;
+        (RDNSet, undefined) ->
+            lists:foldl(fun
+                (_, Found) when is_list(Found) -> Found;
+                (#'AttributeTypeAndValue'{
+                    type = ?'id-at-commonName',
+                    value = {utf8String, CN}}, _) ->
+                    binary_to_list(CN);
+                (#'AttributeTypeAndValue'{
+                    type = ?'id-at-commonName',
+                    value = CN}, _) when is_list(CN) ->
+                    CN;
+                (_, Acc) -> Acc
+            end, undefined, RDNSet)
+    end, undefined, RDNSeq);
+extract_common_name(_) ->
+    undefined.
 
 find_user_connection(User) when is_binary(User) ->
     find_user_connection(binary_to_list(User));
 find_user_connection(User) when is_list(User) ->
-    case ets:lookup(user_connections, User) of
+    case ets:lookup(?CONNECTION_TABLE, User) of
         [{User, Pid}] when is_pid(Pid) ->
             case is_process_alive(Pid) of
                 true -> {ok, Pid};
