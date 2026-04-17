@@ -740,6 +740,9 @@ start_mcp_localhost_tcp(Config) ->
             }},
             {"/mcp/v1/admin/delete_enrollment", cryptic_mcp_admin_handler, #{
                 operation => <<"delete_enrollment">>
+            }},
+            {"/mcp/v1/admin/server_log", cryptic_mcp_admin_handler, #{
+                operation => <<"server_log">>
             }}
         ]}
     ]),

@@ -162,6 +162,24 @@ handle_request(<<"GET">>, Req0, State) ->
                     end
                 end
             );
+        <<"server_log">> ->
+            with_admin(
+                Req0,
+                fun(_AdminFp, _DbRef, Req1) ->
+                    LinesBin = query_value(<<"lines">>, Req1),
+                    Lines = case LinesBin of
+                        undefined -> 50;
+                        <<>> -> 50;
+                        _ ->
+                            try
+                                N = binary_to_integer(LinesBin),
+                                min(max(N, 1), 1000)
+                            catch _:_ -> 50
+                            end
+                    end,
+                    get_server_log_tail(Lines, Req1)
+                end
+            );
         _ ->
             {404, #{
                 type => <<"error">>,
@@ -1192,6 +1210,39 @@ parse_details(undefined) -> null;
 parse_details(Details) ->
     try jsx:decode(Details, [return_maps])
     catch _:_ -> Details
+    end.
+
+%%%===================================================================
+%%% Server Log
+%%%===================================================================
+
+get_server_log_tail(Lines, Req) ->
+    LogFile = case whereis(cryptic_event_manager) of
+        undefined -> "logs/server.log";
+        _ ->
+            try gen_event:call(cryptic_event_manager, cryptic_file_logger, get_log_file)
+            catch _:_ -> "logs/server.log"
+            end
+    end,
+    case file:read_file(LogFile) of
+        {ok, Content} ->
+            AllLines = binary:split(Content, <<"\n">>, [global]),
+            %% Remove trailing empty line from split
+            NonEmpty = lists:reverse(
+                lists:dropwhile(fun(L) -> L =:= <<>> end,
+                                lists:reverse(AllLines))),
+            TailLines = lists:nthtail(
+                max(0, length(NonEmpty) - Lines), NonEmpty),
+            {200, #{
+                type => <<"server_log_response">>,
+                status => <<"success">>,
+                log_file => list_to_binary(LogFile),
+                total_lines => length(NonEmpty),
+                returned_lines => length(TailLines),
+                lines => TailLines
+            }, Req};
+        {error, Reason} ->
+            error_response(500, Reason, Req)
     end.
 
 %%%===================================================================

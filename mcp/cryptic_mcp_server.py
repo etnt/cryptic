@@ -325,6 +325,18 @@ def delete_enrollment(enrollment_fp: str) -> dict:
     return _post("/delete_enrollment", {"enrollment_fp": enrollment_fp})
 
 
+@mcp.tool()
+def server_log(lines: int = 50) -> dict:
+    """Get the tail of the Cryptic server log.
+
+    Useful for debugging errors or inspecting recent server activity.
+
+    Args:
+        lines: Number of lines to return from the end of the log (1-1000, default 50).
+    """
+    return _get("/server_log", {"lines": lines})
+
+
 def main():
     """Run the MCP server via stdio transport."""
     mcp.run(transport="stdio")
