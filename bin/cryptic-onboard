@@ -860,12 +860,19 @@ cmd_create_mobile_enrollment() {
     fi
     CURL_ARGS+=("${server_url}/ca/v1/admin/register-enrollment")
 
-    REGISTER_RESP=$(curl "${CURL_ARGS[@]}" 2>/dev/null)
-    REGISTER_STATUS=$(echo "$REGISTER_RESP" | jq -r '.status // empty' 2>/dev/null)
+    CURL_ERR=$(mktemp)
+    REGISTER_RESP=$(curl "${CURL_ARGS[@]}" 2>"$CURL_ERR") || {
+        local curl_error
+        curl_error=$(cat "$CURL_ERR")
+        rm -f "$CURL_ERR"
+        error "Failed to connect to server at ${server_url}:\n  ${curl_error}\n\nCheck that the server is running and your admin certificate is valid (not expired or revoked)."
+    }
+    rm -f "$CURL_ERR"
+    REGISTER_STATUS=$(echo "$REGISTER_RESP" | jq -r '.status // empty' 2>/dev/null) || true
 
     if [ "$REGISTER_STATUS" != "registered" ]; then
-        REGISTER_ERR=$(echo "$REGISTER_RESP" | jq -r '.message // .error // "Unknown error"' 2>/dev/null)
-        error "Failed to register enrollment key on server: $REGISTER_ERR"
+        REGISTER_ERR=$(echo "$REGISTER_RESP" | jq -r '.message // .error // empty' 2>/dev/null) || true
+        error "Failed to register enrollment key on server: ${REGISTER_ERR:-$REGISTER_RESP}"
     fi
 
     success "Enrollment key registered on server"

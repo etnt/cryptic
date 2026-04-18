@@ -601,9 +601,19 @@ handle_info(
     {websocket_message, #{<<"type">> := <<"welcome">>} = _Message},
     State
 ) ->
-    %% We have been disconnected and reconnected - need to re-request pending messages
-    ?dbg("Received welcome message - re-requesting pending messages~n", []),
-    {ok, UpdatedState} = request_pending_messages(State),
+    %% We have been disconnected and reconnected - need to re-upload keys
+    %% (server stores key bundles in ETS which is lost on restart)
+    %% and re-request pending messages
+    ?dbg("Received welcome message - re-uploading keys and requesting pending messages~n", []),
+    State1 = case upload_identity_keys(State) of
+        {ok, S1} -> S1;
+        {error, _} -> State
+    end,
+    State2 = case upload_prekey_bundle(State1) of
+        {ok, S2} -> S2;
+        {error, _} -> State1
+    end,
+    {ok, UpdatedState} = request_pending_messages(State2),
     {noreply, UpdatedState};
 %%
 handle_info(
