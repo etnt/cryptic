@@ -228,6 +228,7 @@ init(Req, State) ->
 %% @returns {Replies, State} where Replies contains the welcome message
 websocket_init(State = #{username := Username}) ->
     register_user_connection(Username, self()),
+    broadcast_user_status(Username, true),
 
     WelcomeMsg = #{
         type => <<"welcome">>,
@@ -392,6 +393,9 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
         FromUser, Username, ResponseJson
     ]),
     {[{text, ResponseJson}], State};
+websocket_info({send_text, Data}, State) ->
+    %% Generic send - used for broadcasting user_status etc.
+    {[{text, Data}], State};
 websocket_info(_Info, State) ->
     {[], State}.
 
@@ -1579,7 +1583,15 @@ register_user_connection(Username, Pid) ->
 
 find_user_connection(Username) ->
     case ets:lookup(?CONNECTION_TABLE, Username) of
-        [{Username, Pid}] -> {ok, Pid};
+        [{Username, Pid}] ->
+            case is_process_alive(Pid) of
+                true -> {ok, Pid};
+                false ->
+                    %% Stale connection entry - clean it up
+                    ets:delete(?CONNECTION_TABLE, Username),
+                    ?warning("Cleaned up stale connection for ~s", [Username]),
+                    not_found
+            end;
         [] -> not_found
     end.
 
@@ -1592,7 +1604,31 @@ find_user_connection(Username) ->
 %% @returns List of usernames (as strings)
 get_online_users() ->
     AllConnections = ets:tab2list(?CONNECTION_TABLE),
-    [Username || {Username, _Pid} <- AllConnections].
+    [Username || {Username, Pid} <- AllConnections, is_process_alive(Pid)].
+
+%% @doc Broadcast user online/offline status to all other connected clients
+%%
+%% Sends a user_status message to every connected user except the one whose
+%% status changed, so all clients can update their UI in real time.
+broadcast_user_status(Username, IsOnline) ->
+    StatusMsg = jsx:encode(#{
+        type => <<"user_status">>,
+        username => list_to_binary(Username),
+        online => IsOnline
+    }),
+    AllConnections = ets:tab2list(?CONNECTION_TABLE),
+    lists:foreach(
+        fun({OtherUser, Pid}) when OtherUser =/= Username ->
+                case is_process_alive(Pid) of
+                    true -> Pid ! {send_text, StatusMsg};
+                    false -> ok
+                end;
+           (_) ->
+                ok
+        end,
+        AllConnections
+    ),
+    ok.
 
 %% @doc Clean up user connection when WebSocket terminates
 %%
@@ -1606,6 +1642,7 @@ get_online_users() ->
 %% @returns ok
 terminate(_Reason, _Req, #{username := Username}) ->
     ets:delete(?CONNECTION_TABLE, Username),
+    broadcast_user_status(Username, false),
     ?debug("User ~s disconnected~n", [Username]),
     ok;
 terminate(_Reason, _Req, _State) ->
