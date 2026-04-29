@@ -14,7 +14,7 @@ An [MCP](https://modelcontextprotocol.io/) server that exposes Cryptic messaging
 cd mcp
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+.venv/bin/pip install -r requirements.txt
 ```
 
 Or with `uv`:
@@ -23,7 +23,7 @@ Or with `uv`:
 cd mcp
 uv venv .venv
 source .venv/bin/activate
-uv pip install -e .
+uv .venv/bin/pip install -r requirements.txt
 ```
 
 ## Configuration
