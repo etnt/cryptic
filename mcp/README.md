@@ -85,6 +85,53 @@ Add to your `.vscode/mcp.json`:
 }
 ```
 
+## Remote / SSH Tunnel Setup
+
+When the Cryptic server runs on a remote host, you can run the MCP server
+in SSE mode and connect via an SSH tunnel.
+
+### 1. Start the MCP server in SSE mode on the remote host
+
+```bash
+CRYPTIC_ADMIN_GPG_FP=YOUR_ADMIN_GPG_FINGERPRINT \
+  python cryptic_mcp_server.py --sse --port 9090
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--sse` | — | Enable SSE transport (instead of stdio) |
+| `--port` | `9090` | Port to listen on |
+| `--host` | `127.0.0.1` | Bind address (use `0.0.0.0` to expose on all interfaces) |
+
+### 2. Create an SSH local forward
+
+```bash
+ssh -L 9090:127.0.0.1:9090 remote-host
+```
+
+This forwards local port 9090 to the remote MCP server's port 9090.
+
+### 3. Configure VS Code to use the SSE endpoint
+
+In `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "cryptic-admin-remote": {
+      "type": "sse",
+      "url": "http://127.0.0.1:9090/sse"
+    }
+  }
+}
+```
+
+> **Note:** The SSE client does not send credentials — the admin GPG
+> fingerprint is only needed on the server side (via environment variable).
+> The SSH tunnel provides the secure transport.
+
 ## Available Tools
 
 ### Read-only

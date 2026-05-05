@@ -6,10 +6,28 @@ Communicates with the Erlang-side REST API on localhost.
 
 import os
 import sys
+import argparse
 import httpx
+
+# Parse args early so we can set FASTMCP_ env vars before FastMCP construction.
+_parser = argparse.ArgumentParser(description="Cryptic MCP Admin Server")
+_parser.add_argument("--sse", action="store_true", help="Use SSE transport instead of stdio")
+_parser.add_argument("--port", type=int, default=9090, help="Port for SSE transport (default: 9090)")
+_parser.add_argument("--host", default="127.0.0.1", help="Host to bind for SSE transport (default: 127.0.0.1)")
+_args = _parser.parse_args()
+
+if _args.sse:
+    os.environ["FASTMCP_PORT"] = str(_args.port)
+    os.environ["FASTMCP_HOST"] = _args.host
+
 from mcp.server.fastmcp import FastMCP
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8081/mcp/v1/admin"
+
+_mcp_kwargs = {}
+if _args.sse:
+    _mcp_kwargs["host"] = _args.host
+    _mcp_kwargs["port"] = _args.port
 
 mcp = FastMCP(
     "Cryptic Admin",
@@ -19,6 +37,7 @@ mcp = FastMCP(
         "users, and review audit logs. All operations require a valid admin "
         "GPG fingerprint."
     ),
+    **_mcp_kwargs,
 )
 
 
@@ -338,8 +357,22 @@ def server_log(lines: int = 50) -> dict:
 
 
 def main():
-    """Run the MCP server via stdio transport."""
-    mcp.run(transport="stdio")
+    """Run the MCP server.
+
+    Supports two transports:
+      - stdio (default): for local use via VS Code's "stdio" MCP type.
+      - sse: listens on a TCP port for remote/tunneled connections.
+
+    Usage:
+      cryptic-mcp-server                    # stdio (default)
+      cryptic-mcp-server --sse              # SSE on default port 9090
+      cryptic-mcp-server --sse --port 9091  # SSE on custom port
+      cryptic-mcp-server --sse --host 0.0.0.0  # Bind to all interfaces
+    """
+    if _args.sse:
+        mcp.run(transport="sse")
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
