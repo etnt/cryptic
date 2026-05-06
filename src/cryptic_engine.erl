@@ -925,6 +925,10 @@ log_error(FormatString, Args, State) ->
     log(error, FormatString, Args, State).
 
 %% @private
+log_warning(FormatString, Args, State) ->
+    log(warning, FormatString, Args, State).
+
+%% @private
 log_info(FormatString, Args, State) ->
     log(info, FormatString, Args, State).
 
@@ -1835,6 +1839,8 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
             of
                 {ok, UpdatedState} ->
                     {ok, UpdatedState};
+                {error, Reason, UpdatedState} ->
+                    {error, Reason, UpdatedState};
                 {error, Reason} ->
                     {error, Reason, State}
             end;
@@ -2050,6 +2056,32 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
                             deliver_message_to_ui_async(
                                 FromUsername, Plaintext, FinalState
                             );
+                        {error, {authentication_failed, _} = Reason} ->
+                            % Stale session from disk - reset and request re-keying
+                            log_warning(
+                                "Stale session detected for ~s (auth failed on disk session). "
+                                "Resetting session to allow fresh X3DH key exchange.",
+                                [FromUsername],
+                                UpdatedState
+                            ),
+                            ResetState = terminate_session_with_peer(
+                                FromUsername, RatchetEnginePid, UpdatedState
+                            ),
+                            % Notify UI about the session reset
+                            CallbackMod1 = ResetState#cryptic_engine_state.callback_module,
+                            Ctx1 = ResetState#cryptic_engine_state.callback_context,
+                            SystemMsg1 = iolist_to_binary(io_lib:format(
+                                "Session with ~s was out of sync and has been reset. "
+                                "Please ask them to resend their message.",
+                                [FromUsername]
+                            )),
+                            FinalResetState = case CallbackMod1:system_message(SystemMsg1, Ctx1) of
+                                {ok, NewCtx1} ->
+                                    ResetState#cryptic_engine_state{callback_context = NewCtx1};
+                                _ ->
+                                    ResetState
+                            end,
+                            {error, Reason, FinalResetState};
                         {error, Reason} ->
                             log_error(
                                 "Failed to decrypt ratchet message from ~s after loading session: ~p",
@@ -2087,6 +2119,32 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
                     deliver_message_to_ui_async(
                         FromUsername, Plaintext, UpdatedState
                     );
+                {error, {authentication_failed, _} = Reason} ->
+                    % Session is out of sync - reset and request re-keying
+                    log_warning(
+                        "Session with ~s is out of sync (auth failed). "
+                        "Resetting session to allow fresh X3DH key exchange.",
+                        [FromUsername],
+                        State
+                    ),
+                    ResetState = terminate_session_with_peer(
+                        FromUsername, RatchetEnginePid, State
+                    ),
+                    % Notify UI about the session reset
+                    CallbackMod2 = ResetState#cryptic_engine_state.callback_module,
+                    Ctx2 = ResetState#cryptic_engine_state.callback_context,
+                    SystemMsg2 = iolist_to_binary(io_lib:format(
+                        "Session with ~s was out of sync and has been reset. "
+                        "Please ask them to resend their message.",
+                        [FromUsername]
+                    )),
+                    FinalResetState2 = case CallbackMod2:system_message(SystemMsg2, Ctx2) of
+                        {ok, NewCtx2} ->
+                            ResetState#cryptic_engine_state{callback_context = NewCtx2};
+                        _ ->
+                            ResetState
+                    end,
+                    {error, Reason, FinalResetState2};
                 {error, Reason} ->
                     log_error(
                         "Failed to decrypt ratchet message from ~s: ~p",

@@ -490,6 +490,10 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
 
     Now = erlang:system_time(millisecond),
 
+    ?dbg("init_as_receiver: rootKey(sessionKey)=~s~n", [binary:encode_hex(RootKey)]),
+    RecvChainInit = kdf_derive_chain_key(RootKey, <<"init">>),
+    ?dbg("init_as_receiver: recvChainKey(init)=~s~n", [binary:encode_hex(RecvChainInit)]),
+
     State = #ratchet_state{
         % Same X3DH root key as sender
         root_key = RootKey,
@@ -499,7 +503,7 @@ init_receiver(RootKey, {DHPublic, DHPrivate}) when
         send_msg_number = 0,
 
         % Derive initial receiving chain to match Alice's sending chain
-        recv_chain_key = kdf_derive_chain_key(RootKey, <<"init">>),
+        recv_chain_key = RecvChainInit,
         recv_msg_number = 0,
         prev_recv_chain_length = 0,
 
@@ -665,11 +669,17 @@ activate_sending_chain(State = #ratchet_state{}) ->
 
                     CurrentRootKey = State#ratchet_state.root_key,
 
+                    ?dbg("activate_sending_chain: rootKey=~s~n",
+                         [binary:encode_hex(CurrentRootKey)]),
+
                     % Derive Bob's sending chain from the same X3DH root key (context "resp")
                     % This ensures Bob's sending chain matches what Alice expects for decryption
                     NewSendChainKey = kdf_derive_chain_key(
                         CurrentRootKey, <<"resp">>
                     ),
+
+                    ?dbg("activate_sending_chain: sendChainKey(resp)=~s~n",
+                         [binary:encode_hex(NewSendChainKey)]),
 
                     % Update state with activated sending chain (no DH ratchet yet)
                     Now = erlang:system_time(millisecond),
@@ -750,8 +760,13 @@ encrypt_message_impl(Plaintext, State) ->
         CurrentSendingChain, CurrentMsgNum
     ),
 
+    ?dbg("encrypt_message_impl: chainKey=~s, msgNum=~p, messageKey=~s~n",
+         [binary:encode_hex(CurrentSendingChain), CurrentMsgNum, binary:encode_hex(MessageKey)]),
+
     % 3. Derive encryption components from message key
     {EncKey, _AuthKey} = kdf_mk(MessageKey),
+
+    ?dbg("encrypt_message_impl: encKey=~s~n", [binary:encode_hex(EncKey)]),
 
     % 4. Encrypt message with ChaCha20-Poly1305
     % Note: cryptic_nif:aead_encrypt generates its own nonce and returns {CipherText, Nonce}
@@ -821,9 +836,13 @@ decrypt_message_impl(Message, State) ->
     IncomingDHStep = maps:get(dh_step, Message),
     IncomingMsgNum = maps:get(msg_number, Message),
 
-    % ?dbg("decrypt_message_impl - incoming msg_number: ~p, DH step: ~p, remote DH: ~p~n",
-    %      [IncomingMsgNum, IncomingDHStep,
-    %       case State#ratchet_state.dh_remote of undefined -> undefined; _ -> "set" end]),
+    ?info("[DR] decrypt_message_impl: incoming msg_number=~p, dh_step=~p~n", [IncomingMsgNum, IncomingDHStep]),
+    ?info("[DR] state: recv_msg_number=~p, dh_ratchet_step=~p~n",
+              [State#ratchet_state.recv_msg_number, State#ratchet_state.dh_ratchet_step]),
+    ?info("[DR] state: recv_chain_key=~s~n", [binary:encode_hex(State#ratchet_state.recv_chain_key, lowercase)]),
+    ?info("[DR] state: dh_remote=~p~n",
+              [case State#ratchet_state.dh_remote of undefined -> undefined; R -> binary:encode_hex(R, lowercase) end]),
+    ?info("[DR] incoming dh_public=~s~n", [binary:encode_hex(IncomingDHPub, lowercase)]),
 
     % 1. Determine if DH-ratchet step is needed
     DHRatchetNeeded =
@@ -838,9 +857,11 @@ decrypt_message_impl(Message, State) ->
         case DHRatchetNeeded of
             true ->
                 % Perform DH ratchet step - creates new receiving chain
+                ?info("[DR] DH ratchet NEEDED - performing DH ratchet step~n", []),
                 perform_dh_ratchet_step(Message, State);
             false when State#ratchet_state.dh_remote =:= undefined ->
                 % First message - just store remote DH key without ratcheting
+                ?info("[DR] First message - storing remote DH key (no ratchet)~n", []),
                 Now = erlang:system_time(millisecond),
                 State#ratchet_state{
                     dh_remote = IncomingDHPub,
@@ -848,12 +869,20 @@ decrypt_message_impl(Message, State) ->
                 };
             false ->
                 % Same DH step - continue with current receiving chain
+                ?info("[DR] Same DH key - no ratchet needed~n", []),
                 State
         end,
+
+    ?info("[DR] after DH: recv_chain_key=~s, recv_msg_number=~p~n",
+              [binary:encode_hex(StateAfterDH#ratchet_state.recv_chain_key, lowercase),
+               StateAfterDH#ratchet_state.recv_msg_number]),
 
     % 3. Check for message gaps in the receiving chain
     case handle_message_gap(StateAfterDH, IncomingMsgNum, IncomingDHStep) of
         {ok, StateAfterGap} ->
+            ?info("[DR] after gap handling: recv_chain_key=~s, recv_msg_number=~p~n",
+                      [binary:encode_hex(StateAfterGap#ratchet_state.recv_chain_key, lowercase),
+                       StateAfterGap#ratchet_state.recv_msg_number]),
             % 4. Decrypt the message (either current or from skipped store)
             decrypt_with_receiving_chain(Message, StateAfterGap);
         {error, Reason} ->
@@ -1228,8 +1257,16 @@ decrypt_current_message(Message, State) ->
     CipherText = maps:get(ciphertext, Message),
     Nonce = maps:get(nonce, Message),
 
+    ?info("[DR] decrypt_current_message: MsgNum=~p~n", [MsgNum]),
+    ?info("[DR] recvChainKey=~s~n", [binary:encode_hex(State#ratchet_state.recv_chain_key, lowercase)]),
+    ?info("[DR] messageKey=~s~n", [binary:encode_hex(MessageKey, lowercase)]),
+    ?info("[DR] encKey=~s~n", [binary:encode_hex(EncKey, lowercase)]),
+    ?info("[DR] nonce(~p bytes)=~s~n", [byte_size(Nonce), binary:encode_hex(Nonce, lowercase)]),
+    ?info("[DR] ciphertext(~p bytes)=~s~n", [byte_size(CipherText), binary:encode_hex(CipherText, lowercase)]),
+
     case cryptic_nif:aead_decrypt(CipherText, EncKey, Nonce, <<>>) of
         error ->
+            ?info("[DR] DECRYPTION FAILED! authentication_failed for msg ~p~n", [MsgNum]),
             {error, {authentication_failed, MsgNum}};
         Plaintext when is_binary(Plaintext) ->
             % 4. Update receiving chain state
