@@ -13,6 +13,7 @@ RUN apk add --no-cache \
     libc-dev \
     openssl-dev \
     libsodium-dev \
+    argon2-dev \
     sqlite-dev \
     pkgconf
 
@@ -42,6 +43,7 @@ FROM erlang:28.1-alpine
 # Install runtime dependencies
 RUN apk add --no-cache \
     libsodium \
+    argon2-libs \
     sqlite-libs \
     su-exec \
     netcat-openbsd \
