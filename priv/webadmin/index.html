@@ -118,8 +118,25 @@
       </section>
 
       <section id="section-logs" class="section" hidden>
-        <h2>Logs</h2>
-        <p class="placeholder">Live log monitoring lands in Phase 5.</p>
+        <div class="section-head">
+          <h2>Logs</h2>
+          <div class="controls">
+            <span id="logs-status" class="conn-status">disconnected</span>
+            <select id="logs-level" class="ghost">
+              <option value="">All levels</option>
+              <option value="ERROR">Error</option>
+              <option value="WARNING">Warning</option>
+              <option value="INFO">Info</option>
+              <option value="DEBUG">Debug</option>
+              <option value="LOG">Log</option>
+            </select>
+            <input id="logs-search" class="search" type="search" placeholder="Filter text&hellip;" />
+            <button id="logs-pause" class="ghost">Pause</button>
+            <button id="logs-clear" class="ghost">Clear</button>
+          </div>
+        </div>
+        <p id="logs-msg" class="msg" hidden></p>
+        <div id="logs-pane" class="logs-pane" role="log" aria-live="polite"></div>
       </section>
     </main>
   </div>

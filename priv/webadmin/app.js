@@ -1,8 +1,9 @@
 // Cryptic Admin - front-end
 // Handles the auth flow (session check, login, logout), section nav, and the
 // user / enrollment / audit administration views, including mobile enrollment
-// package creation with client-side QR rendering. All state-changing requests
-// carry the CSRF token issued at login.
+// package creation with client-side QR rendering and a live server-log stream
+// over WebSocket. All state-changing requests carry the CSRF token issued at
+// login.
 'use strict';
 
 (function () {
@@ -115,9 +116,11 @@
     for (const sec of document.querySelectorAll('.section')) {
       sec.hidden = sec.id !== `section-${name}`;
     }
+    if (name !== 'logs') disconnectLogs();
     if (name === 'users') loadUsers();
     else if (name === 'enrollments') loadEnrollments();
     else if (name === 'audit') loadAudit();
+    else if (name === 'logs') connectLogs();
   }
 
   // --- Users ---------------------------------------------------------------
@@ -432,6 +435,183 @@
     }).join('');
   }
 
+  // --- Logs ----------------------------------------------------------------
+
+  const logs = {
+    ws: null,
+    lines: [],
+    paused: false,
+    pinned: true,
+    heartbeat: null,
+    reconnect: null,
+    active: false,
+  };
+
+  const LOG_MAX_LINES = 5000;
+
+  function logLevelClass(text) {
+    if (/<ERROR>/i.test(text)) return 'log-error';
+    if (/<WARNING>/i.test(text)) return 'log-warning';
+    if (/<DEBUG>/i.test(text)) return 'log-debug';
+    if (/<INFO>/i.test(text)) return 'log-info';
+    return 'log-plain';
+  }
+
+  function logMatches(text) {
+    const level = el('logs-level').value;
+    if (level && !new RegExp(`<${level}>`, 'i').test(text)) return false;
+    const q = el('logs-search').value.trim().toLowerCase();
+    if (q && !text.toLowerCase().includes(q)) return false;
+    return true;
+  }
+
+  function renderLogLine(line) {
+    const div = document.createElement('div');
+    div.className = `log-line ${logLevelClass(line.text)}`;
+    div.textContent = line.text;
+    return div;
+  }
+
+  function renderLogPane() {
+    const pane = el('logs-pane');
+    const frag = document.createDocumentFragment();
+    for (const line of logs.lines) {
+      if (logMatches(line.text)) frag.appendChild(renderLogLine(line));
+    }
+    pane.replaceChildren(frag);
+    if (logs.pinned) pane.scrollTop = pane.scrollHeight;
+  }
+
+  function pushLogLines(newLines) {
+    if (!newLines || newLines.length === 0) return;
+    logs.lines.push(...newLines);
+    if (logs.lines.length > LOG_MAX_LINES) {
+      logs.lines.splice(0, logs.lines.length - LOG_MAX_LINES);
+      renderLogPane();
+      return;
+    }
+    const pane = el('logs-pane');
+    const frag = document.createDocumentFragment();
+    for (const line of newLines) {
+      if (logMatches(line.text)) frag.appendChild(renderLogLine(line));
+    }
+    pane.appendChild(frag);
+    if (logs.pinned) pane.scrollTop = pane.scrollHeight;
+  }
+
+  function updateLogStatus(text, kind) {
+    const node = el('logs-status');
+    node.textContent = text;
+    node.className = `conn-status conn-${kind}`;
+  }
+
+  function handleLogFrame(msg) {
+    if (!msg || !msg.type) return;
+    if (msg.type === 'backfill') {
+      logs.lines = [];
+      el('logs-pane').replaceChildren();
+      pushLogLines(msg.lines || []);
+    } else if (msg.type === 'append') {
+      if (logs.paused) {
+        logs.lines.push(...(msg.lines || []));
+        if (logs.lines.length > LOG_MAX_LINES) {
+          logs.lines.splice(0, logs.lines.length - LOG_MAX_LINES);
+        }
+      } else {
+        pushLogLines(msg.lines || []);
+      }
+    } else if (msg.type === 'error') {
+      setMsg('logs-msg', msg.message || 'Log stream error.', 'error');
+    }
+  }
+
+  function clearLogHeartbeat() {
+    if (logs.heartbeat) {
+      clearInterval(logs.heartbeat);
+      logs.heartbeat = null;
+    }
+  }
+
+  function scheduleLogReconnect() {
+    if (logs.reconnect) return;
+    logs.reconnect = setTimeout(() => {
+      logs.reconnect = null;
+      if (logs.active) connectLogs();
+    }, 3000);
+  }
+
+  function connectLogs() {
+    logs.active = true;
+    if (logs.ws) return;
+    setMsg('logs-msg', null);
+    updateLogStatus('connecting…', 'pending');
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/admin/ws/logs?tail=200`;
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (_e) {
+      updateLogStatus('disconnected', 'off');
+      scheduleLogReconnect();
+      return;
+    }
+    logs.ws = ws;
+    ws.addEventListener('open', () => {
+      updateLogStatus('live', 'on');
+      logs.heartbeat = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
+    });
+    ws.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (_e) { return; }
+      handleLogFrame(msg);
+    });
+    ws.addEventListener('close', () => {
+      clearLogHeartbeat();
+      logs.ws = null;
+      if (logs.active) {
+        updateLogStatus('reconnecting…', 'pending');
+        scheduleLogReconnect();
+      } else {
+        updateLogStatus('disconnected', 'off');
+      }
+    });
+    ws.addEventListener('error', () => {
+      try { ws.close(); } catch (_e) { /* ignore */ }
+    });
+  }
+
+  function disconnectLogs() {
+    logs.active = false;
+    if (logs.reconnect) {
+      clearTimeout(logs.reconnect);
+      logs.reconnect = null;
+    }
+    clearLogHeartbeat();
+    if (logs.ws) {
+      const ws = logs.ws;
+      logs.ws = null;
+      try { ws.close(); } catch (_e) { /* ignore */ }
+    }
+    updateLogStatus('disconnected', 'off');
+  }
+
+  function toggleLogPause() {
+    logs.paused = !logs.paused;
+    const btn = el('logs-pause');
+    btn.textContent = logs.paused ? 'Resume' : 'Pause';
+    btn.classList.toggle('active', logs.paused);
+    if (!logs.paused) renderLogPane();
+  }
+
+  function clearLogPane() {
+    logs.lines = [];
+    el('logs-pane').replaceChildren();
+  }
+
   // --- Drawer --------------------------------------------------------------
 
   function openDrawer() { el('drawer').hidden = false; }
@@ -503,6 +683,15 @@
       node.addEventListener('click', closeEnrollModal);
     }
     el('audit-refresh').addEventListener('click', loadAudit);
+    el('logs-pause').addEventListener('click', toggleLogPause);
+    el('logs-clear').addEventListener('click', clearLogPane);
+    el('logs-level').addEventListener('change', renderLogPane);
+    el('logs-search').addEventListener('input', renderLogPane);
+    const logsPane = el('logs-pane');
+    logsPane.addEventListener('scroll', () => {
+      const gap = logsPane.scrollHeight - logsPane.scrollTop - logsPane.clientHeight;
+      logs.pinned = gap < 40;
+    });
     for (const node of document.querySelectorAll('[data-close]')) {
       node.addEventListener('click', closeDrawer);
     }

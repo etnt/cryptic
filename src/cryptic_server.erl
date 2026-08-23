@@ -846,6 +846,12 @@ start_webadmin_https(Config) ->
             {"/admin/api/status", cryptic_webadmin_api_handler, #{
                 operation => status
             }},
+            {"/admin/api/logs", cryptic_webadmin_api_handler, #{
+                operation => logs
+            }},
+
+            %% Live log stream (session-authenticated WebSocket)
+            {"/admin/ws/logs", cryptic_webadmin_log_ws, #{}},
 
             %% Single-page shell + static assets
             {"/admin", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},

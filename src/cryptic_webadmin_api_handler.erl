@@ -27,6 +27,7 @@
 %%   <li>`GET  /admin/api/enrollments/:fp'          - enrollment detail</li>
 %%   <li>`GET  /admin/api/audit'                    - recent audit log</li>
 %%   <li>`GET  /admin/api/status'                   - server status</li>
+%%   <li>`GET  /admin/api/logs'                     - paged server log history</li>
 %% </ul>
 %%
 %% @author Cryptic Development Team
@@ -40,6 +41,8 @@
 
 -define(DEFAULT_AUDIT_LIMIT, 100).
 -define(MAX_AUDIT_LIMIT, 1000).
+-define(DEFAULT_LOG_LIMIT, 200).
+-define(MAX_LOG_LIMIT, 2000).
 
 init(Req0, State) ->
     Operation = maps:get(operation, State, undefined),
@@ -197,6 +200,16 @@ dispatch(status, <<"GET">>, _User, Req) ->
         {ok, Status} = cryptic_admin_core:server_status(DbRef),
         {200, Status#{status => <<"ok">>}, Req}
     end);
+dispatch(logs, <<"GET">>, _User, Req) ->
+    Before = log_before(Req),
+    Limit = log_limit(Req),
+    Level = query_param(<<"level">>, Req),
+    case cryptic_webadmin_log:read_page(Before, Limit, Level) of
+        {ok, Page} ->
+            {200, Page#{status => <<"ok">>}, Req};
+        {error, Reason} ->
+            error_response(500, Reason, Req)
+    end;
 dispatch(undefined, _Method, _User, Req) ->
     {404, #{status => <<"error">>, message => <<"not_found">>}, Req};
 dispatch(_Operation, _Method, _User, Req) ->
@@ -332,6 +345,31 @@ audit_limit(Req) ->
                 _ -> ?DEFAULT_AUDIT_LIMIT
             catch
                 _:_ -> ?DEFAULT_AUDIT_LIMIT
+            end
+    end.
+
+log_limit(Req) ->
+    case query_param(<<"limit">>, Req) of
+        undefined -> ?DEFAULT_LOG_LIMIT;
+        Bin ->
+            try binary_to_integer(Bin) of
+                N when N > 0, N =< ?MAX_LOG_LIMIT -> N;
+                N when N > ?MAX_LOG_LIMIT -> ?MAX_LOG_LIMIT;
+                _ -> ?DEFAULT_LOG_LIMIT
+            catch
+                _:_ -> ?DEFAULT_LOG_LIMIT
+            end
+    end.
+
+log_before(Req) ->
+    case query_param(<<"before">>, Req) of
+        undefined -> 0;
+        Bin ->
+            try binary_to_integer(Bin) of
+                N when N >= 0 -> N;
+                _ -> 0
+            catch
+                _:_ -> 0
             end
     end.
 

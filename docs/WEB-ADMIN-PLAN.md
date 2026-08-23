@@ -169,10 +169,28 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
       → returns package + enrollment_fp + expiry. UI shows the QR, copy-to-clipboard, and expiry.
 
 ### Phase 5 — Log monitoring
-- [ ] `cryptic_webadmin_log_ws` WebSocket: on connect, send last N lines, then stream new
+- [x] `cryptic_webadmin_log_ws` WebSocket: on connect, send last N lines, then stream new
       appends (file poll/`inotify`-style tail, or subscribe to the log `gen_event`).
-- [ ] `GET /admin/api/logs?offset=&limit=` for paged history + level filter.
-- [ ] UI: auto-scrolling live log pane, pause/resume, level filter, search box.
+      Implemented as a session-authenticated `cowboy_websocket` at `/admin/ws/logs?tail=N`
+      (default 200, cap 2000). Backfill frame sends the last N complete lines; a 1.5s poll
+      reads only bytes appended since the last offset and pushes `append` frames. Partial
+      (mid-write) trailing lines are held back until complete; file truncation/rotation is
+      detected (size < offset) and re-read from the start. Client heartbeat (`{type:ping}`
+      every 30s) keeps the 120s idle timeout alive. Shared read helpers live in the new
+      `cryptic_webadmin_log` module (`read_last_lines/1`, `read_delta/2`, `read_page/3`),
+      with the log path resolved via `gen_event:call(cryptic_event_manager,
+      cryptic_file_logger, get_log_file)` (fallback `logs/server.log`).
+- [x] `GET /admin/api/logs?before=&limit=&level=` for paged history + level filter.
+      Returns `{lines:[{n,text}], total, start, end, has_more}` with 1-based absolute line
+      numbers; `before` pages backwards from a line index (0 = tail), `level` filters the
+      window by log level (case-insensitive `<LEVEL>` match), limit default 200 / cap 2000.
+- [x] UI: auto-scrolling live log pane, pause/resume, level filter, search box.
+      Monospace `#logs-pane` streams over `wss://…/admin/ws/logs`; level `<select>` + search
+      box filter client-side, Pause/Resume buffers incoming lines, Clear empties the pane,
+      a connection-status pill shows live/reconnecting/disconnected, auto-scroll pins to the
+      bottom unless the user scrolls up, and the socket auto-reconnects (3s) while the Logs
+      section is active. Level color coding (error/warning/info/debug). Buffer capped at
+      5000 lines.
 
 ### Phase 6 — Containerization & first-run bootstrap
 - [ ] **Drop GPG from the image**: remove `gnupg` from the runtime stage and the
