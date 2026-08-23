@@ -82,3 +82,18 @@
     last_seen       :: non_neg_integer() | undefined,
     metadata        :: binary() | undefined    % JSON
 }).
+
+%% @doc Web administration account (password-authenticated, decoupled from GPG)
+%% Used by the web admin console. Passwords are hashed with PBKDF2-HMAC-SHA256.
+%% Status transitions: active ↔ suspended
+-record(admin_account, {
+    username :: binary(),                      % Login name (primary key)
+    pw_hash :: binary(),                       % Raw PBKDF2 derived key bytes
+    pw_salt :: binary(),                       % Random per-account salt bytes
+    pw_algo :: binary(),                       % e.g. <<"pbkdf2_hmac_sha256">>
+    kdf_params :: binary(),                    % JSON: {iterations, dklen, hash}
+    status = <<"active">> :: binary(),         % <<"active">> | <<"suspended">>
+    must_change_password = 0 :: non_neg_integer(), % 0 = no, 1 = force change on login
+    created_at :: non_neg_integer(),           % Unix timestamp
+    last_login :: non_neg_integer() | undefined % Unix timestamp
+}).

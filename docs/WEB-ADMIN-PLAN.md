@@ -84,13 +84,17 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
 ## 5. Work breakdown
 
 ### Phase 0 — Foundations
-- [ ] Confirm target OTP version and verify `crypto:pbkdf2_hmac/5` availability (decided:
+- [x] Confirm target OTP version and verify `crypto:pbkdf2_hmac/5` availability (OTP 28.1;
       PBKDF2-HMAC-SHA256 for the admin password hash — built in, no new deps).
-- [ ] Add `admin_accounts` table + schema migration in `cryptic_ca_store`:
+- [x] Add `admin_accounts` table + schema migration in `cryptic_ca_store`:
       `username TEXT PRIMARY KEY, pw_hash BLOB, pw_salt BLOB, pw_algo TEXT, kdf_params TEXT,
-       created_at INTEGER, last_login INTEGER, status TEXT`.
+       status TEXT CHECK(status IN ('active','suspended')), must_change_password INTEGER,
+       created_at INTEGER, last_login INTEGER`. Also added the `admin_account` record
+      (`include/cryptic_ca.hrl`), `idx_admin_status` index, and 8 store CRUD functions
+      (insert/get/list/count/update_password/update_status/update_last_login/delete).
 - [ ] CLI/bootstrap command to create the first admin account (`cryptic-onboard create-admin`
       or an Erlang function `cryptic_admin_auth:create_account/2`).
+      → **Moved to Phase 1** (depends on the `cryptic_admin_auth` hashing module).
 
 ### Phase 1 — Auth & session
 - [ ] `cryptic_admin_auth`: `create_account/2`, `verify_password/2`, `set_password/2`.

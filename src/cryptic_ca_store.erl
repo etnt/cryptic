@@ -62,6 +62,16 @@
     list_enrollment_identities/1,
     delete_enrollment_identity/2,
 
+    %% Admin account operations (web administration)
+    insert_admin_account/2,
+    get_admin_account/2,
+    list_admin_accounts/1,
+    count_admin_accounts/1,
+    update_admin_password/5,
+    update_admin_status/3,
+    update_admin_last_login/2,
+    delete_admin_account/2,
+
     %% Database inspection (for debugging)
     list_tables/1,
     describe_table/2,
@@ -337,6 +347,24 @@ create_tables(Conn) ->
             "    "
         >>,
 
+    AdminAccountsTable =
+        <<
+            "\n"
+            "        CREATE TABLE IF NOT EXISTS admin_accounts (\n"
+            "            username TEXT PRIMARY KEY,\n"
+            "            pw_hash BLOB NOT NULL,\n"
+            "            pw_salt BLOB NOT NULL,\n"
+            "            pw_algo TEXT NOT NULL,\n"
+            "            kdf_params TEXT NOT NULL,\n"
+            "            status TEXT NOT NULL DEFAULT 'active'\n"
+            "                CHECK(status IN ('active','suspended')),\n"
+            "            must_change_password INTEGER NOT NULL DEFAULT 0,\n"
+            "            created_at INTEGER NOT NULL,\n"
+            "            last_login INTEGER\n"
+            "        )\n"
+            "    "
+        >>,
+
     %% Create indexes
     Indexes = [
         <<"CREATE INDEX IF NOT EXISTS idx_gpg_status ON gpg_identities(status)">>,
@@ -347,7 +375,8 @@ create_tables(Conn) ->
         <<"CREATE INDEX IF NOT EXISTS idx_certs_expires ON certificates(expires_at)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_certs_status ON certificates(status)">>,
         <<"CREATE INDEX IF NOT EXISTS idx_enrollment_status ON enrollment_identities(status)">>,
-        <<"CREATE INDEX IF NOT EXISTS idx_enrollment_username ON enrollment_identities(username)">>
+        <<"CREATE INDEX IF NOT EXISTS idx_enrollment_username ON enrollment_identities(username)">>,
+        <<"CREATE INDEX IF NOT EXISTS idx_admin_status ON admin_accounts(status)">>
     ],
 
     try
@@ -370,6 +399,11 @@ create_tables(Conn) ->
         case esqlite3:exec(Conn, EnrollmentIdentitiesTable) of
             ok -> ?info("enrollment_identities table created", []);
             {error, E5} -> ?error("Failed to create enrollment_identities: ~p", [E5]), error({error, E5})
+        end,
+        ?info("Creating admin_accounts table...", []),
+        case esqlite3:exec(Conn, AdminAccountsTable) of
+            ok -> ?info("admin_accounts table created", []);
+            {error, E6} -> ?error("Failed to create admin_accounts: ~p", [E6]), error({error, E6})
         end,
         ?info("Creating indexes...", []),
         lists:foreach(fun(Idx) -> 
@@ -778,6 +812,183 @@ delete_enrollment_identity(Conn, EnrollmentFp) ->
             ok;
         {error, Reason} = Error ->
             ?error("Failed to delete enrollment identity ~s: ~p", [EnrollmentFp, Reason]),
+            Error
+    end.
+
+%%====================================================================
+%% Admin Account Operations (Web Administration)
+%%====================================================================
+
+%% @doc Insert a new admin account.
+%%
+%% Stores a password-authenticated web-admin account. Passwords are hashed
+%% with PBKDF2-HMAC-SHA256 by `cryptic_admin_auth' before reaching this
+%% function; only the derived hash, salt and KDF parameters are persisted.
+%%
+%% @param Conn Database connection reference
+%% @param Account The `#admin_account{}' record to insert
+%% @returns `ok' on success, `{error, Reason}' on failure
+-spec insert_admin_account(db_ref(), #admin_account{}) -> ok | {error, term()}.
+insert_admin_account(Conn, #admin_account{} = Account) ->
+    SQL =
+        <<
+            "INSERT INTO admin_accounts \n"
+            "             (username, pw_hash, pw_salt, pw_algo, kdf_params, status, "
+            "must_change_password, created_at, last_login) \n"
+            "             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        >>,
+    Params = [
+        Account#admin_account.username,
+        Account#admin_account.pw_hash,
+        Account#admin_account.pw_salt,
+        Account#admin_account.pw_algo,
+        Account#admin_account.kdf_params,
+        Account#admin_account.status,
+        Account#admin_account.must_change_password,
+        Account#admin_account.created_at,
+        Account#admin_account.last_login
+    ],
+    case esqlite3:q(Conn, SQL, Params) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to insert admin account ~s: ~p", [
+                Account#admin_account.username, Reason
+            ]),
+            Error
+    end.
+
+%% @doc Look up an admin account by username.
+-spec get_admin_account(db_ref(), binary()) ->
+    {ok, #admin_account{}} | {error, not_found} | {error, term()}.
+get_admin_account(Conn, Username) ->
+    SQL =
+        <<
+            "SELECT username, pw_hash, pw_salt, pw_algo, kdf_params, status, "
+            "must_change_password, created_at, last_login "
+            "FROM admin_accounts WHERE username = ?1"
+        >>,
+    case esqlite3:q(Conn, SQL, [Username]) of
+        [[Name, Hash, Salt, Algo, KdfParams, Status, MustChange, CreatedAt, LastLogin]] ->
+            {ok, #admin_account{
+                username = Name,
+                pw_hash = Hash,
+                pw_salt = Salt,
+                pw_algo = Algo,
+                kdf_params = KdfParams,
+                status = Status,
+                must_change_password = MustChange,
+                created_at = CreatedAt,
+                last_login = LastLogin
+            }};
+        Result when Result =:= [] orelse Result =:= ok ->
+            {error, not_found};
+        {error, Reason} = Error ->
+            ?error("Failed to get admin account ~s: ~p", [Username, Reason]),
+            Error
+    end.
+
+%% @doc List all admin accounts (ordered by creation time).
+-spec list_admin_accounts(db_ref()) ->
+    {ok, [#admin_account{}]} | {error, term()}.
+list_admin_accounts(Conn) ->
+    SQL =
+        <<
+            "SELECT username, pw_hash, pw_salt, pw_algo, kdf_params, status, "
+            "must_change_password, created_at, last_login "
+            "FROM admin_accounts ORDER BY created_at ASC"
+        >>,
+    case esqlite3:q(Conn, SQL) of
+        Rows when is_list(Rows) ->
+            Accounts = lists:map(
+                fun([Name, Hash, Salt, Algo, KdfParams, Status, MustChange, CreatedAt, LastLogin]) ->
+                    #admin_account{
+                        username = Name,
+                        pw_hash = Hash,
+                        pw_salt = Salt,
+                        pw_algo = Algo,
+                        kdf_params = KdfParams,
+                        status = Status,
+                        must_change_password = MustChange,
+                        created_at = CreatedAt,
+                        last_login = LastLogin
+                    }
+                end,
+                Rows
+            ),
+            {ok, Accounts};
+        {error, Reason} = Error ->
+            ?error("Failed to list admin accounts: ~p", [Reason]),
+            Error
+    end.
+
+%% @doc Count admin accounts. Useful for idempotent first-run bootstrap.
+-spec count_admin_accounts(db_ref()) -> {ok, non_neg_integer()} | {error, term()}.
+count_admin_accounts(Conn) ->
+    SQL = <<"SELECT COUNT(*) FROM admin_accounts">>,
+    case esqlite3:q(Conn, SQL) of
+        [[Count]] when is_integer(Count) ->
+            {ok, Count};
+        {error, Reason} = Error ->
+            ?error("Failed to count admin accounts: ~p", [Reason]),
+            Error
+    end.
+
+%% @doc Update an admin account's password material.
+%%
+%% Replaces the stored hash/salt/algo/KDF parameters and clears the
+%% `must_change_password' flag (a successful password change satisfies the
+%% forced-change requirement).
+-spec update_admin_password(db_ref(), binary(), binary(), binary(), binary()) ->
+    ok | {error, term()}.
+update_admin_password(Conn, Username, PwHash, PwSalt, KdfParams) ->
+    SQL =
+        <<
+            "UPDATE admin_accounts SET pw_hash = ?1, pw_salt = ?2, kdf_params = ?3, "
+            "must_change_password = 0 WHERE username = ?4"
+        >>,
+    case esqlite3:q(Conn, SQL, [PwHash, PwSalt, KdfParams, Username]) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to update password for admin ~s: ~p", [Username, Reason]),
+            Error
+    end.
+
+%% @doc Update an admin account's status (`active' | `suspended').
+-spec update_admin_status(db_ref(), binary(), binary()) -> ok | {error, term()}.
+update_admin_status(Conn, Username, NewStatus) ->
+    SQL = <<"UPDATE admin_accounts SET status = ?1 WHERE username = ?2">>,
+    case esqlite3:q(Conn, SQL, [NewStatus, Username]) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to update status for admin ~s: ~p", [Username, Reason]),
+            Error
+    end.
+
+%% @doc Update an admin account's last_login timestamp to now.
+-spec update_admin_last_login(db_ref(), binary()) -> ok | {error, term()}.
+update_admin_last_login(Conn, Username) ->
+    Now = erlang:system_time(second),
+    SQL = <<"UPDATE admin_accounts SET last_login = ?1 WHERE username = ?2">>,
+    case esqlite3:q(Conn, SQL, [Now, Username]) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to update last_login for admin ~s: ~p", [Username, Reason]),
+            Error
+    end.
+
+%% @doc Delete an admin account.
+-spec delete_admin_account(db_ref(), binary()) -> ok | {error, term()}.
+delete_admin_account(Conn, Username) ->
+    SQL = <<"DELETE FROM admin_accounts WHERE username = ?1">>,
+    case esqlite3:q(Conn, SQL, [Username]) of
+        Result when Result =:= [] orelse Result =:= ok ->
+            ok;
+        {error, Reason} = Error ->
+            ?error("Failed to delete admin account ~s: ~p", [Username, Reason]),
             Error
     end.
 
