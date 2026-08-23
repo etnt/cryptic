@@ -2,7 +2,8 @@
 
 > Status: **Draft for review**
 > Scope: A browser-based admin console for the Cryptic server, replacing/augmenting the
-> existing Erlang shell (`cryptic_admin`), MCP admin endpoint, and `cryptic-onboard` CLI.
+> existing Erlang shell (`cryptic_admin`), MCP admin endpoint, and `cryptic-onboard` CLI,
+> plus **turnkey container packaging** (Docker/Podman) so a fresh server is trivial to deploy.
 
 ## 1. Goals
 
@@ -17,15 +18,20 @@ The first release must support:
    browser — no shell access to `cryptic-onboard` required.
 4. **Log monitoring** — live tail of `logs/server.log` plus a paged historical view for
    troubleshooting.
+5. **Turnkey container deployment** — a Docker/Podman image that boots a working server with
+   **no GPG setup**, self-provisions its CA/server certs on first run, and creates the initial
+   admin account from configuration/secrets so the operator can log in to the web admin
+   immediately.
 
 ## 2. Confirmed design decisions
 
 | Area | Decision |
 |------|----------|
-| Auth model | New `admin_accounts` table (username + **Argon2id** password hash) + signed, HTTP-only session cookie. Decoupled from GPG identities. |
+| Auth model | New `admin_accounts` table (username + **PBKDF2-HMAC-SHA256** password hash) + signed, HTTP-only session cookie. Decoupled from GPG identities. |
 | Frontend | Server-rendered HTML shell + **vanilla JS**, talking to a JSON API. Served from `priv/webadmin/`. **No Node/build step.** |
 | Transport | **New dedicated HTTPS listener** on a separate admin port (default **8444**), server-cert TLS, **no client cert required**. Isolated from the 8443 mTLS messaging listener and the 8081 localhost MCP endpoint. |
 | Log streaming | Live tail via **WebSocket** + paged historical view over the JSON API. |
+| Packaging | Single Docker/Podman image; **GPG dropped** in favour of the Ed25519 enrollment flow; certs auto-provisioned on first run; initial admin seeded from env/secret. |
 
 ## 3. Current-state summary (what we build on)
 
@@ -129,11 +135,29 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
 - [ ] `GET /admin/api/logs?offset=&limit=` for paged history + level filter.
 - [ ] UI: auto-scrolling live log pane, pause/resume, level filter, search box.
 
-### Phase 6 — Hardening & docs
+### Phase 6 — Containerization & first-run bootstrap
+- [ ] **Drop GPG from the image**: remove `gnupg` from the runtime stage and the
+      `${HOME}/.gnupg` bind mounts from `docker-compose.yml`; remove the bootstrap-GPG
+      requirement from the entrypoint. (Server auth for mobile users is now Ed25519
+      enrollment; the old GPG registration path is deprecated — see §9.)
+- [ ] **Auto-provision certs on first run**: entrypoint generates the CA + server certs via
+      `generate-mtls-certs.sh` if none are present, instead of hard-failing. Persist to the
+      mounted `server_data` volume so restarts are idempotent.
+- [ ] **Seed the initial admin**: entrypoint calls the admin-create command exactly once
+      (idempotent) from env/secret input — see §7.3 and §9 for the exact contract.
+- [ ] Expose the web admin port (default 8444) in `Dockerfile`/`docker-compose.yml`; add
+      `webadmin_enabled`/`webadmin_port` env plumbing; extend the healthcheck.
+- [ ] Verify the image runs identically under **Podman** (rootless: uid mapping, volume
+      perms, `:Z` SELinux label note in docs).
+
+### Phase 7 — Hardening & docs
 - [ ] Security review: TLS config, cookie flags, CSRF, login rate-limiting, audit-log every
       admin action (who/what/when), input validation, no secrets in logs.
-- [ ] Tests: EUnit for auth/session/core, Lux end-to-end for login → user action → enrollment.
-- [ ] Docs: `docs/WEB-ADMIN.md` operator guide; note deprecation path for MCP/CLI overlap.
+- [ ] Tests: EUnit for auth/session/core, Lux end-to-end for login → user action → enrollment;
+      a container smoke test (boot fresh image → auto-certs → seed admin → log in → create
+      enrollment).
+- [ ] Docs: `docs/WEB-ADMIN.md` operator guide; update `docs/DOCKER.md` for the GPG-free flow
+      and admin bootstrap; note deprecation path for MCP/CLI overlap.
 
 ## 6. Security considerations
 
@@ -145,6 +169,11 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
   document binding to a management interface/VPN.
 - Every admin action writes an `audit_log` entry with the acting admin account.
 - Enrollment passphrase handling: never logged; package returned once and not persisted.
+- **Container bootstrap secrets**: prefer a mounted **password-hash file / Docker–Podman
+  secret** over a plaintext `CRYPTIC_ADMIN_PASSWORD` env var (env vars leak via `inspect`,
+  `/proc`, and logs). If a plaintext password is supplied, force a password change on first
+  login and never echo it. Admin seeding is **idempotent** — it must not overwrite an existing
+  account or reset its password on container restart.
 
 ## 7. Resolved decisions (previously open questions)
 
@@ -157,7 +186,9 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
    payload; the browser renders the QR.
 3. **First-admin bootstrap** — A **CLI/Erlang command** creates the first admin account
    (e.g. `cryptic_admin_auth:create_account/2`, optionally surfaced via `cryptic-onboard
-   create-admin`). No unauthenticated web setup endpoint is ever exposed.
+   create-admin`). No unauthenticated web setup endpoint is ever exposed. **In containers**
+   the entrypoint invokes this command once at first boot from configuration/secrets (see §9);
+   the operation is idempotent so restarts never clobber or reset the account.
 4. **MCP endpoint** — **Keep it running alongside** the web admin during transition. Both call
    the shared `cryptic_admin_core`, so there is no logic duplication; existing MCP/LLM
    workflows keep working. Deprecate later once the web admin covers all use cases.
@@ -179,4 +210,51 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
 | `priv/webadmin/` | `index.html`, `app.js`, `style.css`, `vendor/` |
 | `docs/WEB-ADMIN.md` | operator guide |
 | schema migration in `src/cryptic_ca_store.erl` | `admin_accounts` table |
-```
+| `scripts/docker-entrypoint.sh` (edit) | auto-provision certs, seed admin, drop GPG checks |
+| `Dockerfile` / `docker-compose.yml` (edit) | remove `gnupg` + `.gnupg` mounts, expose 8444 |
+
+## 9. Container packaging & initial admin bootstrap
+
+### 9.1 What changes vs today
+The current image (`Dockerfile`, `docker-compose.yml`) installs `gnupg`, bind-mounts the host
+`~/.gnupg` into both server and client, ships bootstrap GPG keys under
+`priv/ca/bootstrap/*.gpg`, and **hard-fails** if CA certs are missing. With Ed25519 enrollment
+replacing GPG registration, we can:
+
+- Remove `gnupg` from the runtime image and delete the `~/.gnupg` mounts.
+- Stop requiring bootstrap GPG keys; the GPG registration REST path is deprecated (§ below).
+- Turn cert provisioning into an automatic first-run step instead of a manual pre-step.
+
+### 9.2 First-boot sequence (entrypoint)
+1. Ensure `server_data` layout exists (already done).
+2. If CA/server certs are absent → generate them via `generate-mtls-certs.sh` and persist to
+   the volume. If present → use them. (Idempotent.)
+3. **Seed admin (idempotent):** if no admin account exists, create one from the first
+   available source, in priority order:
+   - `CRYPTIC_ADMIN_PASSWORD_HASH_FILE` — path to a mounted secret containing a
+     pre-computed PBKDF2 hash record (**preferred**; no plaintext ever in the container).
+   - `CRYPTIC_ADMIN_PASSWORD_FILE` — path to a mounted secret with a plaintext password;
+     hashed at boot, then the account is flagged `must_change_password`.
+   - `CRYPTIC_ADMIN_PASSWORD` — plaintext env var (**discouraged**; same must-change flag).
+   - none provided → generate a random password, create the account flagged
+     `must_change_password`, and print it **once** to the container log for the operator.
+   Username from `CRYPTIC_ADMIN_USER` (default `admin`).
+4. Start the server (web admin listener on `webadmin_port`).
+
+### 9.3 Bootstrap contract (env / secrets)
+| Variable | Meaning | Notes |
+|----------|---------|-------|
+| `CRYPTIC_ADMIN_USER` | initial admin username | default `admin` |
+| `CRYPTIC_ADMIN_PASSWORD_HASH_FILE` | file with precomputed PBKDF2 record | preferred |
+| `CRYPTIC_ADMIN_PASSWORD_FILE` | file with plaintext password | Docker/Podman secret |
+| `CRYPTIC_ADMIN_PASSWORD` | plaintext password | discouraged; forces change |
+| `CRYPTIC_WEBADMIN_PORT` | web admin port | default 8444 |
+
+Provide a helper (`cryptic-onboard hash-admin-password` or an escript) so operators can
+generate the hash record offline for the `*_HASH_FILE` path.
+
+### 9.4 GPG deprecation note
+The GPG-based registration flow (`/ca/v1/register-gpg`, `cryptic_ca_gpg`, `erl_gpg`,
+bootstrap keys) becomes **legacy**. It stays compilable for existing deployments but is no
+longer part of the container happy path or documented setup. A follow-up can fully remove
+`erl_gpg`/`gnupg` once no deployment depends on it.
