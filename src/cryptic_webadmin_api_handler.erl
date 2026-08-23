@@ -23,6 +23,7 @@
 %%   <li>`POST /admin/api/users/:fp/reactivate'     - reactivate user</li>
 %%   <li>`POST /admin/api/users/:fp/revoke'         - revoke user</li>
 %%   <li>`GET  /admin/api/enrollments'              - list enrollments</li>
+%%   <li>`POST /admin/api/enrollments'              - create enrollment package</li>
 %%   <li>`GET  /admin/api/enrollments/:fp'          - enrollment detail</li>
 %%   <li>`GET  /admin/api/audit'                    - recent audit log</li>
 %%   <li>`GET  /admin/api/status'                   - server status</li>
@@ -162,6 +163,10 @@ dispatch(enrollments, <<"GET">>, _User, Req) ->
         wrap_list(cryptic_admin_core:list_enrollments(DbRef, Filter),
                   enrollments, Req)
     end);
+dispatch(enrollments, <<"POST">>, User, Req0) ->
+    with_body_db(Req0, fun(DbRef, Body, Req1) ->
+        create_enrollment(DbRef, Body, User, Req1)
+    end);
 dispatch(enrollment, <<"GET">>, _User, Req) ->
     with_db(Req, fun(DbRef) ->
         Fp = binding_fp(Req),
@@ -196,6 +201,80 @@ dispatch(undefined, _Method, _User, Req) ->
     {404, #{status => <<"error">>, message => <<"not_found">>}, Req};
 dispatch(_Operation, _Method, _User, Req) ->
     {405, #{status => <<"error">>, message => <<"method_not_allowed">>}, Req}.
+
+%%====================================================================
+%% Enrollment creation
+%%====================================================================
+
+create_enrollment(DbRef, Body, User, Req) ->
+    case maps:get(<<"username">>, Body, undefined) of
+        Username when is_binary(Username), Username =/= <<>> ->
+            case maps:get(<<"passphrase">>, Body, undefined) of
+                Passphrase when is_binary(Passphrase), byte_size(Passphrase) >= 8 ->
+                    Params = build_enrollment_params(DbRef, Username, Passphrase,
+                                                     User, Body, Req),
+                    do_create_enrollment(Params, Req);
+                _ ->
+                    {400,
+                     #{status => <<"error">>,
+                       message => <<"passphrase_too_short">>},
+                     Req}
+            end;
+        _ ->
+            {400,
+             #{status => <<"error">>, message => <<"username_required">>},
+             Req}
+    end.
+
+build_enrollment_params(DbRef, Username, Passphrase, User, Body, Req) ->
+    Base = #{
+        db_ref => DbRef,
+        username => Username,
+        passphrase => Passphrase,
+        actor_id => User,
+        ip => peer_ip(Req),
+        full_name => opt_binary(<<"full_name">>, Body),
+        email => opt_binary(<<"email">>, Body)
+    },
+    maybe_put_param(expiry_seconds, opt_pos_integer(<<"expiry_seconds">>, Body),
+                    maybe_put_param(server_host, opt_binary(<<"server_host">>, Body),
+                        maybe_put_param(server_port, opt_pos_integer(<<"server_port">>, Body),
+                            Base))).
+
+do_create_enrollment(Params, Req) ->
+    try cryptic_enrollment_pkg:create(Params) of
+        {ok, Result} ->
+            {200,
+             #{status => <<"ok">>,
+               enrollment_fp => maps:get(enrollment_fp, Result),
+               username => maps:get(username, Result),
+               package => maps:get(package, Result),
+               expires_at => maps:get(expires_at, Result),
+               payload_version => maps:get(payload_version, Result)},
+             Req};
+        {error, Reason} ->
+            error_response(400, Reason, Req)
+    catch
+        Class:CatchReason:Stack ->
+            ?error("enrollment creation failed: ~p:~p~n~p",
+                   [Class, CatchReason, Stack]),
+            error_response(500, <<"enrollment_failed">>, Req)
+    end.
+
+opt_binary(Key, Body) ->
+    case maps:get(Key, Body, undefined) of
+        V when is_binary(V) -> V;
+        _ -> undefined
+    end.
+
+opt_pos_integer(Key, Body) ->
+    case maps:get(Key, Body, undefined) of
+        N when is_integer(N), N > 0 -> N;
+        _ -> undefined
+    end.
+
+maybe_put_param(_Key, undefined, Map) -> Map;
+maybe_put_param(Key, Value, Map) -> Map#{Key => Value}.
 
 %%====================================================================
 %% Request helpers

@@ -26,6 +26,7 @@
 
 #include <erl_nif.h>
 #include <sodium.h>
+#include <argon2.h>
 #include <string.h>
 
 // NIF resource types
@@ -509,6 +510,62 @@ static ERL_NIF_TERM hkdf_sha256(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
 }
 
 /**
+ * @brief Derive raw key material using Argon2id (libargon2)
+ *
+ * Computes an Argon2id hash using the reference libargon2 implementation,
+ * exposing the full parameter set (time cost, memory cost, and parallelism).
+ * This is required for wire-compatibility with the enrollment package format
+ * produced by bin/cryptic-onboard, which invokes the `argon2` CLI with a
+ * parallelism of 4 (a lane count the libsodium high-level crypto_pwhash API
+ * cannot express).
+ *
+ * @param env Erlang NIF environment
+ * @param argc Number of arguments (must be 6)
+ * @param argv [Password, Salt, TCost, MCostKiB, Parallelism, HashLen]
+ * @return Raw hash binary of HashLen bytes, or atom 'error'/'badarg'
+ *
+ * @note MCostKiB is the memory cost in kibibytes (the `argon2` CLI `-m N`
+ *       flag corresponds to 2^N KiB, so pass that pre-computed value here).
+ * @note Argon2 version 1.3 (0x13) is used, matching the `argon2` CLI default.
+ * @security Registered as a dirty CPU NIF because the memory-hard computation
+ *           can take significant time and must not block a normal scheduler.
+ */
+static ERL_NIF_TERM argon2id_raw(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    ErlNifBinary pwd, salt;
+    unsigned int t_cost, m_cost, parallelism, hashlen;
+
+    if (!enif_inspect_binary(env, argv[0], &pwd) ||
+        !enif_inspect_binary(env, argv[1], &salt) ||
+        !enif_get_uint(env, argv[2], &t_cost) ||
+        !enif_get_uint(env, argv[3], &m_cost) ||
+        !enif_get_uint(env, argv[4], &parallelism) ||
+        !enif_get_uint(env, argv[5], &hashlen) ||
+        t_cost < 1 || parallelism < 1 ||
+        hashlen < 4 || hashlen > 1024 ||
+        salt.size < 8)
+    {
+        return enif_make_badarg(env);
+    }
+
+    ERL_NIF_TERM result;
+    unsigned char *hash = enif_make_new_binary(env, hashlen, &result);
+
+    int rc = argon2id_hash_raw((uint32_t)t_cost, (uint32_t)m_cost,
+                               (uint32_t)parallelism,
+                               pwd.data, pwd.size,
+                               salt.data, salt.size,
+                               hash, (size_t)hashlen);
+
+    if (rc != ARGON2_OK)
+    {
+        return enif_make_atom(env, "error");
+    }
+
+    return result;
+}
+
+/**
  * @brief NIF function export table
  *
  * Defines the mapping between Erlang function names and C implementations.
@@ -523,7 +580,8 @@ static ErlNifFunc nif_funcs[] = {
     {"ed25519_sk_to_x25519_sk", 1, ed25519_sk_to_x25519_sk, 0},
     {"ed25519_pk_to_x25519_pk", 1, ed25519_pk_to_x25519_pk, 0},
     {"kdf_derive", 4, kdf_derive, 0},
-    {"hkdf_sha256", 4, hkdf_sha256, 0}};
+    {"hkdf_sha256", 4, hkdf_sha256, 0},
+    {"argon2id_raw", 6, argon2id_raw, ERL_NIF_DIRTY_JOB_CPU_BOUND}};
 
 /**
  * @brief NIF module initialization macro

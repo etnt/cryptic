@@ -50,6 +50,19 @@ else
 	LDLIBS += -L/usr/local/lib -L/opt/homebrew/lib -lsodium
 endif
 
+# Check if libargon2 is available via pkg-config (needed for the enrollment
+# package KDF, which requires Argon2id with a configurable parallelism the
+# libsodium high-level API cannot express).
+ARGON2_EXISTS := $(shell pkg-config --exists libargon2 && echo yes)
+ifeq ($(ARGON2_EXISTS), yes)
+	CFLAGS += $(shell pkg-config --cflags libargon2)
+	LDLIBS += $(shell pkg-config --libs libargon2)
+else
+	# Fallback to system paths
+	CFLAGS += -I/usr/local/include -I/opt/homebrew/include
+	LDLIBS += -L/usr/local/lib -L/opt/homebrew/lib -largon2
+endif
+
 # Verbosity.
 c_verbose_0 = @echo " C     " $(?F);
 c_verbose = $(c_verbose_$(V))

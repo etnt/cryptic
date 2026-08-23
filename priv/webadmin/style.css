@@ -262,3 +262,81 @@ button.danger:hover { background: #cf4a59; }
 }
 .detail dt { color: var(--muted); font-size: 0.82rem; }
 .detail dd { margin: 0; word-break: break-word; }
+
+/* Enrollment creation modal */
+button.primary { background: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent-hover); }
+
+.modal { position: fixed; inset: 0; z-index: 200; }
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+.modal-panel {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.modal-head h3 { margin: 0; font-size: 1.05rem; }
+.modal-body { padding: 1.25rem; overflow-y: auto; }
+
+.modal-body label {
+  display: block;
+  margin: 0.85rem 0 0.3rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.modal-body label:first-child { margin-top: 0; }
+.modal-body input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+.modal-body input:focus { outline: none; border-color: var(--accent); }
+
+.field-row { display: flex; gap: 0.75rem; }
+.field-row .field { flex: 1; }
+.field-row label { margin-top: 0.85rem; }
+.opt { color: var(--muted); font-weight: 400; }
+
+.hint { color: var(--muted); font-size: 0.8rem; margin: 0.4rem 0 0; }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  background: #fff;
+  border-radius: 8px;
+}
+.qr-wrap img { display: block; image-rendering: pixelated; }
+

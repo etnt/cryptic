@@ -1,6 +1,7 @@
-// Cryptic Admin - front-end (Phase 3)
+// Cryptic Admin - front-end
 // Handles the auth flow (session check, login, logout), section nav, and the
-// user / enrollment / audit administration views. All state-changing requests
+// user / enrollment / audit administration views, including mobile enrollment
+// package creation with client-side QR rendering. All state-changing requests
 // carry the CSRF token issued at login.
 'use strict';
 
@@ -281,6 +282,120 @@
       </tr>`).join('');
   }
 
+  // --- Enrollment creation modal -------------------------------------------
+
+  const enrollModalState = { lastPackage: null };
+
+  function openEnrollModal() {
+    const form = el('enroll-form');
+    form.reset();
+    el('enroll-expiry').value = '365';
+    form.hidden = false;
+    el('enroll-result').hidden = true;
+    el('enroll-form-error').hidden = true;
+    el('enroll-qr').innerHTML = '';
+    enrollModalState.lastPackage = null;
+    el('enroll-modal').hidden = false;
+    el('enroll-username').focus();
+  }
+
+  function closeEnrollModal() {
+    el('enroll-modal').hidden = true;
+    el('enroll-qr').innerHTML = '';
+    enrollModalState.lastPackage = null;
+  }
+
+  function setEnrollError(text) {
+    const node = el('enroll-form-error');
+    if (!text) { node.hidden = true; node.textContent = ''; return; }
+    node.textContent = text;
+    node.hidden = false;
+  }
+
+  function renderQr(container, text) {
+    container.innerHTML = '';
+    // typeNumber 0 = auto-size; 'L' error correction maximises data capacity.
+    const qr = qrcode(0, 'L');
+    qr.addData(text);
+    qr.make();
+    // 4 px per module, 8 px quiet-zone margin; crisp <img> data URL.
+    container.innerHTML = qr.createImgTag(4, 8, 'Enrollment QR code');
+  }
+
+  async function handleEnrollSubmit(event) {
+    event.preventDefault();
+    setEnrollError(null);
+    const submitBtn = el('enroll-submit');
+    submitBtn.disabled = true;
+
+    const body = {
+      username: el('enroll-username').value.trim(),
+      passphrase: el('enroll-passphrase').value,
+    };
+    const fullName = el('enroll-fullname').value.trim();
+    const email = el('enroll-email').value.trim();
+    if (fullName) body.full_name = fullName;
+    if (email) body.email = email;
+    const days = parseInt(el('enroll-expiry').value, 10);
+    if (Number.isFinite(days) && days > 0) {
+      body.expiry_seconds = days * 86400;
+    }
+
+    let res;
+    try {
+      res = await api('/admin/api/enrollments', { method: 'POST', body });
+    } finally {
+      submitBtn.disabled = false;
+    }
+
+    const { ok, data } = res;
+    if (!ok || !data || data.status !== 'ok') {
+      setEnrollError(enrollErrorText(data));
+      return;
+    }
+
+    enrollModalState.lastPackage = data.package;
+    el('enroll-result-user').textContent = data.username || body.username;
+    el('enroll-result-fp').textContent = data.enrollment_fp || '—';
+    el('enroll-result-expiry').textContent = fmtTime(data.expires_at);
+    try {
+      renderQr(el('enroll-qr'), data.package);
+    } catch (_e) {
+      el('enroll-qr').innerHTML =
+        '<p class="msg msg-error">Package too large to render as QR. ' +
+        'Use “Copy package” instead.</p>';
+    }
+    el('enroll-form').hidden = true;
+    el('enroll-result').hidden = false;
+    loadEnrollments(); // refresh the table underneath
+  }
+
+  function enrollErrorText(data) {
+    const msg = data && data.message;
+    switch (msg) {
+      case 'username_required': return 'A username is required.';
+      case 'passphrase_too_short':
+        return 'Passphrase must be at least 8 characters.';
+      case 'enrollment_failed':
+        return 'Server failed to create the enrollment. Check server logs.';
+      default: return (msg && String(msg)) || 'Failed to create enrollment.';
+    }
+  }
+
+  async function copyEnrollPackage() {
+    const pkg = enrollModalState.lastPackage;
+    if (!pkg) return;
+    const btn = el('enroll-copy');
+    try {
+      await navigator.clipboard.writeText(pkg);
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    } catch (_e) {
+      window.prompt('Copy the enrollment package:', pkg);
+    }
+  }
+
   // --- Audit ---------------------------------------------------------------
 
   async function loadAudit() {
@@ -380,12 +495,22 @@
     el('users-filter').addEventListener('change', loadUsers);
     el('enroll-refresh').addEventListener('click', loadEnrollments);
     el('enroll-filter').addEventListener('change', loadEnrollments);
+    el('enroll-create').addEventListener('click', openEnrollModal);
+    el('enroll-form').addEventListener('submit', handleEnrollSubmit);
+    el('enroll-copy').addEventListener('click', copyEnrollPackage);
+    el('enroll-done').addEventListener('click', closeEnrollModal);
+    for (const node of document.querySelectorAll('[data-enroll-close]')) {
+      node.addEventListener('click', closeEnrollModal);
+    }
     el('audit-refresh').addEventListener('click', loadAudit);
     for (const node of document.querySelectorAll('[data-close]')) {
       node.addEventListener('click', closeDrawer);
     }
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeDrawer();
+      if (e.key === 'Escape') {
+        closeDrawer();
+        if (!el('enroll-modal').hidden) closeEnrollModal();
+      }
     });
     checkSession();
   }

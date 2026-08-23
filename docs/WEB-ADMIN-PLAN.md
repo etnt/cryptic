@@ -155,14 +155,18 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
       back to login.
 
 ### Phase 4 — Mobile enrollment + QR (browser)
-- [ ] `cryptic_enrollment_pkg` (Erlang port of `cryptic-onboard` packaging): build payload,
+- [x] `cryptic_enrollment_pkg` (Erlang port of `cryptic-onboard` packaging): build payload,
       KDF, AES-256-CBC encrypt, HMAC. Register the `enrollment_identity` server-side
       (reuse `cryptic_ca_store` insert; same path as `register-enrollment`).
-- [ ] QR generation (decided: **client-side**): the API returns the encrypted package string;
-      the browser renders the QR with a bundled vanilla-JS QR library in `priv/webadmin/vendor/`.
-      Keeps the passphrase/package off any extra round-trip and avoids a server `qrencode` dep.
-- [ ] `POST /admin/api/enrollments`: input `{username, passphrase, expiry}` → returns package +
-      QR payload + enrollment_fp. UI shows the QR, copy-to-clipboard, and expiry.
+      Argon2id parity implemented via a dedicated `cryptic_nif:argon2id_raw/6` NIF
+      (libargon2, dirty CPU-bound); verified byte-for-byte against the `argon2` CLI and
+      full AES/HMAC round-trip against openssl.
+- [x] QR generation (decided: **client-side**): the API returns the encrypted package string;
+      the browser renders the QR with a bundled vanilla-JS QR library in `priv/webadmin/vendor/`
+      (`qrcode-generator` 1.4.4, MIT). Keeps the passphrase/package off any extra round-trip
+      and avoids a server `qrencode` dep.
+- [x] `POST /admin/api/enrollments`: input `{username, passphrase, expiry, full_name?, email?}`
+      → returns package + enrollment_fp + expiry. UI shows the QR, copy-to-clipboard, and expiry.
 
 ### Phase 5 — Log monitoring
 - [ ] `cryptic_webadmin_log_ws` WebSocket: on connect, send last N lines, then stream new
