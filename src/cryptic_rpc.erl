@@ -8,6 +8,9 @@
          admin_reactivate/1,
          admin_revoke/1,
          admin_list_certificates/1,
+         create_admin/2,
+         create_admin/3,
+         count_admins/0,
          engine_status/0,
          list_users/0,
          online_users/0,
@@ -24,6 +27,35 @@
 -spec renew_certificate() -> ok.
 renew_certificate() ->
     cryptic_cert_renewal:renew_now().
+
+
+%% @doc Bootstrap: create a web-admin account with a plaintext password.
+%%
+%% Intended to be invoked against a running server node (e.g. via
+%% `rpc:call/4' or a remote shell) to seed the first administrator.
+%% Idempotency is the caller's responsibility; an existing username
+%% returns `{error, already_exists}'.
+-spec create_admin(binary(), binary()) -> ok | {error, term()}.
+create_admin(Username, Password) when is_binary(Username), is_binary(Password) ->
+    cryptic_admin_auth:create_account(Username, Password).
+
+%% @doc Bootstrap: create a web-admin account, optionally flagging it so the
+%% UI forces a password change on first login (`MustChange :: boolean()').
+-spec create_admin(binary(), binary(), boolean()) -> ok | {error, term()}.
+create_admin(Username, Password, MustChange) when
+    is_binary(Username), is_binary(Password), is_boolean(MustChange)
+->
+    cryptic_admin_auth:create_account(
+        Username, Password, #{must_change_password => MustChange}
+    ).
+
+%% @doc Bootstrap helper: number of existing web-admin accounts.
+-spec count_admins() -> {ok, non_neg_integer()} | {error, term()}.
+count_admins() ->
+    case application:get_env(cryptic, ca_db_ref) of
+        {ok, DbRef} -> cryptic_ca_store:count_admin_accounts(DbRef);
+        _ -> {error, ca_db_ref_not_configured}
+    end.
 
 
 %%@doc Send register_user command via event bus

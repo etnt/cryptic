@@ -97,12 +97,20 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
       → **Moved to Phase 1** (depends on the `cryptic_admin_auth` hashing module).
 
 ### Phase 1 — Auth & session
-- [ ] `cryptic_admin_auth`: `create_account/2`, `verify_password/2`, `set_password/2`.
-      Constant-time compare; per-account random salt.
-- [ ] `cryptic_admin_session`: ETS-backed sessions with signed, HTTP-only, `Secure`,
-      `SameSite=Strict` cookies; TTL + idle timeout; CSRF token issued at login.
-- [ ] `cryptic_webadmin_auth_handler`: `POST /admin/api/login`, `POST /admin/api/logout`,
-      `GET /admin/api/session`. Rate-limit login attempts (reuse `cryptic_ca_rate_limiter`).
+- [x] `cryptic_admin_auth`: `create_account/2,3`, `verify_password/2`, `set_password/2`.
+      PBKDF2-HMAC-SHA256 (210k iters, 32-byte key, 16-byte per-account salt), constant-time
+      compare, dummy-derive on unknown user to level timing. Reads `ca_db_ref` app env.
+- [x] `cryptic_admin_session`: gen_server owning a public ETS table; HMAC-SHA256 signed
+      cookie (per-boot secret via `persistent_term`, sessions dropped on restart), `HttpOnly`/
+      `Secure`/`SameSite=Strict` set by the handler; absolute TTL (`webadmin_session_ttl`, 12h)
+      + sliding idle timeout (`webadmin_session_idle`, 30m); CSRF token issued at login.
+      Registered in `cryptic_sup`.
+- [x] `cryptic_webadmin_auth_handler`: `POST /admin/api/login`, `POST /admin/api/logout`,
+      `GET /admin/api/session`. Per-IP login rate limit via `cryptic_ca_rate_limiter`
+      (`admin_login` policy = 10/5min). Operation selected by route `State`. CSRF enforced
+      on logout. Routes to be wired in Phase 2.
+- [x] Bootstrap: `cryptic_rpc:create_admin/2,3` + `count_admins/0` (remsh/`rpc:call`).
+      Env-var/container seeding remains Phase 6.
 
 ### Phase 2 — Listener & static shell
 - [ ] `start_webadmin_https/1` in `cryptic_server` (mirrors `start_mcp_localhost_tcp` but

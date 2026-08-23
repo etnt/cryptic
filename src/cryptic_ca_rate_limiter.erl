@@ -62,7 +62,12 @@
     %% Status checks (per IP per hour)
 
     % 200 status checks per hour
-    status => {200, 3600}
+    status => {200, 3600},
+
+    %% Web admin login attempts (per IP)
+
+    % 10 login attempts per 5 minutes
+    admin_login => {10, 300}
 }).
 
 -record(state, {

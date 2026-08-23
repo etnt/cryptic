@@ -61,6 +61,15 @@ init([]) ->
           type => worker,
           modules => [cryptic_ca_rate_limiter]},
 
+    %% Web admin session store (ETS-backed sessions + cleanup)
+    AdminSession =
+        #{id => cryptic_admin_session,
+          start => {cryptic_admin_session, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_admin_session]},
+
     %% Certificate expiration monitor
     CertMonitor =
         #{id => cryptic_cert_monitor,
@@ -80,7 +89,7 @@ init([]) ->
           modules => [cryptic_server]},
 
     ChildSpecs = [EventManager, CaInit, CaSerialManager,
-                  CaRateLimiter, CertMonitor, CrypticServer],
+                  CaRateLimiter, AdminSession, CertMonitor, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions
