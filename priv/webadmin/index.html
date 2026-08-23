@@ -28,6 +28,7 @@
       <nav class="nav">
         <button class="nav-btn" data-section="users">Users</button>
         <button class="nav-btn" data-section="enrollments">Enrollments</button>
+        <button class="nav-btn" data-section="audit">Audit</button>
         <button class="nav-btn" data-section="logs">Logs</button>
       </nav>
       <span class="spacer"></span>
@@ -37,18 +38,102 @@
 
     <main class="content">
       <section id="section-users" class="section" hidden>
-        <h2>Users</h2>
-        <p class="placeholder">User administration lands in Phase 3.</p>
+        <div class="section-head">
+          <h2>Users</h2>
+          <div class="controls">
+            <select id="users-filter" class="filter">
+              <option value="">All statuses</option>
+              <option value="active">Active</option>
+              <option value="suspended">Suspended</option>
+              <option value="revoked">Revoked</option>
+            </select>
+            <button id="users-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <p id="users-msg" class="msg" hidden></p>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Status</th>
+              <th>Online</th>
+              <th>Registered</th>
+              <th>Fingerprint</th>
+            </tr>
+          </thead>
+          <tbody id="users-tbody"></tbody>
+        </table>
       </section>
+
       <section id="section-enrollments" class="section" hidden>
-        <h2>Enrollments</h2>
-        <p class="placeholder">Mobile enrollment &amp; QR lands in Phase 4.</p>
+        <div class="section-head">
+          <h2>Enrollments</h2>
+          <div class="controls">
+            <select id="enroll-filter" class="filter">
+              <option value="">All statuses</option>
+              <option value="pending">Pending</option>
+              <option value="active">Active</option>
+              <option value="consumed">Consumed</option>
+              <option value="revoked">Revoked</option>
+            </select>
+            <button id="enroll-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <p id="enroll-msg" class="msg" hidden></p>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Status</th>
+              <th>Registered</th>
+              <th>Consumed</th>
+              <th>Fingerprint</th>
+            </tr>
+          </thead>
+          <tbody id="enroll-tbody"></tbody>
+        </table>
       </section>
+
+      <section id="section-audit" class="section" hidden>
+        <div class="section-head">
+          <h2>Audit log</h2>
+          <div class="controls">
+            <button id="audit-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <p id="audit-msg" class="msg" hidden></p>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Fingerprint</th>
+              <th>IP</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </section>
+
       <section id="section-logs" class="section" hidden>
         <h2>Logs</h2>
         <p class="placeholder">Live log monitoring lands in Phase 5.</p>
       </section>
     </main>
+  </div>
+
+  <!-- User detail drawer -->
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawer-backdrop" data-close="1"></div>
+    <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <header class="drawer-head">
+        <h3 id="drawer-title">User</h3>
+        <button class="icon-btn" data-close="1" aria-label="Close">&times;</button>
+      </header>
+      <div id="drawer-body" class="drawer-body"></div>
+      <footer id="drawer-actions" class="drawer-actions"></footer>
+    </aside>
   </div>
 
   <script src="/admin/app.js"></script>

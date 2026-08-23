@@ -132,14 +132,27 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
 
 
 ### Phase 3 — User administration API + UI
-- [ ] Extract `cryptic_admin_core` (list_users, get_user_info, list_certificates,
-      suspend/revoke/reactivate user, list/get enrollments, audit) from the MCP handler.
-- [ ] `cryptic_webadmin_api_handler` (session-authenticated) exposing:
+- [x] Extract `cryptic_admin_core` (list_users, get_user_info, list_certificates,
+      suspend/revoke/reactivate user, list/get enrollments, audit, server_status) from the
+      MCP handler. Transport-agnostic (`{ok, Data} | {error, Reason}`, no Cowboy/HTTP);
+      mutations take an `ActorId` + `Ip` and write the audit entry internally. The MCP handler
+      now delegates all these ops to the core and keeps only its verbose response envelopes;
+      the ~16 duplicated helper functions were removed (build is `warnings_as_errors`).
+- [x] `cryptic_webadmin_api_handler` (session + CSRF authenticated) exposing:
       `GET /admin/api/users`, `GET /admin/api/users/:fp`, `GET /admin/api/users/:fp/certs`,
       `POST /admin/api/users/:fp/{suspend|reactivate|revoke}`,
-      `GET /admin/api/enrollments`, `GET /admin/api/audit`, `GET /admin/api/status`.
-- [ ] UI: users table with status badges + online indicator, detail drawer, action buttons
-      with confirm dialogs, audit log view.
+      `GET /admin/api/enrollments`, `GET /admin/api/enrollments/:fp`,
+      `GET /admin/api/audit`, `GET /admin/api/status`. Validates the session cookie on every
+      request, enforces `X-CSRF-Token` (constant-time) on mutations, emits clean REST JSON
+      (not MCP envelopes). Mutation `ActorId` = session username; `Ip` = peer. Routes wired in
+      `start_webadmin_https/1` before the static catch-all (`:fp` bindings; specific routes
+      precede parameterised ones).
+- [x] UI: users table with status badges (active/suspended/revoked) + online indicator and a
+      status filter; detail drawer showing user fields + certificate list with suspend /
+      reactivate / revoke action buttons (reason prompt for suspend/revoke, confirm for
+      reactivate; revoked is terminal); enrollments table with status filter; audit log view.
+      All calls go through the existing `api()` helper (CSRF + `same-origin`); a 401 bounces
+      back to login.
 
 ### Phase 4 — Mobile enrollment + QR (browser)
 - [ ] `cryptic_enrollment_pkg` (Erlang port of `cryptic-onboard` packaging): build payload,

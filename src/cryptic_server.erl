@@ -814,6 +814,39 @@ start_webadmin_https(Config) ->
                 operation => session
             }},
 
+            %% Admin REST API (session + CSRF authenticated). Order matters:
+            %% more specific routes precede parameterised ones.
+            {"/admin/api/users", cryptic_webadmin_api_handler, #{
+                operation => users
+            }},
+            {"/admin/api/users/:fp/certs", cryptic_webadmin_api_handler, #{
+                operation => user_certs
+            }},
+            {"/admin/api/users/:fp/suspend", cryptic_webadmin_api_handler, #{
+                operation => user_suspend
+            }},
+            {"/admin/api/users/:fp/reactivate", cryptic_webadmin_api_handler, #{
+                operation => user_reactivate
+            }},
+            {"/admin/api/users/:fp/revoke", cryptic_webadmin_api_handler, #{
+                operation => user_revoke
+            }},
+            {"/admin/api/users/:fp", cryptic_webadmin_api_handler, #{
+                operation => user
+            }},
+            {"/admin/api/enrollments", cryptic_webadmin_api_handler, #{
+                operation => enrollments
+            }},
+            {"/admin/api/enrollments/:fp", cryptic_webadmin_api_handler, #{
+                operation => enrollment
+            }},
+            {"/admin/api/audit", cryptic_webadmin_api_handler, #{
+                operation => audit
+            }},
+            {"/admin/api/status", cryptic_webadmin_api_handler, #{
+                operation => status
+            }},
+
             %% Single-page shell + static assets
             {"/admin", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},
             {"/admin/", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},

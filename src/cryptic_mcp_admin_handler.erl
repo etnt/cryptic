@@ -238,14 +238,9 @@ handle_post_operation(<<"suspend_user">>, BodyMap, AdminFp, DbRef, Req) ->
         fun() ->
             GpgFp = maps:get(<<"gpg_fp">>, BodyMap),
             Reason = maps:get(<<"reason">>, BodyMap, <<"No reason provided">>),
-            case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"suspended">>) of
-                ok ->
-                    Now = erlang:system_time(second),
-                    AuditResult = log_audit(DbRef, <<"user_suspended">>, GpgFp, #{
-                        suspended_by => AdminFp,
-                        reason => Reason
-                    }, Req, Now),
-                    log_audit_result(AuditResult, <<"user_suspended">>, GpgFp),
+            case cryptic_admin_core:suspend_user(
+                   DbRef, GpgFp, AdminFp, Reason, peer_ip(Req)) of
+                {ok, #{at := Now}} ->
                     {200, #{
                         type => <<"suspend_user_response">>,
                         status => <<"success">>,
@@ -267,14 +262,9 @@ handle_post_operation(<<"revoke_user">>, BodyMap, AdminFp, DbRef, Req) ->
         fun() ->
             GpgFp = maps:get(<<"gpg_fp">>, BodyMap),
             Reason = maps:get(<<"reason">>, BodyMap, <<"No reason provided">>),
-            case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"revoked">>) of
-                ok ->
-                    Now = erlang:system_time(second),
-                    AuditResult = log_audit(DbRef, <<"user_revoked">>, GpgFp, #{
-                        revoked_by => AdminFp,
-                        reason => Reason
-                    }, Req, Now),
-                    log_audit_result(AuditResult, <<"user_revoked">>, GpgFp),
+            case cryptic_admin_core:revoke_user(
+                   DbRef, GpgFp, AdminFp, Reason, peer_ip(Req)) of
+                {ok, #{at := Now}} ->
                     {200, #{
                         type => <<"revoke_user_response">>,
                         status => <<"success">>,
@@ -295,40 +285,31 @@ handle_post_operation(<<"reactivate_user">>, BodyMap, AdminFp, DbRef, Req) ->
         [<<"gpg_fp">>],
         fun() ->
             GpgFp = maps:get(<<"gpg_fp">>, BodyMap),
-            case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
-                {ok, #gpg_identity{status = <<"revoked">>}} ->
-                    {400, #{
-                        type => <<"reactivate_user_response">>,
-                        status => <<"error">>,
-                        error => <<"cannot_reactivate_revoked">>,
-                        message => <<"Revoked users cannot be reactivated">>
-                    }, Req};
-                {ok, #gpg_identity{status = <<"active">>}} ->
+            case cryptic_admin_core:reactivate_user(
+                   DbRef, GpgFp, AdminFp, peer_ip(Req)) of
+                {ok, #{changed := false}} ->
                     {200, #{
                         type => <<"reactivate_user_response">>,
                         status => <<"success">>,
                         gpg_fp => GpgFp,
                         message => <<"User already active">>
                     }, Req};
-                {ok, _Identity} ->
-                    case cryptic_ca_store:update_user_status(DbRef, GpgFp, <<"active">>) of
-                        ok ->
-                            Now = erlang:system_time(second),
-                            AuditResult = log_audit(DbRef, <<"user_reactivated">>, GpgFp, #{
-                                reactivated_by => AdminFp
-                            }, Req, Now),
-                            log_audit_result(AuditResult, <<"user_reactivated">>, GpgFp),
-                            {200, #{
-                                type => <<"reactivate_user_response">>,
-                                status => <<"success">>,
-                                gpg_fp => GpgFp,
-                                new_status => <<"active">>,
-                                reactivated_by => AdminFp,
-                                reactivated_at => Now
-                            }, Req};
-                        {error, Reason} ->
-                            error_response(400, Reason, Req)
-                    end;
+                {ok, #{at := Now}} ->
+                    {200, #{
+                        type => <<"reactivate_user_response">>,
+                        status => <<"success">>,
+                        gpg_fp => GpgFp,
+                        new_status => <<"active">>,
+                        reactivated_by => AdminFp,
+                        reactivated_at => Now
+                    }, Req};
+                {error, cannot_reactivate_revoked} ->
+                    {400, #{
+                        type => <<"reactivate_user_response">>,
+                        status => <<"error">>,
+                        error => <<"cannot_reactivate_revoked">>,
+                        message => <<"Revoked users cannot be reactivated">>
+                    }, Req};
                 {error, Reason2} ->
                     error_response(404, Reason2, Req)
             end
@@ -612,24 +593,8 @@ is_admin(GpgFp, DbRef) ->
     end.
 
 list_users(DbRef, _AdminFp, Filter, Req) ->
-    case cryptic_ca_store:list_gpg_identities(DbRef) of
-        {ok, Identities} ->
-            FilteredIdentities =
-                case Filter of
-                    undefined -> Identities;
-                    <<>> -> Identities;
-                    FilterStatus ->
-                        lists:filter(
-                            fun(#gpg_identity{status = S}) ->
-                                S =:= FilterStatus
-                            end,
-                            Identities
-                        )
-                end,
-            Users = [
-                encode_user(DbRef, Identity)
-                || Identity <- FilteredIdentities
-            ],
+    case cryptic_admin_core:list_users(DbRef, Filter) of
+        {ok, Users} ->
             {200, #{
                 type => <<"list_users_response">>,
                 status => <<"success">>,
@@ -641,21 +606,8 @@ list_users(DbRef, _AdminFp, Filter, Req) ->
     end.
 
 get_user_info(DbRef, GpgFp, Req) ->
-    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
-        {ok, #gpg_identity{
-                status = Status,
-                registered_by = RegBy,
-                registered_at = RegAt,
-                last_seen = LastSeen,
-                metadata = Meta
-               }} ->
-            UserInfo = maybe_attach_metadata(#{
-                gpg_fp => GpgFp,
-                status => Status,
-                registered_by => RegBy,
-                registered_at => RegAt,
-                last_seen => LastSeen
-            }, Meta),
+    case cryptic_admin_core:get_user_info(DbRef, GpgFp) of
+        {ok, UserInfo} ->
             {200, #{
                 type => <<"get_user_info_response">>,
                 status => <<"success">>,
@@ -666,249 +618,17 @@ get_user_info(DbRef, GpgFp, Req) ->
     end.
 
 list_certificates(DbRef, GpgFp, Req) ->
-    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
-        {ok, Certs} ->
-            CertList = lists:map(
-                fun(Cert) ->
-                    #{
-                        serial => Cert#certificate.serial,
-                        issued_at => Cert#certificate.issued_at,
-                        expires_at => Cert#certificate.expires_at,
-                        status => Cert#certificate.status,
-                        revoked_at => Cert#certificate.revoked_at,
-                        revoked_by => Cert#certificate.revoked_by,
-                        revoked_reason => Cert#certificate.revoked_reason
-                    }
-                end,
-                Certs
-            ),
+    case cryptic_admin_core:list_certificates(DbRef, GpgFp) of
+        {ok, CertList} ->
             {200, #{
                 type => <<"list_certificates_response">>,
                 status => <<"success">>,
                 gpg_fp => GpgFp,
                 certificates => CertList,
-                count => length(Certs)
+                count => length(CertList)
             }, Req};
         {error, Reason} ->
             error_response(404, Reason, Req)
-    end.
-
-encode_user(DbRef, #gpg_identity{
-    gpg_fp = Fp,
-    status = Status,
-    registered_by = RegBy,
-    registered_at = RegAt,
-    last_seen = LastSeen,
-    metadata = Meta
-}) ->
-    DisplayName = case get_username_for_gpg(DbRef, Fp) of
-        {ok, Name} -> to_binary(Name);
-        undefined -> <<"unknown">>
-    end,
-    %% Online check: extract the chat username from the cert (SAN then CN)
-    %% which matches the key stored in the CONNECTION_TABLE.
-    ChatUsername = get_chat_username_from_cert(DbRef, Fp),
-    Online = case ChatUsername of
-        undefined -> false;
-        U -> is_online(U)
-    end,
-    UserMap = #{
-        gpg_fp => Fp,
-        username => DisplayName,
-        status => Status,
-        registered_by => RegBy,
-        registered_at => RegAt,
-        last_seen => LastSeen,
-        online => Online
-    },
-    maybe_attach_metadata(UserMap, Meta).
-
-%% @private Resolve a display name for a GPG fingerprint.
-%% Tries the GPG key's user ID name first, then falls back to certificate CN.
-get_username_for_gpg(DbRef, GpgFp) ->
-    case get_name_from_gpg_key(DbRef, GpgFp) of
-        {ok, _} = Ok -> Ok;
-        undefined ->
-            case get_cn_from_cert(DbRef, GpgFp) of
-                undefined -> undefined;
-                CN -> {ok, CN}
-            end
-    end.
-
-%% @private Extract the human name from the GPG key's user ID.
-get_name_from_gpg_key(DbRef, GpgFp) ->
-    case cryptic_ca_store:get_gpg_identity(DbRef, GpgFp) of
-        {ok, #gpg_identity{gpg_pub_armor = PubArmor}}
-          when is_binary(PubArmor), byte_size(PubArmor) > 0 ->
-            try
-                case erl_gpg_api:get_key_info(PubArmor, "") of
-                    {ok, KeyInfo} ->
-                        UIDs = maps:get(user_ids, KeyInfo, []),
-                        extract_name_from_uids(UIDs);
-                    _ ->
-                        undefined
-                end
-            catch
-                _:_ -> undefined
-            end;
-        _ ->
-            undefined
-    end.
-
-extract_name_from_uids([]) -> undefined;
-extract_name_from_uids([UID | Rest]) ->
-    case extract_name_from_uid(UID) of
-        {ok, _} = Ok -> Ok;
-        undefined -> extract_name_from_uids(Rest)
-    end.
-
-extract_name_from_uid(UID) when is_binary(UID) ->
-    S = unicode:characters_to_list(UID),
-    case string:split(S, "<") of
-        [S] ->
-            case string:trim(S) of
-                [] -> undefined;
-                Trimmed -> {ok, Trimmed}
-            end;
-        [Before, _] ->
-            case string:trim(Before) of
-                [] -> undefined;
-                Name -> {ok, Name}
-            end
-    end;
-extract_name_from_uid(_) -> undefined.
-
-%% @private Extract the chat username from a stored certificate PEM.
-%% Mirrors cryptic_ws_handler: tries SAN (otherName, rfc822Name, dNSName) first,
-%% then falls back to CN. Returns the string that matches the CONNECTION_TABLE key.
-get_chat_username_from_cert(DbRef, GpgFp) ->
-    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
-        {ok, [#certificate{cert_pem = CertPem} | _]} ->
-            try
-                [{'Certificate', CertDER, not_encrypted}] =
-                    public_key:pem_decode(CertPem),
-                Cert = public_key:pkix_decode_cert(CertDER, otp),
-                TBSCert = Cert#'OTPCertificate'.tbsCertificate,
-                case extract_username_from_san(TBSCert) of
-                    {ok, Username} -> Username;
-                    not_found ->
-                        Subject = TBSCert#'OTPTBSCertificate'.subject,
-                        extract_common_name(Subject)
-                end
-            catch
-                _:_ -> undefined
-            end;
-        _ ->
-            undefined
-    end.
-
-%% @private Extract username from cert SAN extension.
-extract_username_from_san(TBSCert) ->
-    case TBSCert#'OTPTBSCertificate'.extensions of
-        asn1_NOVALUE -> not_found;
-        Extensions ->
-            case lists:keyfind(?'id-ce-subjectAltName',
-                               #'Extension'.extnID, Extensions) of
-                false -> not_found;
-                #'Extension'{extnValue = GeneralNames}
-                  when is_list(GeneralNames) ->
-                    extract_username_from_san_names(GeneralNames);
-                _ -> not_found
-            end
-    end.
-
-extract_username_from_san_names([]) -> not_found;
-extract_username_from_san_names([{otherName, {{1,3,6,1,4,1,99999,1}, Value}} | _]) ->
-    case Value of
-        {utf8String, U} when is_binary(U) -> {ok, binary_to_list(U)};
-        {utf8String, U} when is_list(U) -> {ok, U};
-        _ -> not_found
-    end;
-extract_username_from_san_names([{rfc822Name, Email} | Rest]) ->
-    EmailStr = if is_binary(Email) -> binary_to_list(Email);
-                  is_list(Email) -> Email end,
-    case string:split(EmailStr, "@") of
-        [Local, _] -> {ok, Local};
-        _ -> extract_username_from_san_names(Rest)
-    end;
-extract_username_from_san_names([{dNSName, Name} | Rest]) ->
-    NameStr = if is_binary(Name) -> binary_to_list(Name);
-                 is_list(Name) -> Name end,
-    case string:find(NameStr, ".") of
-        nomatch -> {ok, NameStr};
-        _ -> extract_username_from_san_names(Rest)
-    end;
-extract_username_from_san_names([_ | Rest]) ->
-    extract_username_from_san_names(Rest).
-
-%% @private Extract CN from the user's certificate.
-get_cn_from_cert(DbRef, GpgFp) ->
-    case cryptic_ca_store:list_certificates_by_user(DbRef, GpgFp) of
-        {ok, [#certificate{cert_pem = CertPem} | _]} ->
-            try
-                [{'Certificate', CertDER, not_encrypted}] =
-                    public_key:pem_decode(CertPem),
-                Cert = public_key:pkix_decode_cert(CertDER, otp),
-                TBSCert = Cert#'OTPCertificate'.tbsCertificate,
-                Subject = TBSCert#'OTPTBSCertificate'.subject,
-                extract_common_name(Subject)
-            catch
-                _:_ -> undefined
-            end;
-        _ ->
-            undefined
-    end.
-
-to_binary(V) when is_binary(V) -> V;
-to_binary(V) when is_list(V) -> list_to_binary(V).
-
-maybe_attach_metadata(UserMap, undefined) ->
-    UserMap;
-maybe_attach_metadata(UserMap, Meta) ->
-    try
-        MetaMap = jsx:decode(Meta, [return_maps]),
-        UserMap#{metadata => MetaMap}
-    catch
-        _:_ -> UserMap
-    end.
-
-extract_common_name({rdnSequence, RDNSeq}) ->
-    lists:foldl(fun
-        (_, Found) when is_list(Found) -> Found;
-        (RDNSet, undefined) ->
-            lists:foldl(fun
-                (_, Found) when is_list(Found) -> Found;
-                (#'AttributeTypeAndValue'{
-                    type = ?'id-at-commonName',
-                    value = {utf8String, CN}}, _) ->
-                    binary_to_list(CN);
-                (#'AttributeTypeAndValue'{
-                    type = ?'id-at-commonName',
-                    value = CN}, _) when is_list(CN) ->
-                    CN;
-                (_, Acc) -> Acc
-            end, undefined, RDNSet)
-    end, undefined, RDNSeq);
-extract_common_name(_) ->
-    undefined.
-
-find_user_connection(User) when is_binary(User) ->
-    find_user_connection(binary_to_list(User));
-find_user_connection(User) when is_list(User) ->
-    case ets:lookup(?CONNECTION_TABLE, User) of
-        [{User, Pid}] when is_pid(Pid) ->
-            case is_process_alive(Pid) of
-                true -> {ok, Pid};
-                false -> not_found
-            end;
-        _ ->
-            not_found
-    end.
-
-is_online(User) ->
-    case find_user_connection(User) of
-        {ok, _Pid} -> true;
-        not_found -> false
     end.
 
 log_audit(DbRef, EventType, GpgFp, DetailsMap, Req, Timestamp) ->
@@ -967,55 +687,10 @@ error_response(StatusCode, Reason, Req) ->
 %%%===================================================================
 
 get_server_status(DbRef, Req) ->
-    %% Listener info
-    Listener = try ranch:info(cryptic_ws_listener) of
-        Info when is_map(Info) ->
-            Port = maps:get(port, Info, null),
-            ActiveConns = ranch:procs(cryptic_ws_listener, connections),
-            #{status => <<"running">>, port => Port,
-              active_connections => length(ActiveConns)};
-        _ ->
-            #{status => <<"not_running">>}
-    catch
-        _:_ -> #{status => <<"not_running">>}
-    end,
-
-    %% ETS table sizes
-    Tables = [
-        {?CONNECTION_TABLE, <<"connections">>},
-        {?USER_TABLE, <<"registered_users">>},
-        {?MESSAGE_TABLE, <<"pending_messages">>},
-        {?PREKEY_TABLE, <<"prekey_entries">>}
-    ],
-    EtsTables = lists:map(fun({Table, Label}) ->
-        Size = case ets:info(Table, size) of
-            undefined -> null;
-            S -> S
-        end,
-        #{name => Label, size => Size}
-    end, Tables),
-
-    %% CA status
-    CaStatus = case cryptic_ca_store:list_gpg_identities(DbRef) of
-        {ok, Identities} ->
-            Active = length([I || I <- Identities,
-                                  I#gpg_identity.status =:= <<"active">>]),
-            Suspended = length([I || I <- Identities,
-                                     I#gpg_identity.status =:= <<"suspended">>]),
-            Revoked = length([I || I <- Identities,
-                                   I#gpg_identity.status =:= <<"revoked">>]),
-            #{status => <<"connected">>,
-              active => Active, suspended => Suspended, revoked => Revoked};
-        {error, _} ->
-            #{status => <<"error">>}
-    end,
-
-    {200, #{
+    {ok, Status} = cryptic_admin_core:server_status(DbRef),
+    {200, Status#{
         type => <<"status_response">>,
-        status => <<"success">>,
-        listener => Listener,
-        ets_tables => EtsTables,
-        ca => CaStatus
+        status => <<"success">>
     }, Req}.
 
 %%%===================================================================
@@ -1180,18 +855,8 @@ get_key_bundle_for_user(User, Req) ->
 %%%===================================================================
 
 get_audit_log(DbRef, Limit, Req) ->
-    case cryptic_ca_store:get_audit_logs(DbRef, Limit, 0) of
-        {ok, Logs} ->
-            LogList = lists:map(fun(Log) ->
-                #{
-                    timestamp => Log#audit_log.timestamp,
-                    event_type => Log#audit_log.event_type,
-                    gpg_fp => coalesce(Log#audit_log.gpg_fp, null),
-                    invite_id => coalesce(Log#audit_log.invite_id, null),
-                    details => parse_details(Log#audit_log.details),
-                    ip_address => coalesce(Log#audit_log.ip_address, null)
-                }
-            end, Logs),
+    case cryptic_admin_core:get_audit_log(DbRef, Limit, 0) of
+        {ok, LogList} ->
             {200, #{
                 type => <<"audit_response">>,
                 status => <<"success">>,
@@ -1201,15 +866,6 @@ get_audit_log(DbRef, Limit, Req) ->
             }, Req};
         {error, Reason} ->
             error_response(500, Reason, Req)
-    end.
-
-coalesce(undefined, Default) -> Default;
-coalesce(Value, _Default) -> Value.
-
-parse_details(undefined) -> null;
-parse_details(Details) ->
-    try jsx:decode(Details, [return_maps])
-    catch _:_ -> Details
     end.
 
 %%%===================================================================
@@ -1250,27 +906,8 @@ get_server_log_tail(Lines, Req) ->
 %%%===================================================================
 
 list_enrollments(DbRef, Filter, Req) ->
-    case cryptic_ca_store:list_enrollment_identities(DbRef) of
-        {ok, Identities} ->
-            Filtered = case Filter of
-                undefined -> Identities;
-                <<>> -> Identities;
-                FilterStatus ->
-                    [I || I <- Identities,
-                          I#enrollment_identity.status =:= FilterStatus]
-            end,
-            Enrollments = lists:map(fun(I) ->
-                E = #{
-                    enrollment_fp => I#enrollment_identity.enrollment_fp,
-                    username => I#enrollment_identity.username,
-                    status => I#enrollment_identity.status,
-                    registered_by => coalesce(I#enrollment_identity.registered_by, null),
-                    registered_at => I#enrollment_identity.registered_at,
-                    consumed_at => coalesce(I#enrollment_identity.consumed_at, null),
-                    last_seen => coalesce(I#enrollment_identity.last_seen, null)
-                },
-                maybe_attach_metadata(E, I#enrollment_identity.metadata)
-            end, Filtered),
+    case cryptic_admin_core:list_enrollments(DbRef, Filter) of
+        {ok, Enrollments} ->
             {200, #{
                 type => <<"list_enrollments_response">>,
                 status => <<"success">>,
@@ -1282,18 +919,8 @@ list_enrollments(DbRef, Filter, Req) ->
     end.
 
 get_enrollment_info(DbRef, EnrollmentFp, Req) ->
-    case cryptic_ca_store:get_enrollment_identity(DbRef, EnrollmentFp) of
-        {ok, I} ->
-            Info = #{
-                enrollment_fp => I#enrollment_identity.enrollment_fp,
-                username => I#enrollment_identity.username,
-                status => I#enrollment_identity.status,
-                registered_by => coalesce(I#enrollment_identity.registered_by, null),
-                registered_at => I#enrollment_identity.registered_at,
-                consumed_at => coalesce(I#enrollment_identity.consumed_at, null),
-                last_seen => coalesce(I#enrollment_identity.last_seen, null)
-            },
-            InfoWithMeta = maybe_attach_metadata(Info, I#enrollment_identity.metadata),
+    case cryptic_admin_core:get_enrollment_info(DbRef, EnrollmentFp) of
+        {ok, InfoWithMeta} ->
             {200, #{
                 type => <<"get_enrollment_info_response">>,
                 status => <<"success">>,
