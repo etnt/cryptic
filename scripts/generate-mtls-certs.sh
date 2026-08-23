@@ -22,8 +22,16 @@ if [ ! -f "${DIR}/serial" ]; then
 fi
 
 DNS_SANS=""
-printf "Enter DNS Subject Alternative Name (SAN) - press Enter to skip\nDNS names (comma-separated): "
-read DNS_SANS
+# Prefer the CRYPTIC_CERT_DNS_SANS env var (used by the container entrypoint so
+# certificate generation is fully non-interactive). Only fall back to an
+# interactive prompt when connected to a TTY; on EOF/no TTY we skip silently.
+if [ -n "${CRYPTIC_CERT_DNS_SANS:-}" ]; then
+    DNS_SANS="${CRYPTIC_CERT_DNS_SANS}"
+    echo "Using DNS SANs from CRYPTIC_CERT_DNS_SANS: ${DNS_SANS}"
+elif [ -t 0 ]; then
+    printf "Enter DNS Subject Alternative Name (SAN) - press Enter to skip\nDNS names (comma-separated): "
+    read DNS_SANS || DNS_SANS=""
+fi
 
 # Build SAN string for OpenSSL config file format (DNS.3 = hostname, DNS.4 = hostname, ...)
 SAN_LINES=""

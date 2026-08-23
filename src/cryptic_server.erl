@@ -412,11 +412,19 @@ continue(CfgMap) ->
             ?info("MCP localhost TCP endpoint disabled~n", [])
     end,
 
-    %% Optional web administration HTTPS endpoint (server cert, no client cert)
+    %% Optional web administration HTTPS endpoint (server cert, no client cert).
+    %% Enabled by the CRYPTIC_WEBADMIN_ENABLED env var (containers) or the
+    %% `webadmin_enabled' app env; the env var takes precedence when set.
     WebAdminEnabled =
-        case application:get_env(cryptic, webadmin_enabled) of
-            {ok, true} -> true;
-            _ -> false
+        case os:getenv("CRYPTIC_WEBADMIN_ENABLED") of
+            false ->
+                case application:get_env(cryptic, webadmin_enabled) of
+                    {ok, true} -> true;
+                    _ -> false
+                end;
+            EnvStr ->
+                lists:member(string:lowercase(EnvStr),
+                             ["1", "true", "yes", "on"])
         end,
     case WebAdminEnabled of
         true ->

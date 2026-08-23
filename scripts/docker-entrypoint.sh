@@ -13,7 +13,6 @@ fi
 mkdir -p "${CRYPTIC_SERVER_DIR}/data/ca"
 mkdir -p "${CRYPTIC_SERVER_DIR}/logs"
 mkdir -p "${CRYPTIC_SERVER_DIR}/priv/ssl"
-mkdir -p "${CRYPTIC_SERVER_DIR}/priv/ca/bootstrap"
 
 echo "INFO: CRYPTIC_SERVER_DIR is set to ${CRYPTIC_SERVER_DIR}"
 echo "INFO: Expected structure:"
@@ -21,26 +20,28 @@ echo "  ${CRYPTIC_SERVER_DIR}/priv/ssl/ca.crt        - CA certificate"
 echo "  ${CRYPTIC_SERVER_DIR}/priv/ssl/ca.key        - CA private key"
 echo "  ${CRYPTIC_SERVER_DIR}/priv/ssl/server.crt    - Server certificate"
 echo "  ${CRYPTIC_SERVER_DIR}/priv/ssl/server.key    - Server private key"
-echo "  ${CRYPTIC_SERVER_DIR}/priv/ca/bootstrap/*.gpg - Bootstrap GPG keys"
 echo "  ${CRYPTIC_SERVER_DIR}/data/                   - Database files"
 echo "  ${CRYPTIC_SERVER_DIR}/logs/                   - Log files"
 
-# Check if CA certificates exist
+# Auto-provision mTLS certificates on first run. Certificates live on the
+# mounted volume, so they persist across container restarts and are generated
+# non-interactively (CRYPTIC_CERT_DNS_SANS is honoured by generate-mtls-certs.sh).
 if [ ! -f "${CRYPTIC_SERVER_DIR}/priv/ssl/ca.crt" ] || [ ! -f "${CRYPTIC_SERVER_DIR}/priv/ssl/ca.key" ]; then
-    echo "ERROR: CA certificates not found!"
-    echo "Please generate certificates before starting the server:"
-    echo ""
-    echo "  docker run -it --rm \\"
-    echo "    --entrypoint '' \\"
-    echo "    -v \$(pwd):/opt/cryptic/server_data \\"
-    echo "    -e CRYPTIC_SERVER_DIR=/opt/cryptic/server_data \\"
-    echo "    <image-name> \\"
-    echo "    sh -c 'DIR=\"\${CRYPTIC_SERVER_DIR}/priv/ssl\" generate-mtls-certs.sh'"
-    echo ""
-    exit 1
+    echo "INFO: CA certificates not found - generating a fresh self-signed set..."
+    if DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" \
+       CRYPTIC_CERT_DNS_SANS="${CRYPTIC_CERT_DNS_SANS:-${CRYPTIC_SERVER_HOST}}" \
+       generate-mtls-certs.sh </dev/null; then
+        echo "INFO: mTLS certificates generated at ${CRYPTIC_SERVER_DIR}/priv/ssl"
+    else
+        echo "ERROR: automatic certificate generation failed" >&2
+        exit 1
+    fi
 else
     echo "INFO: CA certificates found"
 fi
+
+# Ensure the server user can read/write the generated certificates
+chown -R cryptic:cryptic "${CRYPTIC_SERVER_DIR}/priv/ssl" 2>/dev/null || true
 
 # Fix ownership of mounted volumes (they may be created as root)
 chown -R cryptic:cryptic "${CRYPTIC_SERVER_DIR}/data" 2>/dev/null || true
@@ -73,4 +74,10 @@ exec su-exec cryptic env \
     CRYPTIC_CA_DB_FILE="${CRYPTIC_CA_DB_FILE}" \
     CRYPTIC_EVENT_HANDLERS="${CRYPTIC_EVENT_HANDLERS}" \
     CRYPTIC_DEBUG="${CRYPTIC_DEBUG}" \
+    CRYPTIC_WEBADMIN_ENABLED="${CRYPTIC_WEBADMIN_ENABLED}" \
+    CRYPTIC_WEBADMIN_PORT="${CRYPTIC_WEBADMIN_PORT}" \
+    CRYPTIC_ADMIN_USER="${CRYPTIC_ADMIN_USER}" \
+    CRYPTIC_ADMIN_PASSWORD="${CRYPTIC_ADMIN_PASSWORD}" \
+    CRYPTIC_ADMIN_PASSWORD_FILE="${CRYPTIC_ADMIN_PASSWORD_FILE}" \
+    CRYPTIC_ADMIN_PASSWORD_HASH_FILE="${CRYPTIC_ADMIN_PASSWORD_HASH_FILE}" \
     "$@"

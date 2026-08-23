@@ -193,19 +193,31 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
       5000 lines.
 
 ### Phase 6 — Containerization & first-run bootstrap
-- [ ] **Drop GPG from the image**: remove `gnupg` from the runtime stage and the
-      `${HOME}/.gnupg` bind mounts from `docker-compose.yml`; remove the bootstrap-GPG
-      requirement from the entrypoint. (Server auth for mobile users is now Ed25519
-      enrollment; the old GPG registration path is deprecated — see §9.)
-- [ ] **Auto-provision certs on first run**: entrypoint generates the CA + server certs via
-      `generate-mtls-certs.sh` if none are present, instead of hard-failing. Persist to the
-      mounted `server_data` volume so restarts are idempotent.
-- [ ] **Seed the initial admin**: entrypoint calls the admin-create command exactly once
-      (idempotent) from env/secret input — see §7.3 and §9 for the exact contract.
-- [ ] Expose the web admin port (default 8444) in `Dockerfile`/`docker-compose.yml`; add
-      `webadmin_enabled`/`webadmin_port` env plumbing; extend the healthcheck.
+- [x] **Drop GPG from the image**: removed `gnupg` from the runtime stage of `Dockerfile`
+      and the `${HOME}/.gnupg` bind mount from the `cryptic-server` service in
+      `docker-compose.yml`; the entrypoint no longer requires bootstrap GPG keys (removed the
+      `priv/ca/bootstrap` mkdir + messaging). (Server auth for mobile users is now Ed25519
+      enrollment; the old GPG registration path is deprecated — see §9.) The `cryptic-tui`
+      client keeps its `.gnupg` mount — still needed for client cert renewal, out of scope.
+- [x] **Auto-provision certs on first run**: `scripts/docker-entrypoint.sh` now generates the
+      CA + server certs via `generate-mtls-certs.sh` (non-interactive) when `ca.crt`/`ca.key`
+      are absent, instead of hard-failing. Certs land on the mounted `server_data` volume so
+      restarts are idempotent. `generate-mtls-certs.sh` now honours `CRYPTIC_CERT_DNS_SANS`
+      and only prompts on a TTY (`read ... || true`, so EOF under `set -e` is safe).
+- [x] **Seed the initial admin**: new `cryptic_admin_bootstrap` module (supervised child after
+      `cryptic_ca_init`, returns `ignore` = one-shot) seeds exactly one admin when none exists.
+      Source priority: `CRYPTIC_ADMIN_PASSWORD_HASH_FILE` → `CRYPTIC_ADMIN_PASSWORD_FILE` →
+      `CRYPTIC_ADMIN_PASSWORD` → random (printed once, must-change). Offline hash records are
+      produced by `scripts/cryptic-hash-admin-password.escript` (shipped in the image as
+      `cryptic-hash-admin-password`) and consumed via
+      `cryptic_admin_auth:create_account_from_record/3` + `parse_hash_record/1`
+      (format `pbkdf2_hmac_sha256$<iters>$<dklen>$<b64salt>$<b64hash>`).
+- [x] Expose the web admin port (default 8444) in `Dockerfile` (`EXPOSE 8443 8444`) and
+      `docker-compose.yml` (`8444:8444`); web admin enabled via `CRYPTIC_WEBADMIN_ENABLED`
+      env (honoured in `cryptic_server:continue/1`, precedence over the `webadmin_enabled`
+      app env) with `CRYPTIC_WEBADMIN_PORT`; healthcheck now also probes the web admin port.
 - [ ] Verify the image runs identically under **Podman** (rootless: uid mapping, volume
-      perms, `:Z` SELinux label note in docs).
+      perms, `:Z` SELinux label note in docs). *(Deferred: needs a Podman host to validate.)*
 
 ### Phase 7 — Hardening & docs
 - [ ] Security review: TLS config, cookie flags, CSRF, login rate-limiting, audit-log every

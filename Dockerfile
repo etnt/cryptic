@@ -43,7 +43,6 @@ FROM erlang:28.1-alpine
 RUN apk add --no-cache \
     libsodium \
     sqlite-libs \
-    gnupg \
     su-exec \
     netcat-openbsd \
     openssl
@@ -57,31 +56,41 @@ WORKDIR /opt/cryptic
 # Copy the release from builder
 COPY --from=builder /buildroot/_build/prod/rel/cryptic ./
 
-# Copy entrypoint script from scripts directory
+# Copy entrypoint + operator helper scripts from scripts directory
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 COPY scripts/generate-mtls-certs.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/generate-mtls-certs.sh
+COPY scripts/cryptic-hash-admin-password.escript /usr/local/bin/cryptic-hash-admin-password
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    /usr/local/bin/generate-mtls-certs.sh \
+    /usr/local/bin/cryptic-hash-admin-password
 
-# Create directories for runtime data (including CA DB and bootstrap area)
-RUN mkdir -p /opt/cryptic/certs /opt/cryptic/logs /opt/cryptic/data/ca /opt/cryptic/priv/ca/bootstrap && \
+# Create directories for runtime data (including CA DB)
+RUN mkdir -p /opt/cryptic/certs /opt/cryptic/logs /opt/cryptic/data/ca && \
     chown -R cryptic:cryptic /opt/cryptic
 
 # Don't switch to cryptic user yet - entrypoint needs root to fix volume permissions
 # USER cryptic will be set by entrypoint after fixing permissions
 
-# Expose WebSocket TLS port
-EXPOSE 8443
+# Expose WebSocket TLS port and the web admin HTTPS port
+EXPOSE 8443 8444
 
 # Set environment variables with defaults
 # Note: Certificate paths are configured in sys.config as relative paths
 # CRYPTIC_SERVER_DIR will be prepended by cryptic_lib:get_server_file/2
 ENV CRYPTIC_SERVER_HOST=0.0.0.0 \
     CRYPTIC_SERVER_PORT=8443 \
-    CRYPTIC_EVENT_HANDLERS=cryptic_file_logger
+    CRYPTIC_EVENT_HANDLERS=cryptic_file_logger \
+    CRYPTIC_WEBADMIN_ENABLED=true \
+    CRYPTIC_WEBADMIN_PORT=8444
 
-# Health check
+# Health check: the WebSocket port must always be listening; when the web admin
+# endpoint is enabled its port must be up too.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD nc -z localhost ${CRYPTIC_SERVER_PORT} || exit 1
+    CMD nc -z localhost ${CRYPTIC_SERVER_PORT} && { \
+        case "${CRYPTIC_WEBADMIN_ENABLED}" in \
+            1|true|yes|on) nc -z localhost ${CRYPTIC_WEBADMIN_PORT} ;; \
+            *) true ;; \
+        esac; } || exit 1
 
 # Use entrypoint to ensure directories exist
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

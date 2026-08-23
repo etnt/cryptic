@@ -27,6 +27,8 @@
 -export([
     create_account/2,
     create_account/3,
+    create_account_from_record/3,
+    parse_hash_record/1,
     verify_password/2,
     set_password/2,
     hash_password/1
@@ -93,6 +95,79 @@ create_account(Username, Password, Opts) when
             end);
         {error, _} = Error ->
             Error
+    end.
+
+%% @doc Create a new admin account from a precomputed hash record.
+%%
+%% Used by the container bootstrap (`CRYPTIC_ADMIN_PASSWORD_HASH_FILE') to seed
+%% the first admin without ever handling a plaintext password inside the
+%% container. `Record' is the string produced by the offline hashing helper
+%% (see {@link parse_hash_record/1} for the format). `Opts' accepts the same
+%% keys as {@link create_account/3}.
+-spec create_account_from_record(binary(), binary(), map()) ->
+    ok | {error, term()}.
+create_account_from_record(Username, Record, Opts) when
+    is_binary(Username), is_binary(Record), is_map(Opts)
+->
+    case parse_hash_record(Record) of
+        {ok, {Algo, Salt, Hash, KdfParams}} ->
+            with_db(fun(DbRef) ->
+                case cryptic_ca_store:get_admin_account(DbRef, Username) of
+                    {ok, #admin_account{}} ->
+                        {error, already_exists};
+                    {error, not_found} ->
+                        MustChange =
+                            case maps:get(must_change_password, Opts, false) of
+                                true -> 1;
+                                _ -> 0
+                            end,
+                        Account = #admin_account{
+                            username = Username,
+                            pw_hash = Hash,
+                            pw_salt = Salt,
+                            pw_algo = Algo,
+                            kdf_params = KdfParams,
+                            status = <<"active">>,
+                            must_change_password = MustChange,
+                            created_at = erlang:system_time(second),
+                            last_login = undefined
+                        },
+                        cryptic_ca_store:insert_admin_account(DbRef, Account);
+                    {error, _} = Error ->
+                        Error
+                end
+            end);
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @doc Parse an offline password-hash record.
+%%
+%% Format (single line, `$'-separated):
+%% ```
+%% pbkdf2_hmac_sha256$<iterations>$<dklen>$<base64-salt>$<base64-hash>
+%% '''
+%% Returns `{ok, {Algo, Salt, Hash, KdfParamsJson}}' with the raw salt/hash
+%% bytes decoded and a reconstructed `kdf_params' JSON, or `{error, Reason}'.
+-spec parse_hash_record(binary()) ->
+    {ok, {binary(), binary(), binary(), binary()}} | {error, term()}.
+parse_hash_record(Record) when is_binary(Record) ->
+    Trimmed = string:trim(Record),
+    case binary:split(Trimmed, <<"$">>, [global]) of
+        [<<"pbkdf2_hmac_sha256">>, ItersB, DkLenB, SaltB64, HashB64] ->
+            try
+                Iters = binary_to_integer(ItersB),
+                DkLen = binary_to_integer(DkLenB),
+                Salt = base64:decode(SaltB64),
+                Hash = base64:decode(HashB64),
+                true = (Iters > 0) andalso (DkLen > 0),
+                true = (byte_size(Hash) =:= DkLen),
+                {ok, {?PW_ALGO, Salt, Hash, kdf_params_json(Iters, DkLen)}}
+            catch
+                _:_ -> {error, invalid_hash_record}
+            end;
+        _ ->
+            {error, invalid_hash_record}
     end.
 
 %% @doc Verify a plaintext password against a stored admin account.
