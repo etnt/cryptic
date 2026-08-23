@@ -101,9 +101,11 @@ create(#{db_ref := DbRef,
 
     %% 1. Fresh Ed25519 enrollment keypair.
     {PubRaw, SeedRaw} = crypto:generate_key(eddsa, ed25519),
-    %% Store the secret as seed||public (libsodium 64-byte secret key layout)
-    %% so the mobile client can sign directly.
-    SecRaw = <<SeedRaw/binary, PubRaw/binary>>,
+    %% Store the secret as a PKCS#8 DER PrivateKeyInfo, byte-identical to what
+    %% `openssl pkey -outform DER' produces in bin/cryptic-onboard. The 32-byte
+    %% seed lives in the last 32 bytes of the DER; the mobile client extracts it
+    %% and pairs it with enrollment_pub to sign.
+    SecDer = ed25519_pkcs8_der(SeedRaw),
     Fp = hex(crypto:hash(sha256, PubRaw)),
 
     %% 2. Register the public enrollment identity server-side.
@@ -111,7 +113,7 @@ create(#{db_ref := DbRef,
         ok ->
             Now = erlang:system_time(second),
             ExpiresAt = Now + Expiry,
-            PayloadJson = build_payload(Username, PubRaw, SecRaw, ca_fingerprint(),
+            PayloadJson = build_payload(Username, PubRaw, SecDer, ca_fingerprint(),
                                         Now, ExpiresAt, Params),
             Package = encrypt_payload(PayloadJson, Passphrase),
             {ok, #{
@@ -281,3 +283,16 @@ maybe_put(Key, Value, Map) when is_binary(Value) -> Map#{Key => Value}.
 -spec hex(binary()) -> binary().
 hex(Bin) ->
     binary:encode_hex(Bin, lowercase).
+
+%% @doc Wrap a raw 32-byte Ed25519 seed in a PKCS#8 PrivateKeyInfo (DER).
+%%
+%% The structure is fixed for Ed25519, so a constant 16-byte ASN.1 prefix
+%% followed by the seed reproduces exactly what `openssl pkey -outform DER'
+%% emits (see bin/cryptic-onboard). The seed is the trailing 32 bytes.
+-spec ed25519_pkcs8_der(binary()) -> binary().
+ed25519_pkcs8_der(Seed) when byte_size(Seed) =:= 32 ->
+    %% SEQUENCE(0x2e) { INTEGER 0, SEQUENCE { OID 1.3.101.112 }, OCTETSTRING { OCTETSTRING(0x20) seed } }
+    Prefix = <<16#30, 16#2e, 16#02, 16#01, 16#00, 16#30, 16#05,
+               16#06, 16#03, 16#2b, 16#65, 16#70, 16#04, 16#22,
+               16#04, 16#20>>,
+    <<Prefix/binary, Seed/binary>>.
