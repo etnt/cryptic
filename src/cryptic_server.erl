@@ -412,6 +412,24 @@ continue(CfgMap) ->
             ?info("MCP localhost TCP endpoint disabled~n", [])
     end,
 
+    %% Optional web administration HTTPS endpoint (server cert, no client cert)
+    WebAdminEnabled =
+        case application:get_env(cryptic, webadmin_enabled) of
+            {ok, true} -> true;
+            _ -> false
+        end,
+    case WebAdminEnabled of
+        true ->
+            WebAdminPort =
+                case application:get_env(cryptic, webadmin_port) of
+                    {ok, WAPort0} -> WAPort0;
+                    undefined -> 8444
+                end,
+            start_webadmin_https(#{port => WebAdminPort});
+        false ->
+            ?info("Web admin HTTPS endpoint disabled~n", [])
+    end,
+
     {noreply, CfgMap}.
 
 %% @doc Returns the list of ETS table names to create
@@ -758,6 +776,67 @@ start_mcp_localhost_tcp(Config) ->
         #{env => #{dispatch => Dispatch}}
     ),
     ?info("MCP localhost TCP endpoint started on 127.0.0.1:~p~n", [Port]),
+    {ok, started}.
+
+%% @doc Start the web administration HTTPS endpoint.
+%%
+%% Serves the web admin single-page shell and its JSON API over TLS using the
+%% server certificate only (no client-certificate/mTLS verification), unlike
+%% the messaging listener. Authentication is handled at the application layer
+%% by {@link cryptic_webadmin_auth_handler} (password login + session cookie).
+start_webadmin_https(Config) ->
+    application:ensure_all_started(cowboy),
+    application:ensure_all_started(ssl),
+
+    Port =
+        case os:getenv("CRYPTIC_WEBADMIN_PORT") of
+            false ->
+                maps:get(port, Config, 8444);
+            PortStr ->
+                list_to_integer(PortStr)
+        end,
+
+    CertFile = cryptic_lib:get_server_file("CRYPTIC_SERVER_CERT",
+                                           server_cert_file),
+    KeyFile = cryptic_lib:get_server_file("CRYPTIC_SERVER_KEY",
+                                          server_key_file),
+
+    Dispatch = cowboy_router:compile([
+        {'_', [
+            %% Authentication API (must precede the static catch-all)
+            {"/admin/api/login", cryptic_webadmin_auth_handler, #{
+                operation => login
+            }},
+            {"/admin/api/logout", cryptic_webadmin_auth_handler, #{
+                operation => logout
+            }},
+            {"/admin/api/session", cryptic_webadmin_auth_handler, #{
+                operation => session
+            }},
+
+            %% Single-page shell + static assets
+            {"/admin", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},
+            {"/admin/", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},
+            {"/admin/[...]", cowboy_static, {priv_dir, cryptic, "webadmin"}}
+        ]}
+    ]),
+
+    %% Server-certificate TLS only. No CA cert, no peer verification: the web
+    %% admin authenticates users with passwords, not client certificates.
+    TLSOptions = [
+        {port, Port},
+        {versions, ['tlsv1.2', 'tlsv1.3']},
+        {certfile, CertFile},
+        {keyfile, KeyFile}
+    ],
+
+    ?info("Starting web admin HTTPS endpoint on port ~p~n", [Port]),
+    {ok, _} = cowboy:start_tls(
+        cryptic_webadmin_listener,
+        TLSOptions,
+        #{env => #{dispatch => Dispatch}}
+    ),
+    ?info("Web admin HTTPS endpoint started on port ~p~n", [Port]),
     {ok, started}.
 
 

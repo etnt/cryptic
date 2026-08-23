@@ -1,0 +1,126 @@
+/* Cryptic Admin - minimal styling (Phase 2 shell) */
+:root {
+  --bg: #0f1116;
+  --panel: #1a1d26;
+  --panel-2: #232733;
+  --fg: #e6e8ee;
+  --muted: #9aa0ad;
+  --accent: #5b8cff;
+  --accent-hover: #7aa2ff;
+  --error: #ff6b6b;
+  --border: #2c313d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.view { min-height: 100vh; }
+[hidden] { display: none !important; }
+
+/* Login */
+#login-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 320px;
+  padding: 2rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.login-card h1 {
+  margin: 0 0 1rem;
+  font-size: 1.25rem;
+  text-align: center;
+}
+
+.login-card label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.login-card input {
+  padding: 0.6rem 0.7rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 0.95rem;
+}
+
+.login-card input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button {
+  cursor: pointer;
+  font-size: 0.9rem;
+  border: none;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  background: var(--accent);
+  color: #fff;
+}
+
+button:hover { background: var(--accent-hover); }
+button:disabled { opacity: 0.6; cursor: default; }
+
+.login-card button { margin-top: 0.75rem; }
+
+.error {
+  margin: 0.5rem 0 0;
+  color: var(--error);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+/* App shell */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { font-weight: 600; }
+.spacer { flex: 1; }
+.current-user { color: var(--muted); font-size: 0.85rem; }
+
+.nav { display: flex; gap: 0.25rem; }
+
+.nav-btn {
+  background: transparent;
+  color: var(--muted);
+  padding: 0.4rem 0.75rem;
+}
+
+.nav-btn:hover { background: var(--panel-2); color: var(--fg); }
+.nav-btn.active { background: var(--panel-2); color: var(--fg); }
+
+.logout {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.logout:hover { background: var(--panel-2); color: var(--fg); }
+
+.content { padding: 1.5rem; }
+.section h2 { margin-top: 0; }
+.placeholder { color: var(--muted); }

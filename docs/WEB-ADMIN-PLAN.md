@@ -113,13 +113,23 @@ both the MCP handler and the new web handlers call it. This avoids duplicating b
       Env-var/container seeding remains Phase 6.
 
 ### Phase 2 — Listener & static shell
-- [ ] `start_webadmin_https/1` in `cryptic_server` (mirrors `start_mcp_localhost_tcp` but
-      `cowboy:start_tls`, server cert only, `fail_if_no_peer_cert=false`, no `verify_peer`).
-      Config: `webadmin_enabled`, `webadmin_port` (8444), cert/key reuse from server config.
-- [ ] Route table + `cowboy_static` for `priv/webadmin/` assets and the SPA shell.
-- [ ] Wire into supervision/startup; add `sys.config` keys.
-- [ ] Minimal `priv/webadmin/index.html` + `app.js` + `style.css`: login screen, top nav,
-      Users / Enrollments / Logs sections. All API calls send the CSRF header.
+- [x] `start_webadmin_https/1` in `cryptic_server` (mirrors `start_mcp_localhost_tcp` but
+      `cowboy:start_tls`, server cert only, no `cacertfile`, no `verify_peer`; TLS 1.2/1.3;
+      listener `cryptic_webadmin_listener`; port from `CRYPTIC_WEBADMIN_PORT` env or config).
+      Config: `webadmin_enabled`, `webadmin_port` (8444), cert/key reuse via
+      `cryptic_lib:get_server_file/2` from server config. Function kept internal (not exported).
+- [x] Route table + `cowboy_static` for `priv/webadmin/` assets and the SPA shell.
+      Order: `/admin/api/{login,logout,session}` → `cryptic_webadmin_auth_handler`, then
+      `/admin` + `/admin/` → `priv_file webadmin/index.html`, then `/admin/[...]` →
+      `priv_dir cryptic webadmin` catch-all for `app.js`/`style.css`.
+- [x] Wire into supervision/startup; add `sys.config` keys. Startup gated on `webadmin_enabled`
+      in `continue/1` after the MCP block. Added `webadmin_enabled` (false), `webadmin_port`
+      (8444), `webadmin_session_ttl` (43200), `webadmin_session_idle` (1800) to `sys.config`.
+- [x] Minimal `priv/webadmin/index.html` + `app.js` + `style.css`: login screen, top nav,
+      Users / Enrollments / Logs sections. `app.js` runs the full auth flow (session check on
+      load, login, logout, section nav) and sends `X-CSRF-Token` on all state-changing calls
+      with `credentials: 'same-origin'`. Section bodies are Phase 3/4/5 placeholders.
+
 
 ### Phase 3 — User administration API + UI
 - [ ] Extract `cryptic_admin_core` (list_users, get_user_info, list_certificates,

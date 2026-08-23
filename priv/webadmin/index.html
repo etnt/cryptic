@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Cryptic Admin</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+  <!-- Login view -->
+  <main id="login-view" class="view" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <h1>Cryptic Admin</h1>
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" id="login-btn">Sign in</button>
+      <p id="login-error" class="error" role="alert" hidden></p>
+    </form>
+  </main>
+
+  <!-- Application shell -->
+  <div id="app-view" class="view" hidden>
+    <header class="topbar">
+      <span class="brand">Cryptic Admin</span>
+      <nav class="nav">
+        <button class="nav-btn" data-section="users">Users</button>
+        <button class="nav-btn" data-section="enrollments">Enrollments</button>
+        <button class="nav-btn" data-section="logs">Logs</button>
+      </nav>
+      <span class="spacer"></span>
+      <span id="current-user" class="current-user"></span>
+      <button id="logout-btn" class="logout">Sign out</button>
+    </header>
+
+    <main class="content">
+      <section id="section-users" class="section" hidden>
+        <h2>Users</h2>
+        <p class="placeholder">User administration lands in Phase 3.</p>
+      </section>
+      <section id="section-enrollments" class="section" hidden>
+        <h2>Enrollments</h2>
+        <p class="placeholder">Mobile enrollment &amp; QR lands in Phase 4.</p>
+      </section>
+      <section id="section-logs" class="section" hidden>
+        <h2>Logs</h2>
+        <p class="placeholder">Live log monitoring lands in Phase 5.</p>
+      </section>
+    </main>
+  </div>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>
