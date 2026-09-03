@@ -145,12 +145,12 @@
       return;
     }
     tbody.innerHTML = users.map((u) => `
-      <tr class="row" data-fp="${escapeHtml(u.gpg_fp)}">
+      <tr class="row" data-fp="${escapeHtml(u.enrollment_fp)}">
         <td>${escapeHtml(u.username || 'unknown')}</td>
         <td>${statusBadge(u.status)}</td>
         <td>${onlineDot(u.online)}</td>
         <td>${escapeHtml(fmtTime(u.registered_at))}</td>
-        <td class="mono">${escapeHtml(shortFp(u.gpg_fp))}</td>
+        <td class="mono">${escapeHtml(shortFp(u.enrollment_fp))}</td>
       </tr>`).join('');
     for (const row of tbody.querySelectorAll('.row')) {
       row.addEventListener('click', () => openUserDrawer(row.dataset.fp));
@@ -181,7 +181,7 @@
     el('drawer-title').textContent = u.username || 'User';
 
     const rows = [
-      ['Fingerprint', `<span class="mono">${escapeHtml(u.gpg_fp)}</span>`],
+      ['Fingerprint', `<span class="mono">${escapeHtml(u.enrollment_fp)}</span>`],
       ['Status', statusBadge(u.status)],
       ['Registered by', escapeHtml(u.registered_by || '—')],
       ['Registered at', escapeHtml(fmtTime(u.registered_at))],
@@ -210,7 +210,9 @@
   function renderUserActions(status) {
     const actions = el('drawer-actions');
     const buttons = [];
-    if (status === 'active') {
+    // 'active' = pending enrollment invite, 'consumed' = enrolled user; both
+    // can be suspended or revoked.
+    if (status === 'active' || status === 'consumed') {
       buttons.push('<button class="danger" data-action="suspend">Suspend</button>');
       buttons.push('<button class="danger" data-action="revoke">Revoke</button>');
     } else if (status === 'suspended') {

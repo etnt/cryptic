@@ -35,8 +35,7 @@ services:
       # Preferred: point at a mounted, read-only hash record produced offline by
       #   scripts/cryptic-hash-admin-password.escript  (no plaintext in the container).
       #   Uncomment the matching secret mount below.
-      # - CRYPTIC_ADMIN_PASSWORD_HASH_FILE=/run/secrets/cryptic_admin_hash
-      # Alternative: a plaintext password file (Docker/Podman secret). Forces a
+      - CRYPTIC_ADMIN_PASSWORD_HASH_FILE=/run/secrets/cryptic_admin_hash
       #   password change on first login.
       # - CRYPTIC_ADMIN_PASSWORD_FILE=/run/secrets/cryptic_admin_password
       # Discouraged: plaintext via env (leave empty to let the server generate a
@@ -50,9 +49,17 @@ services:
       # Note: /opt/cryptic contains Erlang release, so mount to subdirectory
       - ./server_data:/opt/cryptic/server_data:rw
 
+      # CA SQLite DB lives on a named volume (ext4 inside the podman VM), NOT on the
+      # macOS virtiofs bind mount above. Running SQLite over virtiofs corrupts the DB
+      # (recurring SQLITE_NOTADB / zeroed header). This nested mount shadows
+      # server_data/data so only the CA DB directory moves; priv/ssl (CA key/cert)
+      # and logs/ stay on the bind mount.
+      - cryptic-ca-data:/opt/cryptic/server_data/data
+
       # Optional admin credential secrets (uncomment together with the matching
       # CRYPTIC_ADMIN_PASSWORD_*_FILE env var above):
       # - ./secrets/admin_hash:/run/secrets/cryptic_admin_hash:ro
+      - ./secrets/admin_hash:/run/secrets/cryptic_admin_hash:ro
       # - ./secrets/admin_password:/run/secrets/cryptic_admin_password:ro
 
     # Restart policy
