@@ -219,7 +219,9 @@
       buttons.push('<button data-action="reactivate">Reactivate</button>');
       buttons.push('<button class="danger" data-action="revoke">Revoke</button>');
     }
-    // Revoked users are terminal: no actions.
+    // Delete permanently removes the enrollment row (any status). Useful for
+    // cleaning up stale/pending invites or freeing a username for re-enrollment.
+    buttons.push('<button class="danger" data-action="delete">Delete</button>');
     actions.innerHTML = buttons.join('');
     for (const btn of actions.querySelectorAll('button')) {
       btn.addEventListener('click', () => performUserAction(btn.dataset.action));
@@ -229,8 +231,26 @@
   async function performUserAction(action) {
     const fp = state.currentUserFp;
     if (!fp) return;
-    const labels = { suspend: 'suspend', revoke: 'revoke', reactivate: 'reactivate' };
+    const labels = {
+      suspend: 'suspend', revoke: 'revoke',
+      reactivate: 'reactivate', delete: 'delete',
+    };
     const verb = labels[action] || action;
+
+    // Delete uses an HTTP DELETE on the user resource, not an action suffix.
+    if (action === 'delete') {
+      if (!window.confirm(
+        'Permanently delete this enrollment? This cannot be undone.')) return;
+      const { ok, data } = await api(
+        `/admin/api/users/${encodeURIComponent(fp)}`, { method: 'DELETE' });
+      if (ok && data && data.status === 'ok') {
+        closeDrawer();
+        loadUsers();
+      } else {
+        window.alert((data && data.message) || 'Failed to delete user.');
+      }
+      return;
+    }
 
     let body;
     if (action === 'suspend' || action === 'revoke') {

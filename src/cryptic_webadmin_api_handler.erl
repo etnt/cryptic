@@ -22,6 +22,7 @@
 %%   <li>`POST /admin/api/users/:fp/suspend'        - suspend user</li>
 %%   <li>`POST /admin/api/users/:fp/reactivate'     - reactivate user</li>
 %%   <li>`POST /admin/api/users/:fp/revoke'         - revoke user</li>
+%%   <li>`DELETE /admin/api/users/:fp'              - delete user</li>
 %%   <li>`GET  /admin/api/enrollments'              - list enrollments</li>
 %%   <li>`POST /admin/api/enrollments'              - create enrollment package</li>
 %%   <li>`GET  /admin/api/enrollments/:fp'          - enrollment detail</li>
@@ -158,6 +159,18 @@ dispatch(user_revoke, <<"POST">>, User, Req0) ->
                 {200, ok_result(Result), Req1};
             {error, Reason2} ->
                 error_response(400, Reason2, Req1)
+        end
+    end);
+dispatch(user, <<"DELETE">>, User, Req0) ->
+    with_db(Req0, fun(DbRef) ->
+        Fp = binding_fp(Req0),
+        case cryptic_admin_core:delete_user(DbRef, Fp, User, peer_ip(Req0)) of
+            {ok, Result} ->
+                {200, ok_result(Result), Req0};
+            {error, not_found} ->
+                error_response(404, not_found, Req0);
+            {error, Reason} ->
+                error_response(400, Reason, Req0)
         end
     end);
 dispatch(enrollments, <<"GET">>, _User, Req) ->

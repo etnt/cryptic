@@ -33,7 +33,8 @@
 -export([
     suspend_user/5,
     revoke_user/5,
-    reactivate_user/4
+    reactivate_user/4,
+    delete_user/4
 ]).
 
 %% Shared helpers reused by cryptic_mcp_admin_handler
@@ -169,6 +170,33 @@ reactivate_user(DbRef, EnrollmentFp, ActorId, Ip) ->
                     {ok, #{enrollment_fp => EnrollmentFp,
                            new_status => NewStatus,
                            changed => true, at => Now}};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason2} ->
+            {error, Reason2}
+    end.
+
+%% @doc Permanently delete an enrollment identity (and its DB row).
+%%
+%% Unlike {@link revoke_user/5}, which flags the identity as `revoked' but
+%% keeps the row for audit, this removes the enrollment entirely so a
+%% username can be cleaned up or re-enrolled from scratch. Records a
+%% `user_deleted' audit entry attributed to `ActorId'.
+-spec delete_user(term(), binary(), binary(), binary()) ->
+    {ok, map()} | {error, term()}.
+delete_user(DbRef, EnrollmentFp, ActorId, Ip) ->
+    case cryptic_ca_store:get_enrollment_identity(DbRef, EnrollmentFp) of
+        {ok, #enrollment_identity{username = Username}} ->
+            case cryptic_ca_store:delete_enrollment_identity(
+                   DbRef, EnrollmentFp) of
+                ok ->
+                    Now = erlang:system_time(second),
+                    write_audit(DbRef, <<"user_deleted">>, EnrollmentFp,
+                                #{deleted_by => ActorId,
+                                  username => Username}, Ip, Now),
+                    {ok, #{enrollment_fp => EnrollmentFp,
+                           username => Username, deleted => true, at => Now}};
                 {error, Reason} ->
                     {error, Reason}
             end;
