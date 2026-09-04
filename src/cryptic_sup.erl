@@ -61,6 +61,25 @@ init([]) ->
           type => worker,
           modules => [cryptic_ca_rate_limiter]},
 
+    %% Web admin session store (ETS-backed sessions + cleanup)
+    AdminSession =
+        #{id => cryptic_admin_session,
+          start => {cryptic_admin_session, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_admin_session]},
+
+    %% Initial admin account bootstrap (runs once, then returns `ignore').
+    %% Placed after CA init so the admin_accounts table + ca_db_ref exist.
+    AdminBootstrap =
+        #{id => cryptic_admin_bootstrap,
+          start => {cryptic_admin_bootstrap, start_link, []},
+          restart => temporary,
+          shutdown => 5000,
+          type => worker,
+          modules => [cryptic_admin_bootstrap]},
+
     %% Certificate expiration monitor
     CertMonitor =
         #{id => cryptic_cert_monitor,
@@ -80,7 +99,8 @@ init([]) ->
           modules => [cryptic_server]},
 
     ChildSpecs = [EventManager, CaInit, CaSerialManager,
-                  CaRateLimiter, CertMonitor, CrypticServer],
+                  CaRateLimiter, AdminSession, AdminBootstrap,
+                  CertMonitor, CrypticServer],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

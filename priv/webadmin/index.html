@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Cryptic Admin</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+  <!-- Login view -->
+  <main id="login-view" class="view" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <h1>Cryptic Admin</h1>
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" id="login-btn">Sign in</button>
+      <p id="login-error" class="error" role="alert" hidden></p>
+    </form>
+  </main>
+
+  <!-- Application shell -->
+  <div id="app-view" class="view" hidden>
+    <header class="topbar">
+      <span class="brand">Cryptic Admin</span>
+      <nav class="nav">
+        <button class="nav-btn" data-section="users">Users</button>
+        <button class="nav-btn" data-section="enrollments">Enrollments</button>
+        <button class="nav-btn" data-section="audit">Audit</button>
+        <button class="nav-btn" data-section="logs">Logs</button>
+      </nav>
+      <span class="spacer"></span>
+      <span id="current-user" class="current-user"></span>
+      <button id="logout-btn" class="logout">Sign out</button>
+    </header>
+
+    <main class="content">
+      <section id="section-users" class="section" hidden>
+        <div class="section-head">
+          <h2>Users</h2>
+          <div class="controls">
+            <select id="users-filter" class="filter">
+              <option value="">All statuses</option>
+              <option value="active">Active</option>
+              <option value="suspended">Suspended</option>
+              <option value="revoked">Revoked</option>
+            </select>
+            <button id="users-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <p id="users-msg" class="msg" hidden></p>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Status</th>
+              <th>Online</th>
+              <th>Registered</th>
+              <th>Fingerprint</th>
+            </tr>
+          </thead>
+          <tbody id="users-tbody"></tbody>
+        </table>
+      </section>
+
+      <section id="section-enrollments" class="section" hidden>
+        <div class="section-head">
+          <h2>Enrollments</h2>
+          <div class="controls">
+            <select id="enroll-filter" class="filter">
+              <option value="">All statuses</option>
+              <option value="pending">Pending</option>
+              <option value="active">Active</option>
+              <option value="consumed">Consumed</option>
+              <option value="revoked">Revoked</option>
+            </select>
+            <button id="enroll-create" class="primary">New enrollment</button>
+            <button id="enroll-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <p id="enroll-msg" class="msg" hidden></p>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Status</th>
+              <th>Registered</th>
+              <th>Consumed</th>
+              <th>Fingerprint</th>
+            </tr>
+          </thead>
+          <tbody id="enroll-tbody"></tbody>
+        </table>
+      </section>
+
+      <section id="section-audit" class="section" hidden>
+        <div class="section-head">
+          <h2>Audit log</h2>
+          <div class="controls">
+            <button id="audit-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <p id="audit-msg" class="msg" hidden></p>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Fingerprint</th>
+              <th>IP</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </section>
+
+      <section id="section-logs" class="section" hidden>
+        <div class="section-head">
+          <h2>Logs</h2>
+          <div class="controls">
+            <span id="logs-status" class="conn-status">disconnected</span>
+            <select id="logs-level" class="ghost">
+              <option value="">All levels</option>
+              <option value="ERROR">Error</option>
+              <option value="WARNING">Warning</option>
+              <option value="INFO">Info</option>
+              <option value="DEBUG">Debug</option>
+              <option value="LOG">Log</option>
+            </select>
+            <input id="logs-search" class="search" type="search" placeholder="Filter text&hellip;" />
+            <button id="logs-pause" class="ghost">Pause</button>
+            <button id="logs-clear" class="ghost">Clear</button>
+          </div>
+        </div>
+        <p id="logs-msg" class="msg" hidden></p>
+        <div id="logs-pane" class="logs-pane" role="log" aria-live="polite"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Enrollment creation modal -->
+  <div id="enroll-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-enroll-close="1"></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="enroll-modal-title">
+      <header class="modal-head">
+        <h3 id="enroll-modal-title">New mobile enrollment</h3>
+        <button class="icon-btn" data-enroll-close="1" aria-label="Close">&times;</button>
+      </header>
+
+      <form id="enroll-form" class="modal-body" autocomplete="off">
+        <label for="enroll-username">Username</label>
+        <input id="enroll-username" name="username" type="text" required>
+
+        <label for="enroll-passphrase">Passphrase</label>
+        <input id="enroll-passphrase" name="passphrase" type="password"
+               minlength="8" required
+               placeholder="Encrypts the package (min 8 chars)">
+        <p class="hint">Share this passphrase with the enrollee out-of-band; it
+          decrypts the QR package on their device.</p>
+
+        <label for="enroll-server-host">Server host</label>
+        <select id="enroll-server-host" name="server_host"></select>
+        <p class="hint">The address the enrollee's device connects to. Only
+          names/IPs present on the server certificate are offered, so the TLS
+          handshake will validate.</p>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="enroll-fullname">Full name <span class="opt">(optional)</span></label>
+            <input id="enroll-fullname" name="full_name" type="text">
+          </div>
+          <div class="field">
+            <label for="enroll-email">Email <span class="opt">(optional)</span></label>
+            <input id="enroll-email" name="email" type="email">
+          </div>
+        </div>
+
+        <label for="enroll-expiry">Expires in (days)</label>
+        <input id="enroll-expiry" name="expiry_days" type="number"
+               min="1" max="730" value="365">
+
+        <p id="enroll-form-error" class="error" role="alert" hidden></p>
+        <div class="modal-actions">
+          <button type="button" class="ghost" data-enroll-close="1">Cancel</button>
+          <button type="submit" id="enroll-submit" class="primary">Generate</button>
+        </div>
+      </form>
+
+      <div id="enroll-result" class="modal-body" hidden>
+        <div class="qr-wrap" id="enroll-qr"></div>
+        <dl class="detail">
+          <dt>Username</dt><dd id="enroll-result-user" class="mono"></dd>
+          <dt>Fingerprint</dt><dd id="enroll-result-fp" class="mono"></dd>
+          <dt>Expires</dt><dd id="enroll-result-expiry"></dd>
+        </dl>
+        <p class="hint">Scan the QR with the Cryptic mobile app, or copy the
+          package below. It is shown once — regenerate if lost.</p>
+        <div class="modal-actions">
+          <button type="button" id="enroll-copy" class="ghost">Copy package</button>
+          <button type="button" id="enroll-done" class="primary">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- User detail drawer -->
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawer-backdrop" data-close="1"></div>
+    <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <header class="drawer-head">
+        <h3 id="drawer-title">User</h3>
+        <button class="icon-btn" data-close="1" aria-label="Close">&times;</button>
+      </header>
+      <div id="drawer-body" class="drawer-body"></div>
+      <footer id="drawer-actions" class="drawer-actions"></footer>
+    </aside>
+  </div>
+
+  <script src="/admin/vendor/qrcode.js"></script>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

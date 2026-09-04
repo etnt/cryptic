@@ -22,29 +22,72 @@ if [ ! -f "${DIR}/serial" ]; then
 fi
 
 DNS_SANS=""
-printf "Enter DNS Subject Alternative Name (SAN) - press Enter to skip\nDNS names (comma-separated): "
-read DNS_SANS
+# Prefer the CRYPTIC_CERT_DNS_SANS env var (used by the container entrypoint so
+# certificate generation is fully non-interactive). Only fall back to an
+# interactive prompt when connected to a TTY; on EOF/no TTY we skip silently.
+if [ -n "${CRYPTIC_CERT_DNS_SANS:-}" ]; then
+    DNS_SANS="${CRYPTIC_CERT_DNS_SANS}"
+    echo "Using DNS SANs from CRYPTIC_CERT_DNS_SANS: ${DNS_SANS}"
+elif [ -t 0 ]; then
+    printf "Enter DNS Subject Alternative Name (SAN) - press Enter to skip\nDNS names (comma-separated): "
+    read DNS_SANS || DNS_SANS=""
+fi
 
-# Build SAN string for OpenSSL config file format (DNS.3 = hostname, DNS.4 = hostname, ...)
+# Extra IP-address SANs (comma-separated). RFC 6125 / 5280 require raw IP
+# literals to appear as iPAddress SANs (IP.N), not dNSName SANs, or strict
+# TLS clients reject the certificate.
+IP_SANS="${CRYPTIC_CERT_IP_SANS:-}"
+
+# Detect whether a value is an IP literal (IPv4 dotted-quad or IPv6 with ':').
+# Anything matching is emitted as IP.N so operators can list IPs in either
+# CRYPTIC_CERT_DNS_SANS or CRYPTIC_CERT_IP_SANS and still get a valid cert.
+is_ip_addr() {
+    case "$1" in
+        *:*) return 0 ;;          # IPv6 (contains a colon)
+        *[!0-9.]*) return 1 ;;    # contains a non-digit/non-dot -> not IPv4
+        *.*.*.*) return 0 ;;      # dotted quad
+        *) return 1 ;;
+    esac
+}
+
+# Build SAN string for OpenSSL config file format. DNS.1/DNS.2 and IP.1/IP.2
+# already live in the base config, so extra entries start at index 3.
 SAN_LINES=""
-if [ -n "$DNS_SANS" ]; then
-    # Convert comma-separated DNS names to OpenSSL config format
-    # Start from DNS.3 (DNS.1 and DNS.2 are already in the config)
-    INDEX=3
-    # POSIX-compatible: use echo and tr instead of bash arrays
-    for name in $(echo "$DNS_SANS" | tr ',' ' '); do
-        # Trim whitespace
-        name=$(echo "$name" | xargs)
-        if [ -n "$name" ]; then
-            if [ -n "$SAN_LINES" ]; then
-                SAN_LINES="${SAN_LINES}
-                DNS.$INDEX = $name"
-            else
-                SAN_LINES="DNS.$INDEX = $name"
-            fi
-            INDEX=$((INDEX + 1))
-        fi
-    done
+DNS_INDEX=3
+IP_INDEX=3
+
+append_san_line() {
+    if [ -n "$SAN_LINES" ]; then
+        SAN_LINES="${SAN_LINES}
+$1"
+    else
+        SAN_LINES="$1"
+    fi
+}
+
+add_san_entry() {
+    entry=$(echo "$1" | xargs)
+    [ -z "$entry" ] && return 0
+    if is_ip_addr "$entry"; then
+        append_san_line "IP.$IP_INDEX = $entry"
+        IP_INDEX=$((IP_INDEX + 1))
+    else
+        append_san_line "DNS.$DNS_INDEX = $entry"
+        DNS_INDEX=$((DNS_INDEX + 1))
+    fi
+}
+
+# POSIX-compatible: use echo and tr instead of bash arrays.
+for name in $(echo "$DNS_SANS" | tr ',' ' '); do
+    add_san_entry "$name"
+done
+for ip in $(echo "$IP_SANS" | tr ',' ' '); do
+    add_san_entry "$ip"
+done
+
+if [ -n "$SAN_LINES" ]; then
+    echo "Adding Subject Alternative Names:"
+    echo "$SAN_LINES" | sed 's/^/   /'
 fi
 
 # Find openssl.cnf - check multiple locations

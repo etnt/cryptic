@@ -70,6 +70,12 @@ _checkouts/
 # gunsmoke directory
 gunsmoke/
 
+# Sibling TUI project (dangling relative symlink, not needed in server image)
+cryptic-tui
+
+# Sibling mobile project (dangling relative symlink, not needed in server image)
+cryptic-mobile
+
 # Local config overrides
 config/local.config
 

@@ -601,9 +601,19 @@ handle_info(
     {websocket_message, #{<<"type">> := <<"welcome">>} = _Message},
     State
 ) ->
-    %% We have been disconnected and reconnected - need to re-request pending messages
-    ?dbg("Received welcome message - re-requesting pending messages~n", []),
-    {ok, UpdatedState} = request_pending_messages(State),
+    %% We have been disconnected and reconnected - need to re-upload keys
+    %% (server stores key bundles in ETS which is lost on restart)
+    %% and re-request pending messages
+    ?dbg("Received welcome message - re-uploading keys and requesting pending messages~n", []),
+    State1 = case upload_identity_keys(State) of
+        {ok, S1} -> S1;
+        {error, _} -> State
+    end,
+    State2 = case upload_prekey_bundle(State1) of
+        {ok, S2} -> S2;
+        {error, _} -> State1
+    end,
+    {ok, UpdatedState} = request_pending_messages(State2),
     {noreply, UpdatedState};
 %%
 handle_info(
@@ -913,6 +923,10 @@ l2b(B) when is_binary(B) -> B.
 %% @private
 log_error(FormatString, Args, State) ->
     log(error, FormatString, Args, State).
+
+%% @private
+log_warning(FormatString, Args, State) ->
+    log(warning, FormatString, Args, State).
 
 %% @private
 log_info(FormatString, Args, State) ->
@@ -1825,6 +1839,8 @@ handle_incoming_encrypted_message(FromUsername, MessagePayload, State) when
             of
                 {ok, UpdatedState} ->
                     {ok, UpdatedState};
+                {error, Reason, UpdatedState} ->
+                    {error, Reason, UpdatedState};
                 {error, Reason} ->
                     {error, Reason, State}
             end;
@@ -2040,6 +2056,32 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
                             deliver_message_to_ui_async(
                                 FromUsername, Plaintext, FinalState
                             );
+                        {error, {authentication_failed, _} = Reason} ->
+                            % Stale session from disk - reset and request re-keying
+                            log_warning(
+                                "Stale session detected for ~s (auth failed on disk session). "
+                                "Resetting session to allow fresh X3DH key exchange.",
+                                [FromUsername],
+                                UpdatedState
+                            ),
+                            ResetState = terminate_session_with_peer(
+                                FromUsername, RatchetEnginePid, UpdatedState
+                            ),
+                            % Notify UI about the session reset
+                            CallbackMod1 = ResetState#cryptic_engine_state.callback_module,
+                            Ctx1 = ResetState#cryptic_engine_state.callback_context,
+                            SystemMsg1 = iolist_to_binary(io_lib:format(
+                                "Session with ~s was out of sync and has been reset. "
+                                "Please ask them to resend their message.",
+                                [FromUsername]
+                            )),
+                            FinalResetState = case CallbackMod1:system_message(SystemMsg1, Ctx1) of
+                                {ok, NewCtx1} ->
+                                    ResetState#cryptic_engine_state{callback_context = NewCtx1};
+                                _ ->
+                                    ResetState
+                            end,
+                            {error, Reason, FinalResetState};
                         {error, Reason} ->
                             log_error(
                                 "Failed to decrypt ratchet message from ~s after loading session: ~p",
@@ -2077,6 +2119,32 @@ handle_ratchet_message_async(FromUsername, MessagePayload, State) ->
                     deliver_message_to_ui_async(
                         FromUsername, Plaintext, UpdatedState
                     );
+                {error, {authentication_failed, _} = Reason} ->
+                    % Session is out of sync - reset and request re-keying
+                    log_warning(
+                        "Session with ~s is out of sync (auth failed). "
+                        "Resetting session to allow fresh X3DH key exchange.",
+                        [FromUsername],
+                        State
+                    ),
+                    ResetState = terminate_session_with_peer(
+                        FromUsername, RatchetEnginePid, State
+                    ),
+                    % Notify UI about the session reset
+                    CallbackMod2 = ResetState#cryptic_engine_state.callback_module,
+                    Ctx2 = ResetState#cryptic_engine_state.callback_context,
+                    SystemMsg2 = iolist_to_binary(io_lib:format(
+                        "Session with ~s was out of sync and has been reset. "
+                        "Please ask them to resend their message.",
+                        [FromUsername]
+                    )),
+                    FinalResetState2 = case CallbackMod2:system_message(SystemMsg2, Ctx2) of
+                        {ok, NewCtx2} ->
+                            ResetState#cryptic_engine_state{callback_context = NewCtx2};
+                        _ ->
+                            ResetState
+                    end,
+                    {error, Reason, FinalResetState2};
                 {error, Reason} ->
                     log_error(
                         "Failed to decrypt ratchet message from ~s: ~p",
@@ -2217,8 +2285,10 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
             maps:get(<<"metadata">>, MessagePayload)
         ),
 
-        % Decode metadata to extract sender identity and other info
-        Metadata = erlang:binary_to_term(EncodedMetadata),
+        % Decode metadata - try ETF first, then JSON for mobile clients
+        {Metadata, MetadataFormat} = decode_x3dh_metadata(EncodedMetadata),
+        ?dbg("Decoded X3DH metadata (format: ~p): ~p~n", [MetadataFormat, Metadata]),
+        
         SenderIdPub = maps:get(sender_identity_sign_public, Metadata),
 
         % Extract receiver keys from state
@@ -2262,6 +2332,8 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
 
                 MessageBlob = #{
                     metadata => Metadata,
+                    metadata_bytes => EncodedMetadata,  % Original bytes for signature verification
+                    metadata_format => MetadataFormat,   % 'etf' or 'json'
                     signature => Signature,
                     ciphertext => Ciphertext,
                     nonce => Nonce
@@ -2341,6 +2413,41 @@ initialize_receiver_session_from_x3dh(FromUsername, MessagePayload, State) ->
             ),
             {error, {exception, ErrorClass, ErrorReason}}
     end.
+
+%% @private
+%% @doc Decode X3DH metadata from either ETF (Erlang clients) or JSON (mobile clients)
+%% Returns {Metadata, Format} where Format is 'etf' or 'json'
+decode_x3dh_metadata(EncodedMetadata) ->
+    % Try ETF first (Erlang native format)
+    try
+        EtfMetadata = erlang:binary_to_term(EncodedMetadata),
+        {EtfMetadata, etf}
+    catch
+        error:badarg ->
+            % Try JSON (mobile client format)
+            JsonMap = jsx:decode(EncodedMetadata, [return_maps]),
+            JsonMetadata = convert_json_metadata_to_erlang(JsonMap),
+            {JsonMetadata, json}
+    end.
+
+%% @private
+%% @doc Convert JSON metadata map with binary keys to Erlang metadata with atom keys
+convert_json_metadata_to_erlang(JsonMap) ->
+    #{
+        version => maps:get(<<"version">>, JsonMap),
+        type => maps:get(<<"type">>, JsonMap),
+        sender_id => base64:decode(maps:get(<<"sender_id">>, JsonMap)),
+        sender_identity_dh_public => base64:decode(maps:get(<<"sender_identity_dh_public">>, JsonMap)),
+        sender_identity_sign_public => base64:decode(maps:get(<<"sender_identity_sign_public">>, JsonMap)),
+        recipient_id => base64:decode(maps:get(<<"recipient_id">>, JsonMap)),
+        ephemeral_public => base64:decode(maps:get(<<"ephemeral_public">>, JsonMap)),
+        otpk_id => case maps:get(<<"otpk_id">>, JsonMap, null) of
+            null -> undefined;
+            OtpkIdB64 -> base64:decode(OtpkIdB64)
+        end,
+        message_id => base64:decode(maps:get(<<"message_id">>, JsonMap)),
+        timestamp => maps:get(<<"timestamp">>, JsonMap)
+    }.
 
 %% @private
 %% @doc Initialize ratchet session as receiver after X3DH

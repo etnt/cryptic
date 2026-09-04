@@ -11,7 +11,8 @@ services:
 
     # Port mapping
     ports:
-      - "8443:8443"
+      - "8443:8443"   # WebSocket mTLS (client protocol)
+      - "8444:8444"   # Web admin HTTPS
 
     # Environment variables (override Dockerfile defaults if needed)
     environment:
@@ -24,15 +25,42 @@ services:
       # Optional: Enable debug logging (set to "true" for verbose output)
       - CRYPTIC_DEBUG=true
 
+      # --- Web administration endpoint ---
+      - CRYPTIC_WEBADMIN_ENABLED=true
+      - CRYPTIC_WEBADMIN_PORT=8444
+
+      # --- Initial admin bootstrap (runs once, only if no admin exists) ---
+      # Username for the seeded account (default: admin)
+      - CRYPTIC_ADMIN_USER=${CRYPTIC_ADMIN_USER:-admin}
+      # Preferred: point at a mounted, read-only hash record produced offline by
+      #   scripts/cryptic-hash-admin-password.escript  (no plaintext in the container).
+      #   Uncomment the matching secret mount below.
+      - CRYPTIC_ADMIN_PASSWORD_HASH_FILE=/run/secrets/cryptic_admin_hash
+      #   password change on first login.
+      # - CRYPTIC_ADMIN_PASSWORD_FILE=/run/secrets/cryptic_admin_password
+      # Discouraged: plaintext via env (leave empty to let the server generate a
+      #   random password and print it once to the log on first boot).
+      - CRYPTIC_ADMIN_PASSWORD=${CRYPTIC_ADMIN_PASSWORD:-}
+
     # Volume mounts for certificates and persistent data
     volumes:
       # Single mount point for all server data (priv/, logs/, data/)
+      # Certificates are auto-generated here on first run and persist across restarts.
       # Note: /opt/cryptic contains Erlang release, so mount to subdirectory
       - ./server_data:/opt/cryptic/server_data:rw
 
-      # Shared GPG keyring - allows GPG key generation inside container
-      # Keys generated in container are available on host and vice versa
-      - ${HOME}/.gnupg:/home/cryptic/.gnupg:rw
+      # CA SQLite DB lives on a named volume (ext4 inside the podman VM), NOT on the
+      # macOS virtiofs bind mount above. Running SQLite over virtiofs corrupts the DB
+      # (recurring SQLITE_NOTADB / zeroed header). This nested mount shadows
+      # server_data/data so only the CA DB directory moves; priv/ssl (CA key/cert)
+      # and logs/ stay on the bind mount.
+      - cryptic-ca-data:/opt/cryptic/server_data/data
+
+      # Optional admin credential secrets (uncomment together with the matching
+      # CRYPTIC_ADMIN_PASSWORD_*_FILE env var above):
+      # - ./secrets/admin_hash:/run/secrets/cryptic_admin_hash:ro
+      - ./secrets/admin_hash:/run/secrets/cryptic_admin_hash:ro
+      # - ./secrets/admin_password:/run/secrets/cryptic_admin_password:ro
 
     # Restart policy
     restart: unless-stopped
@@ -41,9 +69,11 @@ services:
     networks:
       - cryptic-network
 
-    # Health check
+    # Health check (WebSocket port + web admin port)
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8443"]
+      test:
+        - CMD-SHELL
+        - "nc -z localhost 8443 && nc -z localhost 8444"
       interval: 30s
       timeout: 3s
       retries: 3

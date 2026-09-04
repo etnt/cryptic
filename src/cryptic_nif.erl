@@ -57,7 +57,8 @@
     ed25519_sk_to_x25519_sk/1,
     ed25519_pk_to_x25519_pk/1,
     kdf_derive/4,
-    hkdf_sha256/4
+    hkdf_sha256/4,
+    argon2id_raw/6
 ]).
 
 -on_load(init/0).
@@ -434,4 +435,38 @@ kdf_derive(_Length, _SubkeyId, _Context, _MasterKey) ->
 %% @returns Derived key material of specified length
 %% @throws {error, atom()} | {nif_not_loaded, atom()}
 hkdf_sha256(_IKM, _Salt, _Info, _Length) ->
+    erlang:nif_error({nif_not_loaded, ?MODULE}).
+
+%% @doc Derive raw key material using Argon2id (libargon2)
+%%
+%% Computes an Argon2id (version 1.3) hash with a fully configurable parameter
+%% set. Unlike a general password-hashing helper, this exposes `Parallelism'
+%% because the enrollment package format produced by `bin/cryptic-onboard'
+%% uses the `argon2' CLI with a lane count of 4, which the libsodium
+%% high-level `crypto_pwhash' API cannot reproduce.
+%%
+%% == Usage ==
+%%
+%% ```
+%% %% Mirrors: argon2 <Salt> -id -t 3 -m 16 -p 4 -l 64 -r
+%% Derived = cryptic_nif:argon2id_raw(Passphrase, Salt, 3, 65536, 4, 64).
+%% '''
+%%
+%% == Parameters ==
+%%
+%% <ul>
+%%   <li>`MemoryKiB' is the memory cost in kibibytes. The CLI `-m N' flag
+%%       corresponds to `2^N' KiB, so `-m 16' means pass `65536'.</li>
+%%   <li>`Salt' is used verbatim as the Argon2 salt (must be &gt;= 8 bytes).</li>
+%% </ul>
+%%
+%% @param Password The secret input (binary)
+%% @param Salt The salt bytes (binary, at least 8 bytes)
+%% @param TimeCost Number of iterations (&gt;= 1)
+%% @param MemoryKiB Memory cost in kibibytes
+%% @param Parallelism Number of lanes/threads (&gt;= 1)
+%% @param HashLen Length of the derived output in bytes (4-1024)
+%% @returns Raw derived key material of `HashLen' bytes
+%% @throws {error, atom()} | {nif_not_loaded, atom()}
+argon2id_raw(_Password, _Salt, _TimeCost, _MemoryKiB, _Parallelism, _HashLen) ->
     erlang:nif_error({nif_not_loaded, ?MODULE}).

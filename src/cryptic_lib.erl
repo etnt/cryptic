@@ -521,16 +521,15 @@ list_users() ->
     [Username || {Username, _Timestamp} <- ets:tab2list(?USER_TABLE)].
 
 %% @doc Get all messages for a user, then remove them from the store.
+%% Messages are returned in insertion order (sorted by monotonic message ID).
 -spec get_messages(string()) -> [map()].
 get_messages(Username) ->
-    [
-        begin
-            ets:delete(?MESSAGE_TABLE, Id),
-            MessageBlob
-        end
-     || {Id, ToUser, MessageBlob} <- ets:tab2list(?MESSAGE_TABLE),
-        ToUser == Username
-    ].
+    Matching = [{Id, MessageBlob}
+                || {Id, ToUser, MessageBlob} <- ets:tab2list(?MESSAGE_TABLE),
+                   ToUser == Username],
+    Sorted = lists:keysort(1, Matching),
+    [begin ets:delete(?MESSAGE_TABLE, Id), Blob end
+     || {Id, Blob} <- Sorted].
 
 %%%===================================================================
 %%% Key Management Functions
@@ -1460,7 +1459,11 @@ x3dh_receiver_decrypt(
         %% This ensures we verify against exactly what Alice signed
 
         %% Verify message signature using complete metadata
-        MetadataBin = erlang:term_to_binary(CompleteMetadata),
+        %% Use original metadata bytes if available (for mobile clients with JSON format)
+        MetadataBin = case maps:get(metadata_bytes, MessageBlob, undefined) of
+            undefined -> erlang:term_to_binary(CompleteMetadata);
+            OriginalBytes -> OriginalBytes
+        end,
         ?dbg("X3DH signature verification - Complete Metadata map: ~p", [
             CompleteMetadata
         ]),
@@ -1580,7 +1583,11 @@ x3dh_receiver_decrypt_with_session_key(
         } = Metadata,
 
         %% Verify message signature (use provided SenderIdPub parameter)
-        MetadataBin = erlang:term_to_binary(Metadata),
+        %% Use original metadata bytes if available (for mobile clients with JSON format)
+        MetadataBin = case maps:get(metadata_bytes, MessageBlob, undefined) of
+            undefined -> erlang:term_to_binary(Metadata);
+            OriginalBytes -> OriginalBytes
+        end,
         case verify_signature(MetadataBin, Signature, SenderIdPub) of
             false ->
                 {error, invalid_message_signature};

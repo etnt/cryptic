@@ -264,7 +264,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, start_mcp/1]).
 
 %% gen_server callbacks
 -export([
@@ -296,6 +296,14 @@
 %% @returns {ok, Pid} if successful, {error, Reason} if startup fails
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+%% @doc Start the MCP admin HTTP endpoint on localhost.
+%% Can be called after the server has booted, e.g. from the shell or a startup script.
+-spec start_mcp(non_neg_integer()) -> {ok, started} | {error, term()}.
+start_mcp(Port) when is_integer(Port) ->
+    application:set_env(cryptic, mcp_tcp_enabled, true),
+    application:set_env(cryptic, mcp_tcp_port, Port),
+    start_mcp_localhost_tcp(#{port => Port}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -385,6 +393,51 @@ continue(CfgMap) ->
             ?info("WebSocket mTLS server disabled~n", [])
     end,
 
+    %% Optional localhost-only MCP admin HTTP endpoint (plain TCP)
+    MCPEnabled =
+        case application:get_env(cryptic, mcp_tcp_enabled) of
+            {ok, true} -> true;
+            undefined -> false;
+            _ -> false
+        end,
+    case MCPEnabled of
+        true ->
+            MCPPort =
+                case application:get_env(cryptic, mcp_tcp_port) of
+                    {ok, MCPPort0} -> MCPPort0;
+                    undefined -> 8081
+                end,
+            start_mcp_localhost_tcp(#{port => MCPPort});
+        false ->
+            ?info("MCP localhost TCP endpoint disabled~n", [])
+    end,
+
+    %% Optional web administration HTTPS endpoint (server cert, no client cert).
+    %% Enabled by the CRYPTIC_WEBADMIN_ENABLED env var (containers) or the
+    %% `webadmin_enabled' app env; the env var takes precedence when set.
+    WebAdminEnabled =
+        case os:getenv("CRYPTIC_WEBADMIN_ENABLED") of
+            false ->
+                case application:get_env(cryptic, webadmin_enabled) of
+                    {ok, true} -> true;
+                    _ -> false
+                end;
+            EnvStr ->
+                lists:member(string:lowercase(EnvStr),
+                             ["1", "true", "yes", "on"])
+        end,
+    case WebAdminEnabled of
+        true ->
+            WebAdminPort =
+                case application:get_env(cryptic, webadmin_port) of
+                    {ok, WAPort0} -> WAPort0;
+                    undefined -> 8444
+                end,
+            start_webadmin_https(#{port => WebAdminPort});
+        false ->
+            ?info("Web admin HTTPS endpoint disabled~n", [])
+    end,
+
     {noreply, CfgMap}.
 
 %% @doc Returns the list of ETS table names to create
@@ -463,6 +516,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, _State) ->
     %% Stop WebSocket mTLS server (if it was started)
     catch cowboy:stop_listener(cryptic_ws_listener),
+    catch cowboy:stop_listener(cryptic_mcp_listener),
 
     %% Clean up ETS tables
     [ets:delete(Table) || Table <- ets_tables()],
@@ -578,6 +632,14 @@ start_websocket_mtls(Config) ->
                 operation => status
             }},
 
+            %% Mobile enrollment endpoints
+            {"/ca/v1/mobile-csr", cryptic_ca_mobile_handler, #{
+                operation => mobile_csr
+            }},
+            {"/ca/v1/admin/register-enrollment", cryptic_ca_admin_handler, #{
+                operation => register_enrollment
+            }},
+
             %% Static files
             {"/", cowboy_static, {priv_file, cryptic, "index.html"}}
         ]}
@@ -620,6 +682,211 @@ start_websocket_mtls(Config) ->
     ),
 
     ?info("Cryptic WebSocket server with mTLS started on port ~p~n", [Port]),
+    {ok, started}.
+
+start_mcp_localhost_tcp(Config) ->
+    application:ensure_all_started(cowboy),
+
+    Port =
+        case os:getenv("CRYPTIC_MCP_PORT") of
+            false ->
+                maps:get(port, Config, 8081);
+            PortStr ->
+                list_to_integer(PortStr)
+        end,
+
+    Dispatch = cowboy_router:compile([
+        {'_', [
+            {"/mcp/v1/admin/list_users", cryptic_mcp_admin_handler, #{
+                operation => <<"list_users">>
+            }},
+            {"/mcp/v1/admin/user/:gpg_fp", cryptic_mcp_admin_handler, #{
+                operation => <<"get_user_info">>
+            }},
+            {"/mcp/v1/admin/user/:gpg_fp/certificates", cryptic_mcp_admin_handler, #{
+                operation => <<"list_certificates">>
+            }},
+            {"/mcp/v1/admin/register_user", cryptic_mcp_admin_handler, #{
+                operation => <<"register_user">>
+            }},
+            {"/mcp/v1/admin/suspend_user", cryptic_mcp_admin_handler, #{
+                operation => <<"suspend_user">>
+            }},
+            {"/mcp/v1/admin/revoke_user", cryptic_mcp_admin_handler, #{
+                operation => <<"revoke_user">>
+            }},
+            {"/mcp/v1/admin/reactivate_user", cryptic_mcp_admin_handler, #{
+                operation => <<"reactivate_user">>
+            }},
+            {"/mcp/v1/admin/revoke_certificate", cryptic_mcp_admin_handler, #{
+                operation => <<"revoke_certificate">>
+            }},
+            %% New admin endpoints
+            {"/mcp/v1/admin/status", cryptic_mcp_admin_handler, #{
+                operation => <<"status">>
+            }},
+            {"/mcp/v1/admin/online", cryptic_mcp_admin_handler, #{
+                operation => <<"online">>
+            }},
+            {"/mcp/v1/admin/connections", cryptic_mcp_admin_handler, #{
+                operation => <<"connections">>
+            }},
+            {"/mcp/v1/admin/pending", cryptic_mcp_admin_handler, #{
+                operation => <<"pending">>
+            }},
+            {"/mcp/v1/admin/pending/:user", cryptic_mcp_admin_handler, #{
+                operation => <<"pending_for_user">>
+            }},
+            {"/mcp/v1/admin/keys", cryptic_mcp_admin_handler, #{
+                operation => <<"keys">>
+            }},
+            {"/mcp/v1/admin/keys/:user", cryptic_mcp_admin_handler, #{
+                operation => <<"keys_for_user">>
+            }},
+            {"/mcp/v1/admin/audit", cryptic_mcp_admin_handler, #{
+                operation => <<"audit">>
+            }},
+            {"/mcp/v1/admin/enrollments", cryptic_mcp_admin_handler, #{
+                operation => <<"list_enrollments">>
+            }},
+            {"/mcp/v1/admin/enrollment/:enrollment_fp", cryptic_mcp_admin_handler, #{
+                operation => <<"get_enrollment_info">>
+            }},
+            {"/mcp/v1/admin/register_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"register_enrollment">>
+            }},
+            {"/mcp/v1/admin/suspend_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"suspend_enrollment">>
+            }},
+            {"/mcp/v1/admin/revoke_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"revoke_enrollment">>
+            }},
+            {"/mcp/v1/admin/reactivate_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"reactivate_enrollment">>
+            }},
+            {"/mcp/v1/admin/delete_enrollment", cryptic_mcp_admin_handler, #{
+                operation => <<"delete_enrollment">>
+            }},
+            {"/mcp/v1/admin/server_log", cryptic_mcp_admin_handler, #{
+                operation => <<"server_log">>
+            }}
+        ]}
+    ]),
+
+    ?info("Starting MCP localhost TCP endpoint on 127.0.0.1:~p~n", [Port]),
+    {ok, _} = cowboy:start_clear(
+        cryptic_mcp_listener,
+        [
+            %% Security boundary: bind admin MCP endpoint to localhost only.
+            {ip, {127, 0, 0, 1}},
+            {port, Port}
+        ],
+        #{env => #{dispatch => Dispatch}}
+    ),
+    ?info("MCP localhost TCP endpoint started on 127.0.0.1:~p~n", [Port]),
+    {ok, started}.
+
+%% @doc Start the web administration HTTPS endpoint.
+%%
+%% Serves the web admin single-page shell and its JSON API over TLS using the
+%% server certificate only (no client-certificate/mTLS verification), unlike
+%% the messaging listener. Authentication is handled at the application layer
+%% by {@link cryptic_webadmin_auth_handler} (password login + session cookie).
+start_webadmin_https(Config) ->
+    application:ensure_all_started(cowboy),
+    application:ensure_all_started(ssl),
+
+    Port =
+        case os:getenv("CRYPTIC_WEBADMIN_PORT") of
+            false ->
+                maps:get(port, Config, 8444);
+            PortStr ->
+                list_to_integer(PortStr)
+        end,
+
+    CertFile = cryptic_lib:get_server_file("CRYPTIC_SERVER_CERT",
+                                           server_cert_file),
+    KeyFile = cryptic_lib:get_server_file("CRYPTIC_SERVER_KEY",
+                                          server_key_file),
+
+    Dispatch = cowboy_router:compile([
+        {'_', [
+            %% Authentication API (must precede the static catch-all)
+            {"/admin/api/login", cryptic_webadmin_auth_handler, #{
+                operation => login
+            }},
+            {"/admin/api/logout", cryptic_webadmin_auth_handler, #{
+                operation => logout
+            }},
+            {"/admin/api/session", cryptic_webadmin_auth_handler, #{
+                operation => session
+            }},
+
+            %% Admin REST API (session + CSRF authenticated). Order matters:
+            %% more specific routes precede parameterised ones.
+            {"/admin/api/users", cryptic_webadmin_api_handler, #{
+                operation => users
+            }},
+            {"/admin/api/users/:fp/certs", cryptic_webadmin_api_handler, #{
+                operation => user_certs
+            }},
+            {"/admin/api/users/:fp/suspend", cryptic_webadmin_api_handler, #{
+                operation => user_suspend
+            }},
+            {"/admin/api/users/:fp/reactivate", cryptic_webadmin_api_handler, #{
+                operation => user_reactivate
+            }},
+            {"/admin/api/users/:fp/revoke", cryptic_webadmin_api_handler, #{
+                operation => user_revoke
+            }},
+            {"/admin/api/users/:fp", cryptic_webadmin_api_handler, #{
+                operation => user
+            }},
+            {"/admin/api/enrollments", cryptic_webadmin_api_handler, #{
+                operation => enrollments
+            }},
+            {"/admin/api/enrollments/:fp", cryptic_webadmin_api_handler, #{
+                operation => enrollment
+            }},
+            {"/admin/api/server-hosts", cryptic_webadmin_api_handler, #{
+                operation => server_hosts
+            }},
+            {"/admin/api/audit", cryptic_webadmin_api_handler, #{
+                operation => audit
+            }},
+            {"/admin/api/status", cryptic_webadmin_api_handler, #{
+                operation => status
+            }},
+            {"/admin/api/logs", cryptic_webadmin_api_handler, #{
+                operation => logs
+            }},
+
+            %% Live log stream (session-authenticated WebSocket)
+            {"/admin/ws/logs", cryptic_webadmin_log_ws, #{}},
+
+            %% Single-page shell + static assets
+            {"/admin", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},
+            {"/admin/", cowboy_static, {priv_file, cryptic, "webadmin/index.html"}},
+            {"/admin/[...]", cowboy_static, {priv_dir, cryptic, "webadmin"}}
+        ]}
+    ]),
+
+    %% Server-certificate TLS only. No CA cert, no peer verification: the web
+    %% admin authenticates users with passwords, not client certificates.
+    TLSOptions = [
+        {port, Port},
+        {versions, ['tlsv1.2', 'tlsv1.3']},
+        {certfile, CertFile},
+        {keyfile, KeyFile}
+    ],
+
+    ?info("Starting web admin HTTPS endpoint on port ~p~n", [Port]),
+    {ok, _} = cowboy:start_tls(
+        cryptic_webadmin_listener,
+        TLSOptions,
+        #{env => #{dispatch => Dispatch}}
+    ),
+    ?info("Web admin HTTPS endpoint started on port ~p~n", [Port]),
     {ok, started}.
 
 
