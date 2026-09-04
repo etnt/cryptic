@@ -24,18 +24,18 @@ that enrolls new clients. Users chat from a [mobile client app](https://github.c
 
 ## Quick start: run the server
 
-The server ships as a container image. It exposes ports `8443` (encrypted
-messaging + CA) and `8444` (web admin).
+The server ships as a multi-arch (amd64/arm64) container image. It exposes ports
+`8443` (encrypted messaging + CA) and `8444` (web admin).
 
 ```bash
-# 1. Build the image
-podman build -t cryptic-server:latest -f Dockerfile .
+# 1. Pull the latest release image (or a specific version, e.g. :1.0.0)
+podman pull ghcr.io/etnt/cryptic:latest
 
 # 2. Create an admin password hash (no plaintext in the container)
 # NOTE: change 'CHANGE-ME' below to a proper password!
 mkdir -p server_data secrets
 rm -f secrets/admin_hash
-podman run --rm localhost/cryptic-server:latest \
+podman run --rm ghcr.io/etnt/cryptic:latest \
   cryptic-hash-admin-password 'CHANGE-ME' > secrets/admin_hash
 
 # 3. Run
@@ -48,8 +48,11 @@ podman run -d --name cryptic-server \
   -e CRYPTIC_WEBADMIN_ENABLED=true \
   -e CRYPTIC_ADMIN_PASSWORD_HASH_FILE=/run/secrets/cryptic_admin_hash \
   -e CRYPTIC_PUBLIC_HOST=localhost \
-  localhost/cryptic-server:latest
+  ghcr.io/etnt/cryptic:latest
 ```
+
+Prefer to build it yourself? Replace step 1 with
+`podman build -t ghcr.io/etnt/cryptic:latest -f Dockerfile .`.
 
 Set `CRYPTIC_PUBLIC_HOST` to the address phones actually reach the server on (its
 LAN IP or a DNS name) — it is embedded in enrollment packages and must be covered
