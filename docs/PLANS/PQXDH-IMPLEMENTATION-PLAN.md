@@ -1,7 +1,7 @@
 # PQXDH Implementation Plan for Cryptic
 
 > **Status**: Planning  
-> **Created**: December 2024  
+> **Created**: December 2025 
 > **Target OTP**: 28.1+  
 > **Protocol Reference**: [Signal PQXDH Specification](https://signal.org/docs/specifications/pqxdh/)
 

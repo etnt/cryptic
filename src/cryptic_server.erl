@@ -889,7 +889,6 @@ start_webadmin_https(Config) ->
     ?info("Web admin HTTPS endpoint started on port ~p~n", [Port]),
     {ok, started}.
 
-
 verify_peer(_OtpCert, _DerCert, {bad_cert, _} = Reason, _UserState) ->
     ?debug("VERIFY_PEER: bad_cert - ~p", [Reason]),
     {fail, Reason};
