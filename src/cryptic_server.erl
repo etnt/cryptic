@@ -848,6 +848,9 @@ start_webadmin_https(Config) ->
             {"/admin/api/enrollments/:fp", cryptic_webadmin_api_handler, #{
                 operation => enrollment
             }},
+            {"/admin/api/server-hosts", cryptic_webadmin_api_handler, #{
+                operation => server_hosts
+            }},
             {"/admin/api/audit", cryptic_webadmin_api_handler, #{
                 operation => audit
             }},

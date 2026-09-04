@@ -161,6 +161,12 @@
         <p class="hint">Share this passphrase with the enrollee out-of-band; it
           decrypts the QR package on their device.</p>
 
+        <label for="enroll-server-host">Server host</label>
+        <select id="enroll-server-host" name="server_host"></select>
+        <p class="hint">The address the enrollee's device connects to. Only
+          names/IPs present on the server certificate are offered, so the TLS
+          handshake will validate.</p>
+
         <div class="field-row">
           <div class="field">
             <label for="enroll-fullname">Full name <span class="opt">(optional)</span></label>

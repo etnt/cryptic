@@ -50,9 +50,10 @@
 %% @since August 2026
 -module(cryptic_enrollment_pkg).
 
--export([create/1]).
+-export([create/1, server_cert_sans/0]).
 
 -include("cryptic_ca.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 %% Argon2id parameters — must match bin/cryptic-onboard (`-id -t 3 -m 16 -p 4 -l 64').
 -define(ARGON2_TIME_COST, 3).
@@ -99,6 +100,16 @@ create(#{db_ref := DbRef,
          ip := Ip} = Params) ->
     Expiry = clamp_expiry(maps:get(expiry_seconds, Params, ?DEFAULT_EXPIRY_SECONDS)),
 
+    %% 0. The server_host baked into the package must be covered by a SAN on the
+    %% messaging server certificate, or the mobile client's TLS handshake fails.
+    case validate_server_host(server_host(Params)) of
+        ok ->
+            create_validated(DbRef, Username, Passphrase, ActorId, Ip, Expiry, Params);
+        {error, _} = Err ->
+            Err
+    end.
+
+create_validated(DbRef, Username, Passphrase, ActorId, Ip, Expiry, Params) ->
     %% 1. Fresh Ed25519 enrollment keypair.
     {PubRaw, SeedRaw} = crypto:generate_key(eddsa, ed25519),
     %% Store the secret as a PKCS#8 DER PrivateKeyInfo, byte-identical to what
@@ -264,7 +275,122 @@ server_port(Params) ->
             end
     end.
 
--spec clamp_expiry(term()) -> pos_integer().
+%%====================================================================
+%% Internal: server certificate SAN validation
+%%====================================================================
+
+%% @doc Return the Subject Alternative Names on the messaging server
+%% certificate as a list of binaries (DNS names and IP literals). Used both to
+%% validate enrollment `server_host' values and to populate the web-admin host
+%% picker. Returns `{error, Reason}' if the certificate cannot be read/parsed.
+-spec server_cert_sans() -> {ok, [binary()]} | {error, term()}.
+server_cert_sans() ->
+    case cryptic_lib:get_server_file("CRYPTIC_SERVER_CERT", server_cert_file) of
+        undefined ->
+            {error, no_server_cert};
+        File ->
+            case file:read_file(File) of
+                {ok, Pem} ->
+                    parse_cert_sans(Pem);
+                {error, Reason} ->
+                    {error, {read_failed, Reason}}
+            end
+    end.
+
+-spec parse_cert_sans(binary()) -> {ok, [binary()]} | {error, term()}.
+parse_cert_sans(Pem) ->
+    try
+        case public_key:pem_decode(Pem) of
+            [{'Certificate', Der, _} | _] ->
+                OTPCert = public_key:pkix_decode_cert(Der, otp),
+                {ok, extract_sans(OTPCert)};
+            _ ->
+                {error, no_certificate_in_pem}
+        end
+    catch
+        _:CatchReason ->
+            {error, {cert_parse_failed, CatchReason}}
+    end.
+
+-spec extract_sans(#'OTPCertificate'{}) -> [binary()].
+extract_sans(#'OTPCertificate'{tbsCertificate = TBS}) ->
+    Exts = case TBS#'OTPTBSCertificate'.extensions of
+               asn1_NOVALUE -> [];
+               Es when is_list(Es) -> Es;
+               _ -> []
+           end,
+    case lists:filter(fun(#'Extension'{extnID = ?'id-ce-subjectAltName'}) -> true;
+                         (_) -> false
+                      end, Exts) of
+        [#'Extension'{extnValue = GeneralNames} | _] when is_list(GeneralNames) ->
+            lists:filtermap(fun san_to_binary/1, GeneralNames);
+        _ ->
+            []
+    end.
+
+-spec san_to_binary(term()) -> {true, binary()} | false.
+san_to_binary({dNSName, Name}) ->
+    {true, to_bin(Name)};
+san_to_binary({iPAddress, Ip}) ->
+    case format_ip(iolist_to_binary([Ip])) of
+        <<>> -> false;
+        Bin -> {true, Bin}
+    end;
+san_to_binary(_) ->
+    false.
+
+-spec format_ip(binary()) -> binary().
+format_ip(Bin) when byte_size(Bin) =:= 4 ->
+    <<A, B, C, D>> = Bin,
+    list_to_binary(inet:ntoa({A, B, C, D}));
+format_ip(Bin) when byte_size(Bin) =:= 16 ->
+    Groups = [G || <<G:16>> <= Bin],
+    list_to_binary(inet:ntoa(list_to_tuple(Groups)));
+format_ip(_) ->
+    <<>>.
+
+-spec to_bin(binary() | list()) -> binary().
+to_bin(V) when is_binary(V) -> V;
+to_bin(V) when is_list(V) -> list_to_binary(V).
+
+%% @doc Ensure the requested `server_host' is covered by a certificate SAN.
+%% If the certificate cannot be read we allow the enrollment (fail-open) so a
+%% missing/unreadable cert never blocks provisioning, but log the reason.
+-spec validate_server_host(binary()) -> ok | {error, term()}.
+validate_server_host(Host) ->
+    case server_cert_sans() of
+        {ok, Sans} ->
+            case host_matches_sans(Host, Sans) of
+                true ->
+                    ok;
+                false ->
+                    {error, {server_host_not_in_cert, Host, Sans}}
+            end;
+        {error, Reason} ->
+            error_logger:warning_msg(
+                "cryptic_enrollment_pkg: skipping server_host SAN check "
+                "(cert unavailable: ~p)~n", [Reason]),
+            ok
+    end.
+
+-spec host_matches_sans(binary(), [binary()]) -> boolean().
+host_matches_sans(Host, Sans) ->
+    Lower = string:lowercase(Host),
+    lists:any(fun(San) -> san_matches(Lower, string:lowercase(San)) end, Sans).
+
+%% Exact match, or wildcard SAN (`*.example.com') matching a single label.
+-spec san_matches(binary(), binary()) -> boolean().
+san_matches(Host, Host) ->
+    true;
+san_matches(Host, <<"*.", Suffix/binary>>) ->
+    case binary:split(Host, <<".">>) of
+        [_Label, Rest] -> Rest =:= Suffix;
+        _ -> false
+    end;
+san_matches(_, _) ->
+    false.
+
+
 clamp_expiry(Seconds) when is_integer(Seconds), Seconds >= ?MIN_EXPIRY_SECONDS,
                            Seconds =< ?MAX_EXPIRY_SECONDS ->
     Seconds;

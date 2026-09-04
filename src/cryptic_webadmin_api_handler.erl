@@ -193,6 +193,18 @@ dispatch(enrollment, <<"GET">>, _User, Req) ->
                 error_response(404, Reason, Req)
         end
     end);
+dispatch(server_hosts, <<"GET">>, _User, Req) ->
+    %% Names/IPs the messaging server certificate is valid for, so the admin UI
+    %% can offer a constrained "Server host" picker for new enrollments.
+    Hosts = case cryptic_enrollment_pkg:server_cert_sans() of
+                {ok, Sans} -> Sans;
+                {error, _} -> []
+            end,
+    {200,
+     #{status => <<"ok">>,
+       hosts => Hosts,
+       default => default_server_host()},
+     Req};
 dispatch(audit, <<"GET">>, _User, Req) ->
     with_db(Req, fun(DbRef) ->
         Limit = audit_limit(Req),
@@ -391,6 +403,15 @@ error_response(StatusCode, Reason, Req) ->
 
 to_message(Reason) when is_binary(Reason) -> Reason;
 to_message(Reason) when is_atom(Reason) -> atom_to_binary(Reason, utf8);
+to_message({server_host_not_in_cert, Host, Sans}) ->
+    SanList = case Sans of
+                  [] -> <<"(none)">>;
+                  _ -> iolist_to_binary(lists:join(<<", ">>, Sans))
+              end,
+    iolist_to_binary(
+        [<<"Server host '">>, Host,
+         <<"' is not covered by the server certificate SANs. Valid hosts: ">>,
+         SanList]);
 to_message(Reason) ->
     iolist_to_binary(io_lib:format("~p", [Reason])).
 
@@ -428,4 +449,12 @@ peer_ip(Req) ->
     case inet:ntoa(IpTuple) of
         {error, _} -> <<"unknown">>;
         Str -> list_to_binary(Str)
+    end.
+
+-spec default_server_host() -> binary().
+default_server_host() ->
+    case os:getenv("CRYPTIC_PUBLIC_HOST") of
+        false -> <<>>;
+        "" -> <<>>;
+        Env -> list_to_binary(Env)
     end.

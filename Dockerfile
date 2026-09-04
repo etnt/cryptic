@@ -2,7 +2,7 @@
 # Based on https://github.com/erlang/docker-erlang-example
 
 # Build stage
-FROM erlang:28.1-alpine AS builder
+FROM docker.io/library/erlang:28.1-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -38,7 +38,7 @@ RUN cd c_src && \
 RUN rebar3 as prod release
 
 # Runtime stage - use same Erlang version as builder for consistency
-FROM erlang:28.1-alpine
+FROM docker.io/library/erlang:28.1-alpine
 
 # Install runtime dependencies
 RUN apk add --no-cache \

@@ -28,8 +28,15 @@ echo "  ${CRYPTIC_SERVER_DIR}/logs/                   - Log files"
 # non-interactively (CRYPTIC_CERT_DNS_SANS is honoured by generate-mtls-certs.sh).
 if [ ! -f "${CRYPTIC_SERVER_DIR}/priv/ssl/ca.crt" ] || [ ! -f "${CRYPTIC_SERVER_DIR}/priv/ssl/ca.key" ]; then
     echo "INFO: CA certificates not found - generating a fresh self-signed set..."
+    # The server leaf certificate must carry the hostname(s)/IP(s) that clients
+    # actually connect to, otherwise strict TLS clients reject it. Default the
+    # DNS SANs to the public host (what enrollment packages advertise), falling
+    # back to the bind host. CRYPTIC_CERT_IP_SANS lets operators add raw IPs;
+    # generate-mtls-certs.sh also auto-routes IP literals to iPAddress SANs.
+    CERT_DNS_SANS="${CRYPTIC_CERT_DNS_SANS:-${CRYPTIC_PUBLIC_HOST:-${CRYPTIC_SERVER_HOST}}}"
     if DIR="${CRYPTIC_SERVER_DIR}/priv/ssl" \
-       CRYPTIC_CERT_DNS_SANS="${CRYPTIC_CERT_DNS_SANS:-${CRYPTIC_SERVER_HOST}}" \
+       CRYPTIC_CERT_DNS_SANS="${CERT_DNS_SANS}" \
+       CRYPTIC_CERT_IP_SANS="${CRYPTIC_CERT_IP_SANS:-}" \
        generate-mtls-certs.sh </dev/null; then
         echo "INFO: mTLS certificates generated at ${CRYPTIC_SERVER_DIR}/priv/ssl"
     else
@@ -70,6 +77,7 @@ fi
 exec su-exec cryptic env \
     CRYPTIC_SERVER_HOST="${CRYPTIC_SERVER_HOST}" \
     CRYPTIC_SERVER_PORT="${CRYPTIC_SERVER_PORT}" \
+    CRYPTIC_PUBLIC_HOST="${CRYPTIC_PUBLIC_HOST}" \
     CRYPTIC_SERVER_DIR="${CRYPTIC_SERVER_DIR}" \
     CRYPTIC_CA_DB_FILE="${CRYPTIC_CA_DB_FILE}" \
     CRYPTIC_EVENT_HANDLERS="${CRYPTIC_EVENT_HANDLERS}" \

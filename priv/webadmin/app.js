@@ -311,6 +311,41 @@
 
   const enrollModalState = { lastPackage: null };
 
+  async function populateServerHosts() {
+    const select = el('enroll-server-host');
+    select.innerHTML = '';
+    let hosts = [];
+    let def = '';
+    try {
+      const { ok, data } = await api('/admin/api/server-hosts');
+      if (ok && data && data.status === 'ok') {
+        hosts = Array.isArray(data.hosts) ? data.hosts : [];
+        def = data.default || '';
+      }
+    } catch (_e) { /* fall through to server default */ }
+
+    if (hosts.length === 0) {
+      // No cert SANs readable: let the server fall back to its own default.
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = def
+        ? `Server default (${def})`
+        : 'Server default';
+      select.appendChild(opt);
+      select.disabled = true;
+      return;
+    }
+
+    select.disabled = false;
+    hosts.forEach((h) => {
+      const opt = document.createElement('option');
+      opt.value = h;
+      opt.textContent = h;
+      if (h === def) opt.selected = true;
+      select.appendChild(opt);
+    });
+  }
+
   function openEnrollModal() {
     const form = el('enroll-form');
     form.reset();
@@ -321,6 +356,7 @@
     el('enroll-qr').innerHTML = '';
     enrollModalState.lastPackage = null;
     el('enroll-modal').hidden = false;
+    populateServerHosts();
     el('enroll-username').focus();
   }
 
@@ -361,6 +397,8 @@
     const email = el('enroll-email').value.trim();
     if (fullName) body.full_name = fullName;
     if (email) body.email = email;
+    const serverHost = el('enroll-server-host').value.trim();
+    if (serverHost) body.server_host = serverHost;
     const days = parseInt(el('enroll-expiry').value, 10);
     if (Number.isFinite(days) && days > 0) {
       body.expiry_seconds = days * 86400;
