@@ -726,8 +726,16 @@ handle_command(
             %% This ensures they go through the same processing as real-time messages
             lists:foreach(
                 fun(MessageBlob) ->
-                    %% Extract sender from message blob
-                    From = maps:get(<<"from">>, MessageBlob),
+                    %% Extract sender from message blob. Stored blobs are not
+                    %% key-consistent: ratchet blobs use the binary <<"from">>
+                    %% key, while X3DH blobs use the atom `from` key. Accept
+                    %% either so pending X3DH messages deliver instead of
+                    %% crashing the frame with {badkey,<<"from">>}.
+                    From =
+                        case MessageBlob of
+                            #{<<"from">> := F} -> F;
+                            #{from := F} -> F
+                        end,
 
                     %% Send to self - this will be processed by handle_info
                     self() ! {message, From, MessageBlob}

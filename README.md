@@ -33,10 +33,12 @@ podman pull ghcr.io/etnt/cryptic:latest
 
 # 2. Create an admin password hash (no plaintext in the container)
 # NOTE: change 'CHANGE-ME' below to a proper password!
+# --entrypoint runs the hashing tool directly, so only the hash is written
+# to the file (without it, the container's startup logs get captured too).
 mkdir -p server_data secrets
 rm -f secrets/admin_hash
-podman run --rm ghcr.io/etnt/cryptic:latest \
-  cryptic-hash-admin-password 'CHANGE-ME' > secrets/admin_hash
+podman run --rm --entrypoint cryptic-hash-admin-password \
+  ghcr.io/etnt/cryptic:latest 'CHANGE-ME' > secrets/admin_hash
 
 # 3. Run
 podman run -d --name cryptic-server \
