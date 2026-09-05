@@ -158,6 +158,16 @@
     terminate/3
 ]).
 
+%% WebSocket keepalive tuning.
+%%
+%% The server sends its own ping frames every ?WS_PING_INTERVAL so that
+%% half-dead client sockets (e.g. a backgrounded phone) are detected and
+%% reaped promptly instead of lingering in the connection table. The
+%% idle_timeout must comfortably exceed the ping interval so a healthy
+%% connection is never closed between pings.
+-define(WS_PING_INTERVAL, 30000).   %% send a ping every 30s
+-define(WS_IDLE_TIMEOUT, 75000).    %% close if no frames for 75s
+
 %% @doc HTTP to WebSocket upgrade handler
 %%
 %% This function is called by Cowboy during the HTTP to WebSocket upgrade
@@ -209,7 +219,7 @@ init(Req, State) ->
                 db_ref => DbRef,
                 authenticated => Authenticated,
                 peer_cert => PeerCert
-            }};
+            }, #{idle_timeout => ?WS_IDLE_TIMEOUT}};
         {error, Reason} ->
             ?error("Client certificate authentication failed: ~p", [Reason]),
             Reply = cowboy_req:reply(
@@ -229,6 +239,7 @@ init(Req, State) ->
 websocket_init(State = #{username := Username}) ->
     register_user_connection(Username, self()),
     broadcast_user_status(Username, true),
+    schedule_ping(),
 
     WelcomeMsg = #{
         type => <<"welcome">>,
@@ -396,6 +407,12 @@ websocket_info({message, FromUser, Message}, State = #{username := Username}) ->
 websocket_info({send_text, Data}, State) ->
     %% Generic send - used for broadcasting user_status etc.
     {[{text, Data}], State};
+websocket_info(send_ping, State) ->
+    %% Server-initiated keepalive - probe the client and reschedule.
+    %% A dead socket makes Cowboy fail the send and run terminate/3,
+    %% pruning the stale connection instead of leaving it registered.
+    schedule_ping(),
+    {[ping], State};
 websocket_info(_Info, State) ->
     {[], State}.
 
@@ -1648,10 +1665,10 @@ broadcast_user_status(Username, IsOnline) ->
 %% @param Req The Cowboy request object (ignored)
 %% @param State The WebSocket state containing username information
 %% @returns ok
-terminate(_Reason, _Req, #{username := Username}) ->
+terminate(Reason, _Req, #{username := Username}) ->
     ets:delete(?CONNECTION_TABLE, Username),
     broadcast_user_status(Username, false),
-    ?debug("User ~s disconnected~n", [Username]),
+    ?debug("User ~s disconnected (reason: ~p)~n", [Username, Reason]),
     ok;
 terminate(_Reason, _Req, _State) ->
     ok.
@@ -1659,6 +1676,15 @@ terminate(_Reason, _Req, _State) ->
 %% -------------------------------------------------------------------
 %% H E L P E R S
 %% -------------------------------------------------------------------
+
+%% @doc Schedule the next server-initiated keepalive ping.
+%%
+%% Sends a `send_ping' message to this handler process after
+%% ?WS_PING_INTERVAL milliseconds, handled in websocket_info/2.
+%%
+%% @returns Timer reference (ignored)
+schedule_ping() ->
+    erlang:send_after(?WS_PING_INTERVAL, self(), send_ping).
 
 %% @doc Get username from GPG fingerprint by looking up certificates.
 %%
