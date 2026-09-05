@@ -149,6 +149,8 @@
     get_prekey/1,
     list_users/0,
     get_messages/1,
+    get_pending_messages/1,
+    ack_message/2,
     %% Key management functions
     generate_client_keys/0,
     generate_one_time_prekeys/1,
@@ -530,6 +532,42 @@ get_messages(Username) ->
     Sorted = lists:keysort(1, Matching),
     [begin ets:delete(?MESSAGE_TABLE, Id), Blob end
      || {Id, Blob} <- Sorted].
+
+%% @doc Get all pending messages for a user WITHOUT removing them.
+%% Unlike get_messages/1, entries stay queued until explicitly acknowledged
+%% via ack_message/2, so a message pushed to a client that never confirms
+%% receipt (e.g. a socket that died mid-delivery) is re-delivered on the
+%% next request_pending_messages instead of being lost.
+%% Messages are returned in insertion order (sorted by monotonic message ID).
+-spec get_pending_messages(string()) -> [map()].
+get_pending_messages(Username) ->
+    Matching = [{Id, MessageBlob}
+                || {Id, ToUser, MessageBlob} <- ets:tab2list(?MESSAGE_TABLE),
+                   ToUser == Username],
+    Sorted = lists:keysort(1, Matching),
+    [Blob || {_Id, Blob} <- Sorted].
+
+%% @doc Acknowledge (and delete) stored messages for a user by their
+%% client-supplied message_id. Stored blobs are not key-consistent: ratchet
+%% blobs use the binary <<"message_id">> key while X3DH blobs use the atom
+%% message_id key, so match either. Deletes every queued entry whose
+%% message_id matches (clearing any duplicates from re-transmits). Returns
+%% the number of entries removed (0 if none matched).
+-spec ack_message(string(), binary()) -> non_neg_integer().
+ack_message(Username, MessageId) ->
+    Ids = [Id
+           || {Id, ToUser, Blob} <- ets:tab2list(?MESSAGE_TABLE),
+              ToUser == Username,
+              blob_message_id(Blob) =:= MessageId],
+    lists:foreach(fun(Id) -> ets:delete(?MESSAGE_TABLE, Id) end, Ids),
+    length(Ids).
+
+%% @doc Extract a stored blob's client-supplied message_id, tolerating the
+%% binary-key (ratchet) and atom-key (X3DH) blob shapes.
+-spec blob_message_id(map()) -> binary() | undefined.
+blob_message_id(#{<<"message_id">> := Id}) -> Id;
+blob_message_id(#{message_id := Id}) -> Id;
+blob_message_id(_) -> undefined.
 
 %%%===================================================================
 %%% Key Management Functions

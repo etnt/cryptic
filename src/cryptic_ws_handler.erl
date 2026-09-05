@@ -623,14 +623,19 @@ handle_command(
                 server_timestamp => erlang:system_time(second)
             },
 
-            %% Try to deliver immediately if user is online
+            %% Store the message first so it survives until the recipient
+            %% acknowledges it, then also push it live if they are online.
+            %% Storing unconditionally makes online delivery reliable: a
+            %% message pushed to a socket that is dying (backgrounded phone,
+            %% network drop) is not lost, because the stored copy remains and
+            %% is re-delivered via request_pending_messages until a
+            %% message_ack removes it.
+            store_message(ToUser, MessageBlob),
             case find_user_connection(ToUser) of
                 {ok, Pid} ->
-                    %% User is online - deliver immediately without storing
                     Pid ! {message, Username, MessageBlob};
                 not_found ->
-                    %% User is offline - store message for later retrieval
-                    store_message(ToUser, MessageBlob)
+                    ok
             end,
 
             {reply, #{
@@ -669,14 +674,15 @@ handle_command(
                 <<"server_timestamp">> => erlang:system_time(second)
             },
 
-            %% Try to deliver immediately if user is online
+            %% Store the message first so it survives until the recipient
+            %% acknowledges it, then also push it live if they are online
+            %% (see the X3DH handler above for the rationale).
+            store_message(ToUser, MessageBlob),
             case find_user_connection(ToUser) of
                 {ok, Pid} ->
-                    %% User is online - deliver immediately without storing
                     Pid ! {message, Username, MessageBlob};
                 not_found ->
-                    %% User is offline - store message for later retrieval
-                    store_message(ToUser, MessageBlob)
+                    ok
             end,
 
             %% Extract message_id if present for acknowledgment
@@ -714,6 +720,29 @@ handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
         messages => Messages
     },
     {reply, Response};
+%% @doc Acknowledge receipt of a delivered message.
+%%
+%% The recipient sends this after it has successfully decrypted and
+%% persisted a message. The server removes the stored copy so it is not
+%% re-delivered on reconnect. Until acknowledged, a message stays queued and
+%% is re-delivered via request_pending_messages, which is what makes online
+%% delivery loss-proof. The `message_id' is the same value the sender put in
+%% the x3dh/ratchet blob.
+handle_command(
+    #{<<"type">> := <<"message_ack">>, <<"message_id">> := MessageId},
+    Username,
+    _State
+) ->
+    Removed = cryptic_lib:ack_message(Username, MessageId),
+    ?debug(
+        "message_ack from ~s for ~s (removed ~p queued cop~s)",
+        [Username, MessageId, Removed, case Removed of 1 -> "y"; _ -> "ies" end]
+    ),
+    {reply, #{
+        type => <<"message_ack_ok">>,
+        message_id => MessageId,
+        removed => Removed
+    }};
 %% @doc Handle request for pending messages
 %%
 %% This command is sent by the client when the cryptic_engine is fully
@@ -726,8 +755,10 @@ handle_command(#{<<"type">> := <<"get_messages">>}, Username, _State) ->
 handle_command(
     #{<<"type">> := <<"request_pending_messages">>}, Username, _State
 ) ->
-    %% Fetch pending messages
-    PendingMessages = cryptic_lib:get_messages(Username),
+    %% Fetch pending messages (non-draining: they stay queued until the
+    %% client acknowledges each one with a message_ack, so a delivery that
+    %% never reaches the recipient is retried on the next reconnect).
+    PendingMessages = cryptic_lib:get_pending_messages(Username),
     case PendingMessages of
         [] ->
             %% No pending messages - just acknowledge
