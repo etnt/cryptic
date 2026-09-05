@@ -10,11 +10,13 @@ shutdown, LAN/mobile access, Raspberry Pi) that are easy to get wrong.
 
 ---
 
-## TL;DR
+## Quick summary
 
 ```bash
-# 1. Build the server image
-podman build -t cryptic-server:latest -f Dockerfile .
+# 1. Build the server image (GIT_REF stamps the source revision into the image)
+podman build \
+  --build-arg GIT_REF="$(git describe --tags --always --dirty)" \
+  -t cryptic-server:latest -f Dockerfile .
 
 # 2. Hash an admin password (no plaintext in the container)
 mkdir -p server_data secrets
@@ -43,12 +45,19 @@ podman run -d --name cryptic-server \
 ## 1. Build
 
 ```bash
-podman build -t cryptic-server:latest -f Dockerfile .
+podman build \
+  --build-arg GIT_REF="$(git describe --tags --always --dirty)" \
+  -t cryptic-server:latest -f Dockerfile .
 ```
 
 The image is a multi-stage build (`erlang:28.1-alpine` builder + runtime). The
 resulting image is tagged locally as `localhost/cryptic-server:latest` — always
 use that fully-qualified name in `podman run` to avoid short-name lookups.
+
+The `--build-arg GIT_REF=...` stamps the source revision into the image as an
+OCI label (and a `CRYPTIC_GIT_REF` env var) so you can later tell exactly which
+tag/commit a built image came from — see [section 8](#8-checking-the-image-version).
+It's optional; omit it and the revision records as `unknown`.
 
 ### Base-image short-name errors (fresh podman)
 
@@ -175,6 +184,10 @@ podman healthcheck run cryptic-server
 
 # Verify the public CA cert endpoint
 curl -k https://localhost:8443/ca/v1/ca-cert -o /dev/null -w '%{http_code}\n'
+
+# Which source revision is this image? (see section 8)
+podman image inspect cryptic-server:latest \
+  --format '{{index .Labels "org.opencontainers.image.revision"}}'
 ```
 
 ### Always stop gracefully before removing
@@ -244,7 +257,9 @@ directories.** Never `podman volume rm cryptic-ca-data`, and never pass `-v` to
 cd /path/to/cryptic
 git pull                                    # get the new code
 
-podman build -t cryptic-server:latest -f Dockerfile .
+podman build \
+  --build-arg GIT_REF="$(git describe --tags --always --dirty)" \
+  -t cryptic-server:latest -f Dockerfile .
 podman stop cryptic-server && podman rm cryptic-server   # NOT -v; stop first
 # re-run the exact `podman run -d ...` from section 3 — same volumes & env
 ```
@@ -253,7 +268,8 @@ With compose it's a one-liner (it reuses the same volume + bind mounts):
 
 ```bash
 git pull
-podman compose up -d --build cryptic-server
+GIT_REF="$(git describe --tags --always --dirty)" \
+  podman compose up -d --build cryptic-server
 ```
 
 ### Procedure (published ghcr.io image)
@@ -291,6 +307,48 @@ keys on their own.
 
 ---
 
+## 8. Checking the image version
+
+A local `:latest` tag says nothing about *which* source revision it was built
+from — two builds from different commits produce indistinguishable `:latest`
+images. So the Dockerfile stamps the git revision into every image when you pass
+`--build-arg GIT_REF=...` (see [section 1](#1-build)).
+
+### Read the revision from an image
+
+```bash
+podman image inspect cryptic-server:latest \
+  --format '{{index .Labels "org.opencontainers.image.revision"}}'
+#   → v1.2.0-3-gab12cde        (nearest tag + commits-since + short sha)
+#   → v1.2.0-3-gab12cde-dirty  (…tree had uncommitted changes at build time)
+#   → unknown                  (built without the --build-arg)
+```
+
+`git describe --tags --always --dirty` gives the nearest tag, how many commits
+you are past it, the short SHA, and a `-dirty` suffix if the working tree wasn't
+clean — exactly what you want to know about a running server.
+
+### Read it from a running container
+
+The same value is exposed as an env var, so you can ask a live container without
+inspecting the image:
+
+```bash
+podman exec cryptic-server printenv CRYPTIC_GIT_REF
+```
+
+### Other intrinsic clues (when no revision was stamped)
+
+```bash
+podman image inspect cryptic-server:latest --format '{{.Created}}'   # build time
+```
+
+Note: the app's internal `{vsn, "1.0.0"}` in `src/cryptic.app.src` is a
+hand-maintained release string, **not** the git tag — don't rely on it to
+identify a build.
+
+---
+
 ## Environment variable reference
 
 | Variable | Default | Purpose |
@@ -307,6 +365,7 @@ keys on their own.
 | `CRYPTIC_ADMIN_PASSWORD` | (unset) | Plaintext via env (discouraged; empty ⇒ random) |
 | `CRYPTIC_EVENT_HANDLERS` | `cryptic_file_logger` | Event handler modules |
 | `CRYPTIC_DEBUG` | `false` | Verbose entrypoint + app logging |
+| `CRYPTIC_GIT_REF` | `unknown` | Source revision stamped at build via `--build-arg GIT_REF` (see section 8) |
 
 ---
 

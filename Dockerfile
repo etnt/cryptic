@@ -40,6 +40,17 @@ RUN rebar3 as prod release
 # Runtime stage - use same Erlang version as builder for consistency
 FROM docker.io/library/erlang:28.1-alpine
 
+# Source revision baked into the image so a built container can report exactly
+# which git tag/commit it came from. Pass at build time with:
+#   --build-arg GIT_REF="$(git describe --tags --always --dirty)"
+# Read back at runtime with:
+#   podman image inspect <image> \
+#     --format '{{index .Labels "org.opencontainers.image.revision"}}'
+ARG GIT_REF=unknown
+LABEL org.opencontainers.image.title="cryptic-server" \
+      org.opencontainers.image.revision="${GIT_REF}"
+ENV CRYPTIC_GIT_REF=${GIT_REF}
+
 # Install runtime dependencies
 RUN apk add --no-cache \
     libsodium \

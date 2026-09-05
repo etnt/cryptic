@@ -6,6 +6,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Stamp the image with the source revision. Override on the CLI, e.g.:
+        #   GIT_REF="$(git describe --tags --always --dirty)" podman compose build
+        GIT_REF: ${GIT_REF:-unknown}
     image: cryptic-server:latest
     container_name: cryptic-server
 
