@@ -197,9 +197,89 @@ podman stop cryptic-server && podman rm cryptic-server
 # re-run the `podman run -d ...` from section 3 (CA data persists on the volume)
 ```
 
+See section 6 for the full upgrade procedure and what does/doesn't survive.
+
 ---
 
-## 6. Raspberry Pi 4 (64-bit)
+## 6. Upgrading to a new build (without resetting enrolled users)
+
+The container image bundles a compiled release, so **new `.erl` code needs a
+rebuilt (or re-pulled) image** — restarting the existing container alone won't
+pick up your changes. There's no Erlang hot-code-upgrade wired up (no
+relup/appup), so the path is: get the new image → replace the container →
+reuse the same volumes.
+
+None of the enrollment state lives in the image or the container's writable
+layer, so swapping the container is safe.
+
+### What persists vs. what's ephemeral
+
+**Persisted (survives an image/container swap):**
+- **CA SQLite DB** — enrolled GPG identities, issued client certs, revocations,
+  audit log → the `cryptic-ca-data` **named volume** (`/opt/cryptic/server_data/data`).
+- **CA key/cert + server TLS certs** → `server_data/priv/ssl` (bind mount).
+- **Admin password hash** → `secrets/admin_hash` (bind mount).
+
+**In-memory ETS (lost on every restart — but self-heals):**
+- Uploaded identity keys + prekey bundles → clients **re-upload these on
+  reconnect**, so no re-enrollment is needed.
+- Online-connection table → rebuilt as clients reconnect.
+- **Queued messages for offline users → lost.** Anything not yet delivered does
+  not survive. (Have the recipient reconnect *after* the upgrade so your next
+  message re-queues on the new build.)
+
+mTLS auth keeps working after the swap because it validates against the CA DB +
+CA cert, both on the preserved volumes.
+
+### The golden rule
+
+**Do not delete the `cryptic-ca-data` volume or the `server_data` / `secrets`
+directories.** Never `podman volume rm cryptic-ca-data`, and never pass `-v` to
+`podman rm` (that would remove attached anonymous volumes). Recreating the
+*container* is fine; deleting the *volume* is what wipes accounts.
+
+### Procedure (build-from-source)
+
+```bash
+cd /path/to/cryptic
+git pull                                    # get the new code
+
+podman build -t cryptic-server:latest -f Dockerfile .
+podman stop cryptic-server && podman rm cryptic-server   # NOT -v; stop first
+# re-run the exact `podman run -d ...` from section 3 — same volumes & env
+```
+
+With compose it's a one-liner (it reuses the same volume + bind mounts):
+
+```bash
+git pull
+podman compose up -d --build cryptic-server
+```
+
+### Procedure (published ghcr.io image)
+
+If you run the prebuilt image instead of building locally, the fix has to reach
+the registry first (push → CI republishes `ghcr.io/etnt/cryptic:latest`), then:
+
+```bash
+podman compose pull cryptic-server
+podman compose up -d cryptic-server         # same volumes, new image
+```
+
+### Verify
+
+```bash
+podman compose logs -f cryptic-server       # comes up cleanly, no crash loop
+podman volume ls | grep cryptic-ca-data     # volume still present
+curl -k https://localhost:8443/ca/v1/ca-cert -o /dev/null -w '%{http_code}\n'
+```
+
+Expect brief downtime during the restart; clients reconnect and re-upload their
+keys on their own.
+
+---
+
+## 7. Raspberry Pi 4 (64-bit)
 
 1. Confirm 64-bit OS: `uname -m` → `aarch64` (matches the Dockerfile's NIF flag).
 2. Get the source onto the Pi (`git pull` in its own clone) so it has the
