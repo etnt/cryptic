@@ -1643,8 +1643,9 @@ find_user_connection(Username) ->
             case is_process_alive(Pid) of
                 true -> {ok, Pid};
                 false ->
-                    %% Stale connection entry - clean it up
-                    ets:delete(?CONNECTION_TABLE, Username),
+                    %% Delete only the stale object we looked up. A reconnect
+                    %% may have replaced it with a new PID in the meantime.
+                    ets:delete_object(?CONNECTION_TABLE, {Username, Pid}),
                     ?warning("Cleaned up stale connection for ~s", [Username]),
                     not_found
             end;
@@ -1697,9 +1698,20 @@ broadcast_user_status(Username, IsOnline) ->
 %% @param State The WebSocket state containing username information
 %% @returns ok
 terminate(Reason, _Req, #{username := Username}) ->
-    ets:delete(?CONNECTION_TABLE, Username),
-    broadcast_user_status(Username, false),
-    ?debug("User ~s disconnected (reason: ~p)~n", [Username, Reason]),
+    %% A reconnect can register a replacement socket before this old handler
+    %% terminates. Remove and broadcast offline only if this process still owns
+    %% the username entry; otherwise the replacement remains online.
+    Removed = ets:select_delete(
+        ?CONNECTION_TABLE,
+        [{{Username, self()}, [], [true]}]
+    ),
+    case Removed of
+        1 ->
+            broadcast_user_status(Username, false),
+            ?debug("User ~s disconnected (reason: ~p)~n", [Username, Reason]);
+        0 ->
+            ?debug("Superseded connection for ~s terminated (reason: ~p)~n", [Username, Reason])
+    end,
     ok;
 terminate(_Reason, _Req, _State) ->
     ok.
